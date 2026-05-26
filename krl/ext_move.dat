@@ -1,0 +1,25 @@
+&ACCESS RVP
+&REL 2
+DEFDAT ext_move
+
+   ; BAS 라이브러리 외부 선언
+   EXT BAS (BAS_COMMAND :IN, REAL :IN)
+
+   ; ==============================================
+   ; 사용 변수는 모두 $config.dat에 이미 선언되어 있음
+   ; (이전 담당자가 만든 구조 그대로 사용)
+   ;
+   ; 참조하는 글로벌 변수:
+   ;   robo_motion_index    (INT)
+   ;   robo_motion_type[20] (INT)
+   ;   robo_motion_mode[20] (BOOL)
+   ;   robo_E6POS[20]       (FRAME)        - X,Y,Z,A,B,C
+   ;   robo_E6AXIS[20]      (E6AXIS)       - A1~A6 + E1~E6
+   ;   robo_scram           (BOOL)
+   ;   robo_safety_over     (BOOL)
+   ;   robo_speed_change    (BOOL)
+   ;   robo_acc_speed[6]    (INT)
+   ;   robo_vel_speed[6]    (INT)
+   ; ==============================================
+
+ENDDAT

@@ -1,0 +1,79 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# ---- Virtual environments ----
+venv/
+.venv/
+env/
+ENV/
+
+# ---- IDE / Editor ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Tooling / OS ----
+.claude/
+*.log
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- VisuPick specific ----
+
+# 사용자가 수집한 캘리브레이션 / 픽킹 세션 데이터 (개별 환경, 용량 큼)
+# 저장 구조 예시는 README와 docs/ 참고
+data/
+
+# Zivid SDK 임시 파일
+*.zdf.tmp
+
+# 캘리브레이션 산출물이 다른 경로에 떨어지는 경우
+calibration_result.json
+intrinsics.json
+
+# CAD 파일: 기본은 ignore (용량/라이선스 이슈), cad_models/ 안의 것만 예외 포함
+# (사용자가 직접 모든 CAD 추적 원하면 아래 negation 라인을 더 추가/제거)
+*.stl
+*.STL
+*.obj
+*.OBJ
+*.step
+*.STEP
+!cad_models/**/*.stl
+!cad_models/**/*.STL
+!cad_models/**/*.obj
+!cad_models/**/*.OBJ
+!cad_models/**/*.step
+!cad_models/**/*.STEP
+
+# vidnn 학습 결과/모델 (별도 리포)
+*.pt
+*.onnx
+
+# 환경 변수
+.env
+.env.local
+
+# 메모/노트 (개인용)
+NOTES.md
+TODO.md

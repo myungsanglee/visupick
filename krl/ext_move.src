@@ -1,0 +1,167 @@
+&ACCESS RVP
+&REL 3
+DEF ext_move()
+   ; ==============================================
+   ; 외부 PC에서 C3Bridge를 통해 로봇을 제어하는 프로그램
+   ; (이전 담당자의 robote_jog.src와 동일한 변수 구조 사용)
+   ;
+   ; 사용법:
+   ;   1. 이 프로그램을 SmartPAD에서 선택 후 실행
+   ;   2. 외부 PC에서 robo_E6POS[i] 또는 robo_E6AXIS[i]에 목표 위치 쓰기
+   ;   3. robo_motion_mode[i] (TRUE=E6POS, FALSE=AXIS)
+   ;   4. robo_motion_type[i] 설정 (0=대기, 1=PTP, 2=PTP_REL, 3=LIN, 4=LIN_REL)
+   ;   5. KRL이 자동으로 robo_motion_index 순서대로 이동 실행
+   ;
+   ; 사용 변수 ($config.dat에 이미 선언됨):
+   ;   robo_motion_index (INT)
+   ;   robo_motion_type[20] (INT)
+   ;   robo_motion_mode[20] (BOOL)
+   ;   robo_E6POS[20] (FRAME)
+   ;   robo_E6AXIS[20] (E6AXIS)
+   ;   robo_scram (BOOL)         - 비상정지 (완전 중단)
+   ;   robo_safety_over (BOOL)   - 안전 일시정지 (재개 가능)
+   ;   robo_speed_change (BOOL)
+   ;   robo_acc_speed[6] (INT)
+   ;   robo_vel_speed[6] (INT)
+   ; ==============================================
+
+   INT i
+   i = 0
+
+   robo_scram = FALSE
+   robo_speed_change = FALSE
+   robo_safety_over = FALSE
+
+   ; 인터럽트 정의
+   INTERRUPT DECL 81 WHEN robo_scram DO robo_scram_DEF()
+   INTERRUPT DECL 82 WHEN robo_safety_over DO robo_safety_over_DEF()
+
+   $ADVANCE = 3
+
+   ; 기본 이동 파라미터 초기화 (Base 0 = World, Tool 1 사용)
+   BAS(#BASE, 0)
+   BAS(#TOOL, 1)
+
+   BAS(#VEL_CP, 1)
+   BAS(#ACC_PTP, 10)
+   BAS(#ACC_CP, 100)
+
+   ; 축 속도/가속도: 시작할 때 무조건 50%로 초기화
+   ; (외부에서 robo_vel_speed/acc_speed 쓰고 robo_speed_change=TRUE로 변경 가능)
+   FOR i = 1 TO 6
+      robo_vel_speed[i] = 50
+      robo_acc_speed[i] = 50
+      $VEL_AXIS[i] = robo_vel_speed[i]
+      $ACC_AXIS[i] = robo_acc_speed[i]
+   ENDFOR
+
+   ; 모션 큐 초기화 (이전 담당자처럼 motion_mode도 초기화)
+   FOR i = 1 TO 20
+      robo_motion_mode[i] = FALSE
+      robo_motion_type[i] = 0
+      robo_E6POS[i] = $POS_ACT
+      robo_E6AXIS[i] = $AXIS_ACT
+   ENDFOR
+
+   robo_motion_index = 1
+
+   INTERRUPT ON 81
+   INTERRUPT ON 82
+
+   ; BCO (Block Coincidence)
+   PTP $POS_ACT
+
+   LOOP
+      robo_move()
+   ENDLOOP
+
+END
+
+
+; ---- 큐에서 한 개 모션을 꺼내 실행 ----
+DEF robo_move()
+   INT i
+   CONTINUE
+   WAIT FOR (robo_motion_type[robo_motion_index] <> 0)
+
+   ; 속도 변경 요청 처리
+   IF robo_speed_change THEN
+      FOR i = 1 TO 6
+         $VEL_AXIS[i] = robo_vel_speed[i]
+         $ACC_AXIS[i] = robo_acc_speed[i]
+      ENDFOR
+      robo_speed_change = FALSE
+   ENDIF
+
+   IF robo_motion_mode[robo_motion_index] THEN
+      robo_move_E6POS()
+   ELSE
+      robo_move_AXIS()
+   ENDIF
+
+   robo_motion_type[robo_motion_index] = 0
+   robo_motion_index = robo_motion_index + 1
+
+   IF (robo_motion_index == 21) THEN
+      robo_motion_index = 1
+   ENDIF
+END
+
+
+; ---- 축(AXIS) 좌표계 이동 ----
+DEF robo_move_AXIS()
+   CONTINUE
+   SWITCH robo_motion_type[robo_motion_index]
+      CASE 1
+         IF (($AXIS_ACT.A1 <> robo_E6AXIS[robo_motion_index].A1) OR ($AXIS_ACT.A2 <> robo_E6AXIS[robo_motion_index].A2) OR ($AXIS_ACT.A3 <> robo_E6AXIS[robo_motion_index].A3) OR ($AXIS_ACT.A4 <> robo_E6AXIS[robo_motion_index].A4) OR ($AXIS_ACT.A5 <> robo_E6AXIS[robo_motion_index].A5) OR ($AXIS_ACT.A6 <> robo_E6AXIS[robo_motion_index].A6)) THEN
+            PTP robo_E6AXIS[robo_motion_index]
+         ENDIF
+
+      CASE 2
+         PTP_REL robo_E6AXIS[robo_motion_index]
+   ENDSWITCH
+END
+
+
+; ---- 카르테시안(FRAME) 좌표계 이동 ----
+DEF robo_move_E6POS()
+   CONTINUE
+   SWITCH robo_motion_type[robo_motion_index]
+      CASE 1
+         IF (($POS_ACT.X <> robo_E6POS[robo_motion_index].X) OR ($POS_ACT.Y <> robo_E6POS[robo_motion_index].Y) OR ($POS_ACT.Z <> robo_E6POS[robo_motion_index].Z) OR ($POS_ACT.A <> robo_E6POS[robo_motion_index].A) OR ($POS_ACT.B <> robo_E6POS[robo_motion_index].B) OR ($POS_ACT.C <> robo_E6POS[robo_motion_index].C)) THEN
+            PTP robo_E6POS[robo_motion_index]
+         ENDIF
+
+      CASE 2
+         PTP_REL robo_E6POS[robo_motion_index]
+
+      CASE 3
+         IF (($POS_ACT.X <> robo_E6POS[robo_motion_index].X) OR ($POS_ACT.Y <> robo_E6POS[robo_motion_index].Y) OR ($POS_ACT.Z <> robo_E6POS[robo_motion_index].Z) OR ($POS_ACT.A <> robo_E6POS[robo_motion_index].A) OR ($POS_ACT.B <> robo_E6POS[robo_motion_index].B) OR ($POS_ACT.C <> robo_E6POS[robo_motion_index].C)) THEN
+            LIN robo_E6POS[robo_motion_index]
+         ENDIF
+
+      CASE 4
+         LIN_REL robo_E6POS[robo_motion_index]
+   ENDSWITCH
+END
+
+
+; ---- 비상정지: brake f 후 외부 robo_scram=FALSE로 해제, RESUME으로 현재 모션 취소 ----
+;       (해제 후 큐 비웠으면 LOOP의 WAIT FOR로 돌아가 대기)
+DEF robo_scram_DEF()
+   INTERRUPT OFF 81
+   BRAKE F
+   WAIT FOR (robo_scram == FALSE)
+   INTERRUPT ON 81
+   RESUME
+END
+
+
+; ---- 안전 일시정지: brake f 후 해제되면 RESUME으로 원래 모션 이어서 ----
+DEF robo_safety_over_DEF()
+   INTERRUPT OFF 82
+   BRAKE F
+   WAIT FOR (robo_safety_over == FALSE)
+   INTERRUPT ON 82
+   RESUME
+END

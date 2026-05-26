@@ -1,0 +1,23 @@
+# --- 핵심 GUI / 시각화 ---
+PySide6>=6.5
+pyvista>=0.43
+pyvistaqt>=0.11
+
+# --- 수치 / 비전 ---
+numpy>=1.24
+scipy>=1.10
+opencv-contrib-python>=4.8        # contrib: cv2.ppf_match_3d 모듈 포함
+open3d>=0.17                       # FPFH / ICP / DBSCAN / FGR
+
+# --- 3D 카메라 SDK (사용하는 것만 설치하면 됨) ---
+# Zivid: 정밀(0.1mm). 호환 SDK는 별도로 OS에 설치되어 있어야 함.
+# https://support.zivid.com/latest/api-reference/python.html
+zivid>=2.10
+
+# Intel RealSense (D415 등): 저렴/빠름(~2mm). Linux는 librealsense 시스템 패키지도 필요.
+# https://github.com/IntelRealSense/librealsense
+pyrealsense2>=2.54
+
+# --- (옵션) vidnn YOLO 추론 - bin picking 탭에서 사용 ---
+# 별도 리포지토리. 사용 안 하면 주석 처리.
+# vidnn @ git+https://github.com/<user>/vidnn.git
