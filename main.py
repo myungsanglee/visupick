@@ -33,12 +33,14 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap, QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence
 
 from kuka_robot import KUKARobot
 from camera_factory import create_camera, list_available_camera_names, get_settings_file_filter
+from image_view import ZoomableImageLabel
 from bin_picking_tab import BinPickingTab
 from cad_matching_tab import CADMatchingTab
+from surface_tracking_tab import SurfaceTrackingTab
 from calibration import (
     compute_hand_eye,
     save_calibration_result,
@@ -52,33 +54,19 @@ logger = logging.getLogger(__name__)
 
 
 class ImageViewerMixin:
-    """이미지 표시용 공통 로직 (QLabel에 리사이즈 가능한 이미지 표시)"""
+    """이미지 표시용 공통 로직.
+    `ZoomableImageLabel` 사용 — 휠 줌, 우클릭 드래그 팬, 우더블클릭 리셋."""
 
     def _init_image_viewer(self):
-        self._display_rgb = None
-        self.image_label = QLabel("이미지가 여기에 표시됩니다")
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background-color: #2a2a2a; color: #888;")
-        self.image_label.setMinimumSize(640, 480)
+        self.image_label = ZoomableImageLabel()
 
     def _display_image(self, image: np.ndarray):
-        self._display_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        self._refresh_image()
+        # ZoomableImageLabel 은 BGR 을 받고 내부에서 표시 시점에 RGB 변환한다.
+        self.image_label.set_image(image)
 
     def _refresh_image(self):
-        if self._display_rgb is None:
-            return
-        rgb = self._display_rgb
-        h, w = rgb.shape[:2]
-        label_w = self.image_label.width()
-        label_h = self.image_label.height()
-        if label_w <= 0 or label_h <= 0:
-            return
-        scale = min(label_w / w, label_h / h)
-        new_w, new_h = int(w * scale), int(h * scale)
-        rgb_resized = cv2.resize(rgb, (new_w, new_h))
-        qimage = QImage(rgb_resized.data, new_w, new_h, new_w * 3, QImage.Format_RGB888)
-        self.image_label.setPixmap(QPixmap.fromImage(qimage))
+        # 베이스가 resizeEvent 에서 자동 처리하지만, 탭 전환 등 외부 트리거용 호환 메서드.
+        self.image_label._refresh()
 
 
 class DataCollectionTab(QWidget, ImageViewerMixin):
@@ -966,10 +954,12 @@ class HandEyeCalibrationApp(QMainWindow):
         self.verification_tab = VerificationTab(self)
         self.bin_picking_tab = BinPickingTab(self)
         self.cad_matching_tab = CADMatchingTab(self)
+        self.surface_tracking_tab = SurfaceTrackingTab(self)
         self.tabs.addTab(self.data_tab, "데이터 수집")
         self.tabs.addTab(self.verification_tab, "검증")
         self.tabs.addTab(self.bin_picking_tab, "Bin Picking")
         self.tabs.addTab(self.cad_matching_tab, "CAD 매칭")
+        self.tabs.addTab(self.surface_tracking_tab, "표면 추적")
         main_layout.addWidget(self.tabs)
 
         self.statusBar().showMessage("프로그램 시작됨")
@@ -1006,6 +996,8 @@ class HandEyeCalibrationApp(QMainWindow):
                     self.bin_picking_tab._on_robot_connected()
                 if hasattr(self, "cad_matching_tab"):
                     self.cad_matching_tab._on_robot_connected()
+                if hasattr(self, "surface_tracking_tab"):
+                    self.surface_tracking_tab._on_robot_connected()
             else:
                 self.robot_status.setText("연결 실패")
                 self.robot = None
@@ -1082,7 +1074,7 @@ class HandEyeCalibrationApp(QMainWindow):
     def closeEvent(self, event):
         # PyVista QtInteractor와 살아있는 QTimer가 Qt 위젯 destroy 순서와 꼬여
         # segfault를 내는 케이스가 잦다. 명시적으로 먼저 정리.
-        for tab_attr in ("bin_picking_tab", "cad_matching_tab"):
+        for tab_attr in ("bin_picking_tab", "cad_matching_tab", "surface_tracking_tab"):
             tab = getattr(self, tab_attr, None)
             if tab is None:
                 continue

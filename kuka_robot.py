@@ -499,6 +499,23 @@ class KUKARobot:
             time.sleep(0.2)
         return False
 
+    def has_empty_slot(self) -> bool:
+        """비차단으로 큐에 빈 슬롯(type=0)이 하나라도 있는지 확인.
+        Surface Tracking 같이 KRL 큐를 동적으로 채울 때 GUI를 멈추지 않고 폴링하는 용도."""
+        for slot in range(1, self.QUEUE_SIZE + 1):
+            val = self.client.read_variable(f"robo_motion_type[{slot}]")
+            if val is not None and val.strip() == "0":
+                return True
+        return False
+
+    def is_queue_empty(self) -> bool:
+        """모든 슬롯이 type=0 인지 (모든 모션 종료 + 더 이상 진행 중 모션 없음)."""
+        for slot in range(1, self.QUEUE_SIZE + 1):
+            val = self.client.read_variable(f"robo_motion_type[{slot}]")
+            if val is None or val.strip() != "0":
+                return False
+        return True
+
     # ---- 고수준 이동 메서드 (큐에 추가 후 즉시 반환, 슬롯 번호 반환) ----
 
     def add_move_ptp(self, x: float, y: float, z: float, a: float = 0, b: float = 0, c: float = 0) -> Optional[int]:

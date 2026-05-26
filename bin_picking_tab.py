@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, List, Dict
 
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QShortcut, QKeySequence
+from PySide6.QtGui import QPainter, QPen, QColor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -52,6 +52,7 @@ if VIDNN_PATH not in sys.path:
 from calibration import tcp_to_homogeneous
 from kuka_robot import normalize_robot_mode, is_auto_mode
 from robot_control_mixin import RobotControlMixin
+from image_view import ZoomableImageLabel
 
 logger = logging.getLogger(__name__)
 
@@ -61,225 +62,166 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 
-class DraggableImageLabel(QLabel):
-    """마우스 드래그로 ROI 선택 + 클릭으로 객체 선택 가능한 이미지 라벨"""
+class DraggableImageLabel(ZoomableImageLabel):
+    """마우스 드래그로 ROI 선택 + 클릭으로 객체 선택. 줌(휠)/팬(우클릭)은 베이스가 처리."""
 
     roiChanged = Signal(int, int, int, int)  # x1, y1, x2, y2 (이미지 원본 좌표)
     objectPicked = Signal(int)  # 클릭된 객체 인덱스
 
-    CLICK_THRESHOLD = 8  # 이 거리 이하로 이동하면 클릭으로 처리
+    CLICK_THRESHOLD = 8  # 위젯 좌표 픽셀 — 이하면 클릭, 초과면 드래그
 
     def __init__(self):
         super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(640, 480)
-        self.setStyleSheet("background-color: #2a2a2a; color: #888;")
-        self.setMouseTracking(True)
-
-        self._original_bgr = None
         # [(x1, y1, x2, y2, color, label, obj_index), ...]
-        self._overlay_boxes = []
-        self._roi_rect = None  # (x1, y1, x2, y2) 원본 이미지 좌표계
-        self._highlighted_idx = None
+        self._overlay_boxes: List[tuple] = []
+        self._roi_rect: Optional[tuple] = None  # (x1, y1, x2, y2) 원본 이미지 좌표
+        self._highlighted_idx: Optional[int] = None
 
-        # 드래그 상태
+        # 좌클릭 드래그 상태 (위젯 좌표)
         self._dragging = False
-        self._drag_start = None
-        self._drag_current = None
+        self._drag_start: Optional[QPoint] = None
+        self._drag_current: Optional[QPoint] = None
 
-        # 표시 중인 스케일/오프셋 (원본 이미지 → 라벨 표시)
-        self._display_scale = 1.0
-        self._display_offset = (0, 0)
-        self._display_size = (0, 0)  # 스케일된 이미지 크기
-
-    def set_image(self, bgr: Optional[np.ndarray]):
-        """이미지 설정 (BGR numpy array)"""
-        self._original_bgr = bgr
-        self._refresh()
-
+    # 기존 외부 API 호환 (이름·시그니처 유지)
     def set_boxes(self, boxes: List[tuple]):
-        """검출된 bbox 표시: [(x1, y1, x2, y2, (r,g,b), label, obj_index), ...]"""
         self._overlay_boxes = boxes
         self._refresh()
 
     def set_highlight(self, idx: Optional[int]):
-        """특정 객체 번호를 강조 (다른 것은 어둡게)"""
         self._highlighted_idx = idx
         self._refresh()
 
     def set_roi(self, rect: Optional[tuple]):
-        """외부에서 ROI 설정 (x1, y1, x2, y2) 또는 None으로 해제"""
         self._roi_rect = rect
         self._refresh()
 
     def clear_all(self):
-        """이미지/오버레이 전부 초기화 (QLabel.clear와 구분)"""
-        self._original_bgr = None
         self._overlay_boxes = []
         self._roi_rect = None
-        self.setText("이미지 없음")
-        self.setPixmap(QPixmap())
+        self._highlighted_idx = None
+        self.clear_image()
 
-    def _refresh(self):
-        if self._original_bgr is None:
-            self.setText("이미지 없음")
-            return
+    # 이미지 좌표계 오버레이 (bbox, ROI 등)
+    def _make_overlay_image(self) -> Optional[np.ndarray]:
+        if self._bgr is None:
+            return None
+        canvas = self._bgr.copy()
 
-        rgb = cv2.cvtColor(self._original_bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-
-        label_w = self.width()
-        label_h = self.height()
-        if label_w <= 0 or label_h <= 0:
-            return
-
-        scale = min(label_w / w, label_h / h)
-        new_w, new_h = int(w * scale), int(h * scale)
-        resized = cv2.resize(rgb, (new_w, new_h))
-
-        self._display_scale = scale
-        self._display_size = (new_w, new_h)
-        self._display_offset = ((label_w - new_w) // 2, (label_h - new_h) // 2)
-
-        # overlay 그리기 (원본 좌표계 → 스케일 적용하여 그리기)
-        overlay = resized.copy()
         for box in self._overlay_boxes:
-            # box: (x1, y1, x2, y2, color, label, obj_index)
             x1, y1, x2, y2, color, label = box[:6]
             obj_idx = box[6] if len(box) > 6 else None
-            sx1, sy1 = int(x1 * scale), int(y1 * scale)
-            sx2, sy2 = int(x2 * scale), int(y2 * scale)
 
-            # 강조 여부에 따른 스타일
             if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
-                box_color = (0, 255, 0)  # 선택: 녹색
+                box_color = (0, 255, 0)
                 thickness = 3
             elif self._highlighted_idx is not None:
-                # 선택된 게 따로 있는 경우, 나머지는 어둡게
-                dim = tuple(int(c * 0.5) for c in color)
-                box_color = dim
+                box_color = tuple(int(c * 0.5) for c in color)
                 thickness = 2
             else:
                 box_color = color
                 thickness = 2
 
-            cv2.rectangle(overlay, (sx1, sy1), (sx2, sy2), box_color, thickness)
+            ix1, iy1, ix2, iy2 = int(x1), int(y1), int(x2), int(y2)
+            cv2.rectangle(canvas, (ix1, iy1), (ix2, iy2), box_color, thickness)
 
-            # 번호 + 클래스명 라벨
             num_str = f"#{obj_idx + 1}" if obj_idx is not None else ""
             full_label = f"{num_str} {label}".strip() if label else num_str
-
             if full_label:
                 (tw, th), _ = cv2.getTextSize(full_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                ty = max(sy1 - 4, th + 2)
-                cv2.rectangle(overlay, (sx1, ty - th - 4), (sx1 + tw + 4, ty + 2), box_color, -1)
-                cv2.putText(overlay, full_label, (sx1 + 2, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                ty = max(iy1 - 4, th + 2)
+                cv2.rectangle(canvas, (ix1, ty - th - 4), (ix1 + tw + 4, ty + 2), box_color, -1)
+                cv2.putText(canvas, full_label, (ix1 + 2, ty - 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-        # ROI (노란색 점선 스타일)
         if self._roi_rect is not None:
             rx1, ry1, rx2, ry2 = self._roi_rect
-            sx1, sy1 = int(rx1 * scale), int(ry1 * scale)
-            sx2, sy2 = int(rx2 * scale), int(ry2 * scale)
-            cv2.rectangle(overlay, (sx1, sy1), (sx2, sy2), (255, 255, 0), 2)
-            cv2.putText(overlay, "ROI", (sx1, max(sy1 - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.rectangle(canvas, (int(rx1), int(ry1)), (int(rx2), int(ry2)),
+                          (0, 255, 255), 2)
+            cv2.putText(canvas, "ROI", (int(rx1), max(int(ry1) - 5, 15)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-        qimage = QImage(overlay.data, new_w, new_h, new_w * 3, QImage.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(qimage)
+        return canvas
 
-        # 드래그 중인 사각형 오버레이 (위젯 좌표계에 직접 그리기)
-        if self._dragging and self._drag_start and self._drag_current:
-            painter = QPainter(pixmap)
-            pen = QPen(QColor(0, 255, 255), 2, Qt.DashLine)
-            painter.setPen(pen)
-            ox, oy = self._display_offset
-            p1 = QPoint(self._drag_start.x() - ox, self._drag_start.y() - oy)
-            p2 = QPoint(self._drag_current.x() - ox, self._drag_current.y() - oy)
-            painter.drawRect(QRect(p1, p2).normalized())
-            painter.end()
+    # 위젯 좌표계 임시 오버레이 (드래그 중 점선 사각형)
+    def _post_draw(self, pixmap):
+        if not (self._dragging and self._drag_start and self._drag_current):
+            return
+        painter = QPainter(pixmap)
+        pen = QPen(QColor(0, 255, 255), 2, Qt.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(QRect(self._drag_start, self._drag_current).normalized())
+        painter.end()
 
-        self.setPixmap(pixmap)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._refresh()
-
-    def _widget_to_image(self, pt: QPoint) -> Optional[tuple]:
-        """위젯 좌표 → 원본 이미지 좌표 변환"""
-        if self._original_bgr is None or self._display_scale <= 0:
-            return None
-        ox, oy = self._display_offset
-        nw, nh = self._display_size
-        x = pt.x() - ox
-        y = pt.y() - oy
-        if not (0 <= x < nw and 0 <= y < nh):
-            return None
-        return int(x / self._display_scale), int(y / self._display_scale)
-
+    # 좌클릭만 처리 — 우클릭은 베이스 (팬) 에 위임
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._original_bgr is not None:
+        if event.button() == Qt.LeftButton and self._bgr is not None:
             self._dragging = True
             self._drag_start = event.position().toPoint()
             self._drag_current = self._drag_start
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._dragging:
             self._drag_current = event.position().toPoint()
             self._refresh()
+            return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self._dragging:
-            self._dragging = False
-            end = event.position().toPoint()
-            start_pt = self._drag_start
-            self._drag_start = None
-            self._drag_current = None
+        if event.button() != Qt.LeftButton or not self._dragging:
+            super().mouseReleaseEvent(event)
+            return
 
-            if start_pt is None:
-                self._refresh()
-                return
-
-            # 드래그 거리로 클릭/드래그 구분
-            dx = end.x() - start_pt.x()
-            dy = end.y() - start_pt.y()
-            dist = (dx * dx + dy * dy) ** 0.5
-
-            if dist <= self.CLICK_THRESHOLD:
-                # 클릭으로 처리: 해당 픽셀이 어느 bbox에 들어있는지 찾기
-                click_img = self._widget_to_image(end)
-                if click_img and self._overlay_boxes:
-                    cx, cy = click_img
-                    hit_idx = None
-                    hit_area = float("inf")
-                    for box in self._overlay_boxes:
-                        x1, y1, x2, y2 = box[:4]
-                        obj_idx = box[6] if len(box) > 6 else None
-                        if obj_idx is None:
-                            continue
-                        if x1 <= cx <= x2 and y1 <= cy <= y2:
-                            area = (x2 - x1) * (y2 - y1)
-                            # 겹치는 경우 작은 bbox 우선
-                            if area < hit_area:
-                                hit_area = area
-                                hit_idx = obj_idx
-                    if hit_idx is not None:
-                        self.objectPicked.emit(hit_idx)
-                self._refresh()
-                return
-
-            # 드래그: ROI 선택
-            start_img = self._widget_to_image(start_pt)
-            end_img = self._widget_to_image(end)
-            if start_img and end_img:
-                x1, y1 = start_img
-                x2, y2 = end_img
-                if x1 > x2:
-                    x1, x2 = x2, x1
-                if y1 > y2:
-                    y1, y2 = y2, y1
-                if (x2 - x1) > 10 and (y2 - y1) > 10:
-                    self._roi_rect = (x1, y1, x2, y2)
-                    self.roiChanged.emit(x1, y1, x2, y2)
+        self._dragging = False
+        end = event.position().toPoint()
+        start_pt = self._drag_start
+        self._drag_start = None
+        self._drag_current = None
+        if start_pt is None:
             self._refresh()
+            return
+
+        dx = end.x() - start_pt.x()
+        dy = end.y() - start_pt.y()
+        dist = (dx * dx + dy * dy) ** 0.5
+
+        if dist <= self.CLICK_THRESHOLD:
+            # 클릭으로 처리 → bbox 픽킹
+            click_img = self._widget_to_image(end)
+            if click_img and self._overlay_boxes:
+                cx, cy = click_img
+                hit_idx = None
+                hit_area = float("inf")
+                for box in self._overlay_boxes:
+                    x1, y1, x2, y2 = box[:4]
+                    obj_idx = box[6] if len(box) > 6 else None
+                    if obj_idx is None:
+                        continue
+                    if x1 <= cx <= x2 and y1 <= cy <= y2:
+                        area = (x2 - x1) * (y2 - y1)
+                        if area < hit_area:
+                            hit_area = area
+                            hit_idx = obj_idx
+                if hit_idx is not None:
+                    self.objectPicked.emit(hit_idx)
+            self._refresh()
+            return
+
+        # 드래그 → ROI 설정
+        start_img = self._widget_to_image(start_pt)
+        end_img = self._widget_to_image(end)
+        if start_img and end_img:
+            x1, y1 = start_img
+            x2, y2 = end_img
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            if (x2 - x1) > 10 and (y2 - y1) > 10:
+                self._roi_rect = (x1, y1, x2, y2)
+                self.roiChanged.emit(x1, y1, x2, y2)
+        self._refresh()
 
 
 # ============================================================
