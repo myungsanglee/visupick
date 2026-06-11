@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # 모듈 로드 실패 시 RealSenseCamera 인스턴스화 시점에 에러를 내도록 처리.
 try:
     import pyrealsense2 as rs
+
     HAS_REALSENSE = True
 except Exception as e:
     rs = None
@@ -53,18 +54,15 @@ class RealSenseCamera(BaseCamera):
     """Intel RealSense (D415 검증) 카메라 제어. BaseCamera 구현체."""
 
     # 기본 해상도. D415 의 depth + color 동시 스트림이 안정적으로 동작하는 조합.
-    # (1280x720@30 은 환경/펌웨어에 따라 'Couldn't resolve requests' 발생 사례가 있어
-    #  640x480@30 을 표준으로 고정.)
+    # 640x480@30 이 가장 안정적 (1280x720 은 환경에 따라 'Couldn't resolve requests' 발생).
     DEFAULT_WIDTH = 640
     DEFAULT_HEIGHT = 480
     DEFAULT_FPS = 30
+    WAIT_TIMEOUT_MS = 5000  # wait_for_frames 타임아웃 (5초)
 
     def __init__(self):
         if not HAS_REALSENSE:
-            raise RuntimeError(
-                f"pyrealsense2 import 실패: {_IMPORT_ERROR}\n"
-                "설치: pip install pyrealsense2 (Linux 는 librealsense SDK 도 필요)"
-            )
+            raise RuntimeError(f"pyrealsense2 import 실패: {_IMPORT_ERROR}\n" "설치: pip install pyrealsense2 (Linux 는 librealsense SDK 도 필요)")
         self.pipeline = rs.pipeline()
         self.config = rs.config()
         self.align = rs.align(rs.stream.color)  # depth → color frame 좌표계 정렬
@@ -77,45 +75,83 @@ class RealSenseCamera(BaseCamera):
     # 연결 / 설정
     # ---------------------------------------------------------------
     def connect(self) -> bool:
-        try:
-            self.config.enable_stream(
-                rs.stream.depth,
-                self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT,
-                rs.format.z16, self.DEFAULT_FPS,
-            )
-            self.config.enable_stream(
-                rs.stream.color,
-                self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT,
-                rs.format.bgr8, self.DEFAULT_FPS,
-            )
-            self.profile = self.pipeline.start(self.config)
+        """RealSense 연결 (재시도 로직 포함)."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 기존 연결 정리 (재시도 시)
+                if self._connected:
+                    self.disconnect()
 
-            depth_sensor = self.profile.get_device().first_depth_sensor()
-            self.depth_scale = float(depth_sensor.get_depth_scale())  # raw → meter
-            self._connected = True
+                # 파이프라인 및 설정 초기화 (재시도 시 깨끗한 상태 시작)
+                self.pipeline = rs.pipeline()
+                self.config = rs.config()
+                self.align = rs.align(rs.stream.color)
 
-            # 첫 몇 프레임은 노이즈 큰 경향 → auto-exposure 안정화
-            for _ in range(5):
-                self.pipeline.wait_for_frames()
+                # Depth 스트림 활성화
+                self.config.enable_stream(
+                    rs.stream.depth,
+                    self.DEFAULT_WIDTH,
+                    self.DEFAULT_HEIGHT,
+                    rs.format.z16,
+                    self.DEFAULT_FPS,
+                )
 
-            logger.info(
-                f"RealSense 연결 성공 ({self.DEFAULT_WIDTH}x{self.DEFAULT_HEIGHT} "
-                f"@ {self.DEFAULT_FPS}fps, depth_scale={self.depth_scale} m/raw)"
-            )
-            return True
-        except Exception as e:
-            logger.error(f"RealSense 연결 실패: {e}")
-            self._connected = False
-            return False
+                # Color 스트림 활성화
+                self.config.enable_stream(
+                    rs.stream.color,
+                    self.DEFAULT_WIDTH,
+                    self.DEFAULT_HEIGHT,
+                    rs.format.bgr8,
+                    self.DEFAULT_FPS,
+                )
+
+                # 파이프라인 시작
+                self.profile = self.pipeline.start(self.config)
+
+                # Depth scale 설정
+                depth_sensor = self.profile.get_device().first_depth_sensor()
+                self.depth_scale = float(depth_sensor.get_depth_scale())  # raw → meter
+
+                # 초기 프레임 수집 (auto-exposure 안정화)
+                for i in range(10):
+                    frames = self.pipeline.wait_for_frames(self.WAIT_TIMEOUT_MS)
+                    if not frames or frames.size() == 0:
+                        raise RuntimeError(f"프레임 수집 실패 (초기화 {i+1}/10)")
+
+                self._connected = True
+                logger.info(
+                    f"RealSense 연결 성공 (시도 {attempt + 1}/{max_retries}) "
+                    f"{self.DEFAULT_WIDTH}x{self.DEFAULT_HEIGHT}@{self.DEFAULT_FPS}fps "
+                    f"depth_scale={self.depth_scale:.6f} m/raw"
+                )
+                return True
+
+            except Exception as e:
+                self._connected = False
+                logger.warning(
+                    f"RealSense 연결 시도 {attempt + 1}/{max_retries} 실패: {e}"
+                )
+                if attempt == max_retries - 1:
+                    logger.error(f"RealSense 연결 최종 실패 ({max_retries}회 시도 후)")
+                    return False
+                # 다음 시도 전 대기
+                import time
+                time.sleep(1)
 
     def disconnect(self) -> None:
-        if self._connected:
+        """RealSense 연결 해제 및 리소스 정리."""
+        if self._connected or self.pipeline:
             try:
-                self.pipeline.stop()
+                if self._connected and self.pipeline:
+                    self.pipeline.stop()
+                    logger.info("RealSense 파이프라인 정지")
             except Exception as e:
-                logger.warning(f"RealSense stop 중 오류 (무시): {e}")
-            self._connected = False
-            logger.info("RealSense 연결 해제")
+                logger.warning(f"RealSense 파이프라인 정지 중 오류: {e}")
+            finally:
+                self._connected = False
+                self.profile = None
+                # 파이프라인은 gc에 맡김
 
     def load_settings(self, path: str) -> bool:
         """
@@ -168,12 +204,23 @@ class RealSenseCamera(BaseCamera):
             logger.error("RealSense 미연결 — capture 불가")
             return None
         try:
-            frames = self.pipeline.wait_for_frames()
+            # 타임아웃 설정으로 무한 대기 방지
+            frames = self.pipeline.wait_for_frames(self.WAIT_TIMEOUT_MS)
+
+            if not frames or frames.size() == 0:
+                logger.warning("RealSense: 프레임 수집 실패 (빈 프레임 세트)")
+                return None
+
+            # Depth → Color 정렬
             aligned = self.align.process(frames)
             depth = aligned.get_depth_frame()
             color = aligned.get_color_frame()
+
+            # 정렬된 프레임 검증
             if not depth or not color:
+                logger.warning("RealSense: depth 또는 color 프레임 누락")
                 return None
+
             # depth_scale 을 함께 묶어서 정적 메서드가 mm 변환할 수 있도록
             return {
                 "depth": depth,
@@ -183,6 +230,15 @@ class RealSenseCamera(BaseCamera):
             }
         except Exception as e:
             logger.error(f"RealSense 캡처 실패: {e}")
+            # 연결 상태 재검증 (연결이 끊겼으면 재연결 신호)
+            if self._connected and self.pipeline:
+                try:
+                    # 연결 상태 체크
+                    if not self.profile or not self.profile.get_device():
+                        self._connected = False
+                        logger.warning("RealSense: 장치 연결 끊김 감지")
+                except:
+                    self._connected = False
             return None
 
     # ---------------------------------------------------------------

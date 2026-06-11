@@ -24,14 +24,16 @@ from base_camera import BaseCamera
 _REGISTRY: List[Tuple[str, str, str]] = [
     ("Zivid", "zivid_camera", "ZividCamera"),
     ("RealSense", "realsense_camera", "RealSenseCamera"),
+    ("Percipio", "percipio_camera", "PercipioCamera"),
 ]
 
 
-# 카메라별 설정 파일 다이얼로그 필터 (Zivid YML vs RealSense JSON)
+# 카메라별 설정 파일 다이얼로그 필터 (Zivid YML vs RealSense JSON 등)
 # 새 카메라 추가 시 여기에도 등록.
 _SETTINGS_FILTERS = {
     "Zivid": "Zivid YML 설정 (*.yml *.yaml)",
     "RealSense": "RealSense JSON 설정 (*.json)",
+    "Percipio": "Percipio Feature 파일 (*.fea *.ini *.json)",
 }
 
 

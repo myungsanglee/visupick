@@ -134,15 +134,11 @@ class RobotControlMixin:
 
         old = self.main.home_pose
         old_str = (
-            f"  X: {old['x']:.2f}, Y: {old['y']:.2f}, Z: {old['z']:.2f}\n"
-            f"  A: {old['a']:.2f}, B: {old['b']:.2f}, C: {old['c']:.2f}"
+            f"  X: {old['x']:.2f}, Y: {old['y']:.2f}, Z: {old['z']:.2f}\n" f"  A: {old['a']:.2f}, B: {old['b']:.2f}, C: {old['c']:.2f}"
             if old
             else "(저장된 Home 없음)"
         )
-        new_str = (
-            f"  X: {cur['x']:.2f}, Y: {cur['y']:.2f}, Z: {cur['z']:.2f}\n"
-            f"  A: {cur['a']:.2f}, B: {cur['b']:.2f}, C: {cur['c']:.2f}"
-        )
+        new_str = f"  X: {cur['x']:.2f}, Y: {cur['y']:.2f}, Z: {cur['z']:.2f}\n" f"  A: {cur['a']:.2f}, B: {cur['b']:.2f}, C: {cur['c']:.2f}"
         msg = f"📍 Home 위치를 현재 위치로 재설정하시겠습니까?\n\n[기존 Home]\n{old_str}\n\n[새 Home (현재 TCP)]\n{new_str}"
         ret = QMessageBox.question(self, "Home 재설정 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ret != QMessageBox.Yes:
@@ -240,8 +236,7 @@ class RobotControlMixin:
         idx_str = str(self.selected_idx + 1) if self.selected_idx is not None else "?"
         action = {
             "type": "object_move",
-            "label": f"{noun} #{idx_str} 이동 [{'LIN' if is_lin else 'PTP'}, "
-            f"{'A/T/R' if self.use_approach.isChecked() else 'T'}]",
+            "label": f"{noun} #{idx_str} 이동 [{'LIN' if is_lin else 'PTP'}, " f"{'A/T/R' if self.use_approach.isChecked() else 'T'}]",
             "target": dict(self.target_pose),
             "is_lin": is_lin,
             "use_approach": self.use_approach.isChecked(),
@@ -303,9 +298,7 @@ class RobotControlMixin:
             # object_move + approach인 경우 계산된 approach 지점 Z도 검증
             # (Tool +Z가 옆/위를 향하면 approach가 바닥 한계 아래로 갈 수 있음)
             if action["type"] == "object_move" and action.get("use_approach", True):
-                ax, ay, az = self._compute_approach_position(
-                    action["target"], action.get("approach_dist", 50)
-                )
+                ax, ay, az = self._compute_approach_position(action["target"], action.get("approach_dist", 50))
                 if not self._validate_z(az):
                     return
 
@@ -357,9 +350,7 @@ class RobotControlMixin:
         a_type = action["type"]
 
         if a_type == "home":
-            slot = self.main.robot.add_move_lin(
-                target["x"], target["y"], target["z"], target["a"], target["b"], target["c"]
-            )
+            slot = self.main.robot.add_move_lin(target["x"], target["y"], target["z"], target["a"], target["b"], target["c"])
             if slot is None:
                 return None
             slots.append(slot)
@@ -378,9 +369,7 @@ class RobotControlMixin:
                 if s1 is None:
                     return None
                 slots.append(s1)
-                s2 = self.main.robot.add_move_lin(
-                    target["x"], target["y"], target["z"], target["a"], target["b"], target["c"]
-                )
+                s2 = self.main.robot.add_move_lin(target["x"], target["y"], target["z"], target["a"], target["b"], target["c"])
                 if s2 is None:
                     return None
                 slots.append(s2)

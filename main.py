@@ -867,10 +867,10 @@ class VerificationTab(QWidget, ImageViewerMixin):
         logger.info(f"계산된 타겟 위치: {target}")
 
 
-class HandEyeCalibrationApp(QMainWindow):
+class VisuPickApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Hand-Eye Calibration")
+        self.setWindowTitle("VisuPick")
         self.setMinimumSize(1200, 800)
 
         self.robot = None
@@ -922,7 +922,8 @@ class HandEyeCalibrationApp(QMainWindow):
         self.camera_type_combo.addItems(list_available_camera_names())
         self.camera_type_combo.setToolTip(
             "카메라 종류 선택. SDK가 설치된 카메라만 연결 가능.\n"
-            "Zivid: 정밀(0.1mm). RealSense: 저렴/빠름(~2mm)."
+            "Zivid: 정밀(0.1mm). RealSense: 저렴/빠름(~2mm).\n"
+            "Percipio: 산업용 GigE(~1.5mm @1m, IP65, FM815-IX-E1 등)."
         )
         conn_layout.addWidget(self.camera_type_combo)
 
@@ -1102,7 +1103,7 @@ class HandEyeCalibrationApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = HandEyeCalibrationApp()
+    window = VisuPickApp()
     window.show()
     sys.exit(app.exec())
 

@@ -215,8 +215,8 @@ def global_register_fgr(
             maximum_correspondence_distance=distance_threshold,
             decrease_mu=True,
             iteration_number=128,
-            maximum_tuple_count=5000,    # 더 많은 tuple 후보
-            tuple_scale=0.85,            # 더 관대한 tuple test (기본 0.95)
+            maximum_tuple_count=5000,  # 더 많은 tuple 후보
+            tuple_scale=0.85,  # 더 관대한 tuple test (기본 0.95)
         ),
     )
 
@@ -384,9 +384,7 @@ def cad_match_multi_instance(
         # 1) 글로벌 매칭
         if use_fgr:
             best_ransac = global_register_fgr(model_down, scene_down, model_fpfh, scene_fpfh, voxel_size)
-            debug_log.append(
-                f"[시도 {i + 1}] scene_down={len(scene_down.points)}점, FGR fitness={best_ransac.fitness:.3f}"
-            )
+            debug_log.append(f"[시도 {i + 1}] scene_down={len(scene_down.points)}점, FGR fitness={best_ransac.fitness:.3f}")
         else:
             ransac_results = []
             for k in range(ransac_attempts):
@@ -394,9 +392,7 @@ def cad_match_multi_instance(
                 ransac_results.append(r)
             best_ransac = max(ransac_results, key=lambda r: r.fitness)
             fit_strs = ", ".join(f"{r.fitness:.3f}" for r in ransac_results)
-            debug_log.append(
-                f"[시도 {i + 1}] scene_down={len(scene_down.points)}점, RANSAC[{fit_strs}] → best={best_ransac.fitness:.3f}"
-            )
+            debug_log.append(f"[시도 {i + 1}] scene_down={len(scene_down.points)}점, RANSAC[{fit_strs}] → best={best_ransac.fitness:.3f}")
 
         if best_ransac.fitness == 0:
             debug_log.append(f"  → RANSAC 실패 (descriptor 매칭 안됨), 종료")
@@ -532,9 +528,7 @@ def cad_match_per_cluster(
     debug_log: List[str] = []
 
     clusters = cluster_scene_dbscan(scene_pcd, eps=eps, min_points=min_points)
-    debug_log.append(
-        f"DBSCAN: scene {len(scene_pcd.points)}점 → 클러스터 {len(clusters)}개 (eps={eps}mm, min_pts={min_points})"
-    )
+    debug_log.append(f"DBSCAN: scene {len(scene_pcd.points)}점 → 클러스터 {len(clusters)}개 (eps={eps}mm, min_pts={min_points})")
     if not clusters:
         debug_log.append("클러스터 없음 → 종료. eps를 늘리거나 min_pts를 줄여보세요.")
         return instances, debug_log
@@ -566,8 +560,7 @@ def cad_match_per_cluster(
         if use_fgr:
             best_ransac = global_register_fgr(model_down, scene_down, model_fpfh, scene_fpfh, voxel_size)
             debug_log.append(
-                f"[클러스터 {ci + 1}] {len(cluster.points)}점, scene_down={len(scene_down.points)}점, "
-                f"FGR fitness={best_ransac.fitness:.3f}"
+                f"[클러스터 {ci + 1}] {len(cluster.points)}점, scene_down={len(scene_down.points)}점, " f"FGR fitness={best_ransac.fitness:.3f}"
             )
         else:
             ransac_results = []
@@ -786,10 +779,7 @@ def ppf_match_per_cluster(
         n_use = min(n_top_candidates, len(results))
         candidates = list(results[:n_use])
         votes_before = [int(c.numVotes) for c in candidates]
-        debug_log.append(
-            f"[클러스터 {ci + 1}] {len(scene_data)}점, PPF 후보 {len(results)}개, "
-            f"상위 {n_use}개 votes={votes_before}"
-        )
+        debug_log.append(f"[클러스터 {ci + 1}] {len(scene_data)}점, PPF 후보 {len(results)}개, " f"상위 {n_use}개 votes={votes_before}")
 
         # 각 PPF 후보를 Open3D point-to-plane ICP로 정밀화 (평면 슬라이드 약점 보완)
         refined_results = []
@@ -827,8 +817,8 @@ def ppf_match_per_cluster(
             instances.append(
                 {
                     "transformation": cand["transformation"],
-                    "fitness": cand["fitness"],   # Open3D fitness (0~1, 클수록 좋음)
-                    "rmse": cand["rmse"],          # mm
+                    "fitness": cand["fitness"],  # Open3D fitness (0~1, 클수록 좋음)
+                    "rmse": cand["rmse"],  # mm
                     "votes": cand["votes"],
                     "cluster_id": ci,
                     "cluster_size": len(cluster.points),
@@ -1067,6 +1057,9 @@ class CADMatchingTab(RobotControlMixin, QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
+        # === 최소 상단: 필수 버튼만 (로드, 캡처, 알고리즘) ===
+        header_layout = QHBoxLayout()
+
         # === 상단 1행: 데이터 로드 + 캡처 ===
         top1 = QHBoxLayout()
 
@@ -1156,7 +1149,17 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.voxel_spin.setSingleStep(0.5)
         self.voxel_spin.setValue(self.DEFAULT_VOXEL_SIZE)
         self.voxel_spin.setFixedWidth(80)
-        self.voxel_spin.setToolTip("다운샘플 voxel 크기. 객체 크기의 1/30 ~ 1/50 권장.")
+        self.voxel_spin.setToolTip(
+            "<b>Voxel 크기 (FPFH+ICP 전용, PPF 미사용)</b><br/>"
+            "포인트 클라우드를 격자 블록으로 다운샘플할 크기.<br/>"
+            "<b>역할:</b> 3D 매칭 계산량 감소 + 노이즈 제거 + FPFH 특징점 샘플링<br/>"
+            "<b>사용:</b> FPFH+ICP (RANSAC/FGR) 알고리즘에서만 적용<br/>"
+            "<b>조정:</b><br/>"
+            "  • 객체 크기의 1/50 정도: 빽빽한 피쳐 필요 (정밀 매칭, 느림)<br/>"
+            "  • 객체 크기의 1/30 정도: 균형 (권장)<br/>"
+            "  • 객체 크기의 1/15 정도: 빠른 매칭, 거친 결과<br/>"
+            "<b>예:</b> 100mm 객체 → 2~7mm voxel 권장"
+        )
         top2.addWidget(self.voxel_spin)
 
         top2.addWidget(QLabel("최대 인스턴스:"))
@@ -1164,6 +1167,18 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.max_inst_spin.setRange(1, 20)
         self.max_inst_spin.setValue(self.DEFAULT_MAX_INSTANCES)
         self.max_inst_spin.setFixedWidth(60)
+        self.max_inst_spin.setToolTip(
+            "<b>최대 인스턴스 (FPFH+ICP 일반 모드 전용)</b><br/>"
+            "한 번의 매칭에서 몇 개까지 객체를 찾을지 결정.<br/>"
+            "<b>역할:</b> 한 클러스터에서 겹쳐있는 같은 모델 객체 여러 개 감지<br/>"
+            "<b>사용:</b> FPFH+ICP이고 DBSCAN 미사용할 때만 적용<br/>"
+            "   (DBSCAN 사용 시: 자동으로 각 클러스터당 1개씩 매칭)<br/>"
+            "<b>조정:</b><br/>"
+            "  • 1~2: 같은 모델 1~2개만 예상 (빠름)<br/>"
+            "  • 5: 일반적 빈 픽킹 (권장)<br/>"
+            "  • 10+: 많이 겹쳐있는 상황 (느림, 오탐지 위험)<br/>"
+            "<b>영향:</b> 높을수록 계산 시간 선형 증가"
+        )
         top2.addWidget(self.max_inst_spin)
 
         top2.addWidget(QLabel("Fitness 임계값:"))
@@ -1172,7 +1187,20 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.fitness_spin.setSingleStep(0.05)
         self.fitness_spin.setValue(self.DEFAULT_FITNESS_THRESHOLD)
         self.fitness_spin.setFixedWidth(80)
-        self.fitness_spin.setToolTip("ICP fitness가 이보다 낮으면 매칭 실패로 간주. 0.3~0.5 권장.")
+        self.fitness_spin.setToolTip(
+            "<b>Fitness 임계값 (FPFH+ICP 전용, PPF 미사용)</b><br/>"
+            "ICP 최종 결과의 정합도. 이보다 낮으면 실패 판정.<br/>"
+            "<b>역할:</b> RANSAC/FGR 초기 자세 → ICP 정밀화 후 결과 필터링<br/>"
+            "<b>사용:</b> FPFH+ICP (RANSAC/FGR) 알고리즘에서만 적용<br/>"
+            "<b>정의:</b> fitness = model의 몇 %가 scene의 가까운 점과 매칭되는가<br/>"
+            "  • 0.95 = 95% 모델 점이 매칭됨 (매우 엄격)<br/>"
+            "  • 0.5 = 50% 모델 점이 매칭됨 (중간)<br/>"
+            "  • 0.1 = 10% 모델 점만 매칭 (매우 느슨)<br/>"
+            "<b>조정:</b><br/>"
+            "  • 정확한 매칭 필요 → 0.5~0.7 (엄격, 오탐지↓)<br/>"
+            "  • 일반 빈 픽킹 → 0.2~0.4 (권장)<br/>"
+            "  • 부분 가림/노이즈 많음 → 0.1~0.2 (느슨, 검출력↑)"
+        )
         top2.addWidget(self.fitness_spin)
 
         top2.addWidget(QLabel("RANSAC 시도:"))
@@ -1181,8 +1209,17 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.ransac_attempts_spin.setValue(5)
         self.ransac_attempts_spin.setFixedWidth(60)
         self.ransac_attempts_spin.setToolTip(
-            "각 인스턴스 검색 시 RANSAC을 N번 반복해 가장 fitness 높은 결과 채택.\n"
-            "클수록 안정적이지만 시간이 N배 늘어남. 시드 고정으로 같은 입력엔 항상 같은 결과."
+            "<b>RANSAC 시도 (FPFH+ICP 전용, PPF 미사용)</b><br/>"
+            "RANSAC 알고리즘을 몇 번 반복해 가장 좋은 초기 자세를 찾을지.<br/>"
+            "<b>역할:</b> RANSAC은 무작위 샘플링 기반 → 한 번에 성공 보장 안 함<br/>"
+            "N번 반복하면 최소 1회는 성공할 확률 거의 100%에 수렴<br/>"
+            "<b>사용:</b> FPFH+ICP에서 RANSAC 초기 자세 추정 단계<br/>"
+            "  (PPF는 자체 voting 강건성 있어서 불필요)<br/>"
+            "<b>조정:</b><br/>"
+            "  • 1~2: 빠름, 운 나쁘면 실패 (추천 X)<br/>"
+            "  • 5: 안정성+속도 균형 (권장)<br/>"
+            "  • 10+: 거의 항상 성공, 시간 10배 증가<br/>"
+            "<b>영향:</b> N배 실행 → 시간 N배, 성공률 지수함수적 증가"
         )
         top2.addWidget(self.ransac_attempts_spin)
 
@@ -1233,7 +1270,24 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.dbscan_eps.setValue(15.0)
         self.dbscan_eps.setSingleStep(1.0)
         self.dbscan_eps.setFixedWidth(70)
-        self.dbscan_eps.setToolTip("같은 클러스터로 묶일 점 사이 최대 거리. 작은 객체나 빽빽한 환경엔 작게 (5~10), 떨어진 환경엔 크게 (15~30).")
+        self.dbscan_eps.setToolTip(
+            "<b>eps: 클러스터 반경 (mm)</b><br/>"
+            "DBSCAN이 같은 객체로 묶을 최대 점 거리.<br/>"
+            "<b>역할:</b> 포인트 클라우드를 객체별로 분리 (멀티 인스턴스 처리)<br/>"
+            "<b>사용:</b> DBSCAN 활성화할 때 (PPF, FPFH+ICP 모두 적용)<br/>"
+            "<b>직관:</b><br/>"
+            "  • eps = 5mm: 가까운 점들끼리만 묶음 (객체 분리 잘 됨, 오버 분할 위험)<br/>"
+            "  • eps = 15mm: 중간 수준 (권장, 일반 빈 픽킹)<br/>"
+            "  • eps = 30mm: 먼 점도 묶음 (분리 못 할 수도, 검출력↑)<br/>"
+            "<b>조정 기준:</b><br/>"
+            "  • 작은 부품 (< 50mm) → eps=5~10 mm<br/>"
+            "  • 중형 부품 (50~200mm) → eps=10~20 mm (권장: 15)<br/>"
+            "  • 큰 부품 (> 200mm) → eps=20~30 mm<br/>"
+            "<b>문제 해결:</b><br/>"
+            "  • 한 객체가 여러 클러스터로 쪼개짐 → eps ↑<br/>"
+            "  • 다른 객체들이 한 클러스터로 묶임 → eps ↓<br/>"
+            "클러스터 미리보기로 eps값 조정하며 시각화 가능!"
+        )
         top3.addWidget(self.dbscan_eps)
 
         top3.addWidget(QLabel("min pts:"))
@@ -1241,7 +1295,24 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.dbscan_min_pts.setRange(5, 5000)
         self.dbscan_min_pts.setValue(100)
         self.dbscan_min_pts.setFixedWidth(80)
-        self.dbscan_min_pts.setToolTip("클러스터로 인정될 최소 점 수. 너무 작으면 노이즈가 클러스터됨.")
+        self.dbscan_min_pts.setToolTip(
+            "<b>min_points: 클러스터 최소 점 수</b><br/>"
+            "DBSCAN이 어떤 점 주변에 이만큼 점이 있어야 클러스터 인정.<br/>"
+            "<b>역할:</b> 노이즈/먼지 같은 작은 점 뭉치 필터링<br/>"
+            "<b>사용:</b> DBSCAN 활성화할 때 (PPF, FPFH+ICP 모두 적용)<br/>"
+            "<b>직관:</b><br/>"
+            "  • min_pts = 20: 적은 점도 클러스터로 (노이즈 포함, 민감)<br/>"
+            "  • min_pts = 100: 중간 수준 (권장)<br/>"
+            "  • min_pts = 500: 큰 덩어리만 인정 (노이즈 없음, 놓침 위험)<br/>"
+            "<b>조정 기준:</b><br/>"
+            "  • 카메라 해상도 높음 (점이 많음) → min_pts=200~500<br/>"
+            "  • 일반 해상도 (점 중간) → min_pts=50~150 (권장: 100)<br/>"
+            "  • 해상도 낮음 (점 적음) → min_pts=20~50<br/>"
+            "<b>문제 해결:</b><br/>"
+            "  • 먼지/노이즈가 클러스터로 나옴 → min_pts ↑<br/>"
+            "  • 작은 객체 누락됨 → min_pts ↓<br/>"
+            "일반적으로: (ROI 내 총 점 수) / (예상 객체 개수) 정도로 설정"
+        )
         top3.addWidget(self.dbscan_min_pts)
 
         self.btn_preview_clusters = QPushButton("클러스터 미리보기")
@@ -1270,6 +1341,169 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
         top3.addStretch()
         layout.addLayout(top3)
+
+        # === 상단 3-1행: PPF 파라미터 (PPF 선택 시에만 표시) ===
+        self.ppf_params_widget = QWidget()
+        ppf_params_layout = QVBoxLayout(self.ppf_params_widget)
+        ppf_params_layout.setContentsMargins(0, 5, 0, 5)
+
+        # PPF 모델 학습 파라미터
+        ppf_train_group = QGroupBox("PPF 모델 학습 설정")
+        ppf_train_layout = QVBoxLayout(ppf_train_group)
+
+        # Sampling
+        sampling_row = QHBoxLayout()
+        sampling_row.addWidget(QLabel("Sampling(%)"))
+        self.ppf_sampling_step = QDoubleSpinBox()
+        self.ppf_sampling_step.setRange(0.01, 0.2)
+        self.ppf_sampling_step.setValue(0.04)
+        self.ppf_sampling_step.setSingleStep(0.01)
+        self.ppf_sampling_step.setFixedWidth(70)
+        self.ppf_sampling_step.setToolTip(
+            "모델 직경의 몇 %로 샘플링할지.\n" "작을수록 정확하지만 느림. 크면 빠르지만 거칠음.\n" "권장: 0.02~0.05 (정밀도↑), 0.08~0.12 (속도↑)"
+        )
+        sampling_row.addWidget(self.ppf_sampling_step)
+        sampling_row.addStretch()
+        ppf_train_layout.addLayout(sampling_row)
+
+        # Distance
+        distance_row = QHBoxLayout()
+        distance_row.addWidget(QLabel("Distance(%)"))
+        self.ppf_distance_step = QDoubleSpinBox()
+        self.ppf_distance_step.setRange(0.01, 0.2)
+        self.ppf_distance_step.setValue(0.05)
+        self.ppf_distance_step.setSingleStep(0.01)
+        self.ppf_distance_step.setFixedWidth(70)
+        self.ppf_distance_step.setToolTip("PPF 내 거리 양자화 강도 (해시 해상도).\n" "작을수록 정밀하지만 느림.")
+        distance_row.addWidget(self.ppf_distance_step)
+        distance_row.addStretch()
+        ppf_train_layout.addLayout(distance_row)
+
+        # AngleBins
+        angle_row = QHBoxLayout()
+        angle_row.addWidget(QLabel("AngleBins"))
+        self.ppf_angle_bins = QSpinBox()
+        self.ppf_angle_bins.setRange(12, 60)
+        self.ppf_angle_bins.setValue(30)
+        self.ppf_angle_bins.setFixedWidth(70)
+        self.ppf_angle_bins.setToolTip(
+            "회전 방향 양자화 개수 (0~360도를 몇 칸으로 나눌지).\n"
+            "크면 방향 해상도가 높아져 정확하지만 느림.\n"
+            "권장: 24~30 (균형), 12~18 (빠름), 40~60 (정밀함)"
+        )
+        angle_row.addWidget(self.ppf_angle_bins)
+        angle_row.addStretch()
+        ppf_train_layout.addLayout(angle_row)
+
+        ppf_train_info = QLabel("💡 학습: 첫 매칭만 시간 소요. 같은 CAD로 다시 매칭하면 캐시된 학습 사용 (빠름).")
+        ppf_train_info.setStyleSheet("color: #0066cc; font-size: 10px;")
+
+        ppf_train_widget = QWidget()
+        ppf_train_container = QVBoxLayout(ppf_train_widget)
+        ppf_train_container.setContentsMargins(0, 0, 0, 0)
+        ppf_train_container.addWidget(ppf_train_group)
+        ppf_train_container.addWidget(ppf_train_info)
+
+        # PPF 매칭 파라미터
+        ppf_match_group = QGroupBox("PPF 매칭 설정")
+        ppf_match_layout = QVBoxLayout(ppf_match_group)
+
+        # SceneSample
+        scene_sample_row = QHBoxLayout()
+        scene_sample_row.addWidget(QLabel("SceneSample(%)"))
+        self.ppf_scene_sample = QDoubleSpinBox()
+        self.ppf_scene_sample.setRange(0.01, 0.1)
+        self.ppf_scene_sample.setValue(0.025)
+        self.ppf_scene_sample.setSingleStep(0.005)
+        self.ppf_scene_sample.setFixedWidth(70)
+        self.ppf_scene_sample.setToolTip(
+            "Scene에서 몇 %의 점으로 PPF voting할지.\n" "작을수록 정밀하지만 느림 (많은 점 사용).\n" "권장: 0.02~0.03 (정밀도↑), 0.04~0.06 (속도↑)"
+        )
+        scene_sample_row.addWidget(self.ppf_scene_sample)
+        scene_sample_row.addStretch()
+        ppf_match_layout.addLayout(scene_sample_row)
+
+        # SceneDist
+        scene_dist_row = QHBoxLayout()
+        scene_dist_row.addWidget(QLabel("SceneDist(%)"))
+        self.ppf_scene_distance = QDoubleSpinBox()
+        self.ppf_scene_distance.setRange(0.01, 0.1)
+        self.ppf_scene_distance.setValue(0.03)
+        self.ppf_scene_distance.setSingleStep(0.01)
+        self.ppf_scene_distance.setFixedWidth(70)
+        self.ppf_scene_distance.setToolTip(
+            "Scene 내 거리 양자화 강도.\n" "클수록 느슨한 매칭 (오탐지↑, 검출↑).\n" "작을수록 엄격한 매칭 (정확도↑, 놓침↑)"
+        )
+        scene_dist_row.addWidget(self.ppf_scene_distance)
+        scene_dist_row.addStretch()
+        ppf_match_layout.addLayout(scene_dist_row)
+
+        # MinVotes
+        min_votes_row = QHBoxLayout()
+        min_votes_row.addWidget(QLabel("MinVotes"))
+        self.ppf_min_votes = QSpinBox()
+        self.ppf_min_votes.setRange(10, 500)
+        self.ppf_min_votes.setValue(100)
+        self.ppf_min_votes.setFixedWidth(70)
+        self.ppf_min_votes.setToolTip(
+            "PPF voting 임계값. 몇 개 이상의 점이 같은 자세에 투표해야 인정할지.\n"
+            "높을수록 엄격 (오탐지↓, 속도↑). 낮을수록 느슨 (검출력↑).\n"
+            "권장: 50~200 (대부분 상황)"
+        )
+        min_votes_row.addWidget(self.ppf_min_votes)
+        min_votes_row.addStretch()
+        ppf_match_layout.addLayout(min_votes_row)
+
+        # TopCandidates
+        top_cand_row = QHBoxLayout()
+        top_cand_row.addWidget(QLabel("TopCandidates"))
+        self.ppf_top_candidates = QSpinBox()
+        self.ppf_top_candidates.setRange(1, 20)
+        self.ppf_top_candidates.setValue(5)
+        self.ppf_top_candidates.setFixedWidth(70)
+        self.ppf_top_candidates.setToolTip(
+            "각 클러스터에서 몇 개 상위 후보를 ICP 정밀화할지.\n" "높을수록 검출 기회↑이지만 시간↑. 일반적으로 3~5가 적절."
+        )
+        top_cand_row.addWidget(self.ppf_top_candidates)
+        top_cand_row.addStretch()
+        ppf_match_layout.addLayout(top_cand_row)
+
+        ppf_match_info = QLabel("💡 매칭: Scene을 DBSCAN으로 클러스터 분리 → 각 클러스터마다 PPF voting 실행.")
+        ppf_match_info.setStyleSheet("color: #0066cc; font-size: 10px;")
+
+        ppf_match_widget = QWidget()
+        ppf_match_container = QVBoxLayout(ppf_match_widget)
+        ppf_match_container.setContentsMargins(0, 0, 0, 0)
+        ppf_match_container.addWidget(ppf_match_group)
+        ppf_match_container.addWidget(ppf_match_info)
+
+        # 조정 가이드
+        ppf_guide = QGroupBox("조정 가이드")
+        ppf_guide_layout = QVBoxLayout(ppf_guide)
+
+        guide_text = QLabel(
+            "<b>오탐지 많음 (거짓 객체 감지):</b><br/>"
+            "→ MinVotes ↑ (엄격하게), SceneDist ↓ (더 정확하게), Sampling ↓ (학습 정밀화)<br/><br/>"
+            "<b>실제 객체 못 찾음 (검출 실패):</b><br/>"
+            "→ MinVotes ↓ (느슨하게), SceneSample ↓ (더 많은 점 사용), Sampling ↓ (세밀하게)<br/><br/>"
+            "<b>회전 방향 헷갈림:</b><br/>"
+            "→ AngleBins ↑ (방향 해상도 높임, 40~60 권장), Distance ↓ (정밀도 올림)<br/><br/>"
+            "<b>속도가 너무 느림:</b><br/>"
+            "→ Sampling ↑, SceneSample ↑ (점 수 줄임), AngleBins ↓, MinVotes ↑<br/><br/>"
+            "<b>정확도 부족:</b><br/>"
+            "→ Sampling ↓, SceneSample ↓, AngleBins ↑, Distance ↓, MinVotes ↓"
+        )
+        guide_text.setWordWrap(True)
+        guide_text.setStyleSheet("font-size: 10px; color: #333;")
+        ppf_guide_layout.addWidget(guide_text)
+
+        # PPF 파라미터 전체 위젯 구성
+        ppf_params_layout.addWidget(ppf_train_widget)
+        ppf_params_layout.addWidget(ppf_match_widget)
+        ppf_params_layout.addWidget(ppf_guide)
+
+        self.ppf_params_widget.setVisible(False)  # 초기엔 숨김
+        # (PPF 파라미터는 나중에 왼쪽 패널로 이동)
 
         # === 상단 4행: Grasp 포인트 설정 (CAD 좌표계 기준) ===
         top4 = QHBoxLayout()
@@ -1351,15 +1585,32 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         top5.addStretch()
         layout.addLayout(top5)
 
+        # === 왼쪽 패널: PPF 파라미터만 (스크롤 가능) ===
+        ppf_layout = QVBoxLayout()
+        ppf_layout.addWidget(self.ppf_params_widget)
+        ppf_layout.addStretch()
+
+        ppf_widget = QWidget()
+        ppf_widget.setLayout(ppf_layout)
+        self.ppf_scroll = QScrollArea()
+        self.ppf_scroll.setWidget(ppf_widget)
+        self.ppf_scroll.setWidgetResizable(True)
+        self.ppf_scroll.setMinimumWidth(300)
+        self.ppf_scroll.setMaximumWidth(450)
+        self.ppf_scroll.setVisible(False)  # 초기: PPF 선택 시에만 표시
+
         # 진행 표시
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
 
-        # === 중앙: 뷰 + 정보 ===
+        # === 레이아웃: 뷰 + 정보 + (PPF 선택 시 왼쪽 패널) ===
         splitter = QSplitter(Qt.Horizontal)
 
-        # 좌: 2D/3D 스택
+        # 좌: PPF 파라미터 스크롤 (PPF 선택 시에만 표시)
+        splitter.addWidget(self.ppf_scroll)
+
+        # 중앙: 2D/3D 스택
         self.view_stack = QStackedWidget()
         self.view_2d = DraggableImageLabel()
         self.view_2d.roiChanged.connect(self._on_roi_dragged)
@@ -1453,8 +1704,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.use_approach = QCheckBox("접근/철수 사용")
         self.use_approach.setChecked(True)
         self.use_approach.setToolTip(
-            "체크 시 [Approach → Target → Retract] 3단계 모션을 큐에 추가\n"
-            "Tool +Z 방향으로 위에 안전하게 다가갔다 → 정밀 접근 → 다시 위로"
+            "체크 시 [Approach → Target → Retract] 3단계 모션을 큐에 추가\n" "Tool +Z 방향으로 위에 안전하게 다가갔다 → 정밀 접근 → 다시 위로"
         )
         approach_row.addWidget(self.use_approach)
         approach_row.addWidget(QLabel("거리(mm):"))
@@ -1580,13 +1830,16 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         scroll.setMinimumWidth(380)
         splitter.addWidget(scroll)
 
-        splitter.setSizes([900, 400])
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        # 세 개 widget에 맞게 크기 설정 (좌: PPF, 중: 카메라, 우: 정보)
+        splitter.setSizes([400, 700, 350])
+        splitter.setStretchFactor(0, 0)  # 좌: PPF 고정 너비
+        splitter.setStretchFactor(1, 3)  # 중: 카메라 확대
+        splitter.setStretchFactor(2, 1)  # 우: 정보
         layout.addWidget(splitter)
 
         # 스페이스바 = 비상정지 (탭이 활성일 때만 동작)
         from PySide6.QtGui import QShortcut, QKeySequence
+
         sc_estop = QShortcut(QKeySequence(Qt.Key_Space), self)
         sc_estop.setContext(Qt.WidgetWithChildrenShortcut)
         sc_estop.activated.connect(self._emergency_stop)
@@ -1598,11 +1851,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
     def _on_grasp_position_changed(self):
         """Grasp spin 값 변경 시 CAD 미리보기와 현재 선택된 인스턴스 TCP 자세 모두 갱신."""
-        self.grasp_position_cad = np.array([
-            float(self.grasp_x_spin.value()),
-            float(self.grasp_y_spin.value()),
-            float(self.grasp_z_spin.value()),
-        ])
+        self.grasp_position_cad = np.array(
+            [
+                float(self.grasp_x_spin.value()),
+                float(self.grasp_y_spin.value()),
+                float(self.grasp_z_spin.value()),
+            ]
+        )
         # CAD 뷰가 열려 있으면 마커 위치 갱신 (전체 재그림은 비싸니까 마커만)
         if self.cad_pcd is not None:
             self._update_grasp_marker_in_cad_view()
@@ -1615,11 +1870,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
     def _on_grasp_rotation_changed(self):
         """Grasp 회전 spin 변경 시 현재 선택된 인스턴스 TCP 자세 재계산."""
-        self.grasp_rotation_abc_deg = np.array([
-            float(self.grasp_a_spin.value()),
-            float(self.grasp_b_spin.value()),
-            float(self.grasp_c_spin.value()),
-        ])
+        self.grasp_rotation_abc_deg = np.array(
+            [
+                float(self.grasp_a_spin.value()),
+                float(self.grasp_b_spin.value()),
+                float(self.grasp_c_spin.value()),
+            ]
+        )
         if self.selected_idx is not None:
             self._select_instance(self.selected_idx, silent=True)
 
@@ -1688,12 +1945,14 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         if not self.instances:
             plotter.render()
             return
-        grasp_local = np.array([
-            self.grasp_position_cad[0],
-            self.grasp_position_cad[1],
-            self.grasp_position_cad[2],
-            1.0,
-        ])
+        grasp_local = np.array(
+            [
+                self.grasp_position_cad[0],
+                self.grasp_position_cad[1],
+                self.grasp_position_cad[2],
+                1.0,
+            ]
+        )
         for i, inst in enumerate(self.instances):
             T = inst["transformation"]
             color01 = tuple(c / 255.0 for c in INSTANCE_COLORS_RGB[i % len(INSTANCE_COLORS_RGB)])
@@ -1730,6 +1989,10 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         is_ppf = text.startswith("PPF")
         self._prev_algo = text
 
+        # PPF 파라미터 패널 표시/숨김
+        self.ppf_params_widget.setVisible(is_ppf)
+        self.ppf_scroll.setVisible(is_ppf)  # 왼쪽 스크롤 패널
+
         if is_ppf and not prev_was_ppf:
             # FPFH → PPF 경계: cull 선호 저장 후 OFF + DBSCAN ON
             if self.cull_visible_check.isEnabled():
@@ -1738,15 +2001,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             self.use_dbscan.setChecked(True)
             self.main.statusBar().showMessage(
                 "PPF 모드: cull OFF + DBSCAN 자동 활성화. 잡기 축은 유지 (TCP 자세 계산용). "
-                "첫 매칭은 학습 시간(수~수십초) 포함."
+                "첫 매칭은 학습 시간(수~수십초) 포함. 👇 아래 PPF 파라미터 조정 가능."
             )
         elif not is_ppf and prev_was_ppf:
             # PPF → FPFH 경계: cull 상태 복원
             if self.cull_visible_check.isEnabled():
                 self.cull_visible_check.setChecked(self._last_cull_state)
-            self.main.statusBar().showMessage(
-                f"FPFH+ICP 모드: cull '{self._last_cull_state}' 복원."
-            )
+            self.main.statusBar().showMessage(f"FPFH+ICP 모드: cull '{self._last_cull_state}' 복원.")
         else:
             self.main.statusBar().showMessage(f"{text} 모드.")
 
@@ -1834,7 +2095,10 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         import json
 
         path, _ = QFileDialog.getOpenFileName(
-            self, "캘리브레이션 결과 (JSON)", "data", "JSON (*.json)",
+            self,
+            "캘리브레이션 결과 (JSON)",
+            "data",
+            "JSON (*.json)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
@@ -1936,8 +2200,11 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         if self.roi_2d is not None:
             return self.roi_2d
         ret = QMessageBox.question(
-            self, "ROI 미설정", warn_msg,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            self,
+            "ROI 미설정",
+            warn_msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
             return None
@@ -1966,9 +2233,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         # 작업대 평면 제거 (옵션)
         plane_removed_count = 0
         if self.remove_plane_check.isChecked():
-            scene_no_plane, _plane_model, plane_removed_count = remove_table_plane(
-                scene, distance_threshold=float(self.plane_dist_spin.value())
-            )
+            scene_no_plane, _plane_model, plane_removed_count = remove_table_plane(scene, distance_threshold=float(self.plane_dist_spin.value()))
             scene = scene_no_plane
 
         eps = float(self.dbscan_eps.value())
@@ -2034,9 +2299,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
         size_str = ", ".join(str(s) for s in cluster_sizes)
         plane_msg = f", 평면제거={plane_removed_count}점" if plane_removed_count > 0 else ""
-        self.main.statusBar().showMessage(
-            f"클러스터 {len(clusters)}개: [{size_str}]{plane_msg} (eps={eps}mm, min_pts={min_pts})"
-        )
+        self.main.statusBar().showMessage(f"클러스터 {len(clusters)}개: [{size_str}]{plane_msg} (eps={eps}mm, min_pts={min_pts})")
 
     def _preview_cad(self):
         """
@@ -2165,8 +2428,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         cull_part = f"빨강({cull_label})={n_culled}점, " if cull_active else f"({cull_label}, 빨강 표시 X), "
         gx, gy, gz = self.grasp_position_cad
         self.main.statusBar().showMessage(
-            f"CAD 미리보기: 원본={n_full}점, {cull_part}노랑(voxel {voxel}mm 다운샘플)={n_down}점, "
-            f"Grasp(녹색)=({gx:.1f}, {gy:.1f}, {gz:.1f})."
+            f"CAD 미리보기: 원본={n_full}점, {cull_part}노랑(voxel {voxel}mm 다운샘플)={n_down}점, " f"Grasp(녹색)=({gx:.1f}, {gy:.1f}, {gz:.1f})."
         )
 
     # ---------------------------------------------------------
@@ -2180,9 +2442,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         if self.current_xyz is None:
             QMessageBox.warning(self, "오류", "캡처를 먼저 하세요")
             return
-        roi = self._resolve_roi(
-            "ROI가 설정되지 않았습니다. 전체 이미지에서 매칭을 시도하면 시간이 오래 걸릴 수 있습니다. 계속하시겠습니까?"
-        )
+        roi = self._resolve_roi("ROI가 설정되지 않았습니다. 전체 이미지에서 매칭을 시도하면 시간이 오래 걸릴 수 있습니다. 계속하시겠습니까?")
         if roi is None:
             return
 
@@ -2195,9 +2455,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         # 작업대 평면 제거 (옵션)
         plane_msg = "작업대 평면 제거 사용 안 함"
         if self.remove_plane_check.isChecked():
-            scene_no_plane, _plane_model, plane_n = remove_table_plane(
-                scene, distance_threshold=float(self.plane_dist_spin.value())
-            )
+            scene_no_plane, _plane_model, plane_n = remove_table_plane(scene, distance_threshold=float(self.plane_dist_spin.value()))
             scene = scene_no_plane
             plane_msg = f"작업대 평면 제거: {plane_n}점 (남은 scene {len(scene.points)}점)"
             if len(scene.points) < 100:
@@ -2244,12 +2502,22 @@ class CADMatchingTab(RobotControlMixin, QWidget):
                 if self._ppf_detector is None or self._ppf_cad_path != self.cad_path:
                     self.main.statusBar().showMessage("PPF 학습 중... (수~수십초 소요)")
                     QApplication.processEvents()
-                    detector, model_data, model_o3d = train_ppf_detector(self.cad_pcd)
+                    detector, model_data, model_o3d = train_ppf_detector(
+                        self.cad_pcd,
+                        relative_sampling_step=float(self.ppf_sampling_step.value()),
+                        relative_distance_step=float(self.ppf_distance_step.value()),
+                        num_angles=int(self.ppf_angle_bins.value()),
+                    )
                     self._ppf_detector = detector
                     self._ppf_model_data = model_data
                     self._ppf_model_o3d = model_o3d
                     self._ppf_cad_path = self.cad_path
-                    logger.info(f"PPF 학습 완료: model {len(model_data)}점")
+                    logger.info(
+                        f"PPF 학습 완료: model {len(model_data)}점 "
+                        f"(sampling={float(self.ppf_sampling_step.value())}, "
+                        f"distance={float(self.ppf_distance_step.value())}, "
+                        f"angles={int(self.ppf_angle_bins.value())})"
+                    )
 
                 # PPF는 DBSCAN 클러스터링 사용 (꺼져 있으면 단일 클러스터로 처리되도록 강제)
                 eps = float(self.dbscan_eps.value()) if self.use_dbscan.isChecked() else 1e6
@@ -2262,6 +2530,10 @@ class CADMatchingTab(RobotControlMixin, QWidget):
                     self._ppf_model_o3d,
                     eps=eps,
                     min_points=min_pts,
+                    relative_scene_sample_step=float(self.ppf_scene_sample.value()),
+                    relative_scene_distance=float(self.ppf_scene_distance.value()),
+                    min_votes=int(self.ppf_min_votes.value()),
+                    n_top_candidates=int(self.ppf_top_candidates.value()),
                     progress_cb=progress_cb,
                 )
             elif self.use_dbscan.isChecked():
@@ -2367,11 +2639,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         if use_mesh:
             base_verts = np.asarray(self.cad_mesh.vertices, dtype=np.float64)
             tris = np.asarray(self.cad_mesh.triangles)
-            faces_pv = (
-                np.hstack([np.full((len(tris), 1), 3, dtype=np.int64), tris]).flatten()
-                if len(tris) > 0
-                else None
-            )
+            faces_pv = np.hstack([np.full((len(tris), 1), 3, dtype=np.int64), tris]).flatten() if len(tris) > 0 else None
         else:
             base_verts = np.asarray(self.cad_pcd.points, dtype=np.float64)
             faces_pv = None
@@ -2385,14 +2653,23 @@ class CADMatchingTab(RobotControlMixin, QWidget):
                 if use_mesh and faces_pv is not None:
                     pv_obj = pv.PolyData(verts_t, faces_pv)
                     plotter.add_mesh(
-                        pv_obj, color=color01, opacity=0.55,
-                        name=f"inst_{i}", pickable=False, reset_camera=False,
+                        pv_obj,
+                        color=color01,
+                        opacity=0.55,
+                        name=f"inst_{i}",
+                        pickable=False,
+                        reset_camera=False,
                     )
                 else:
                     pv_obj = pv.PolyData(verts_t)
                     plotter.add_mesh(
-                        pv_obj, color=color01, point_size=4, render_points_as_spheres=True,
-                        name=f"inst_{i}", pickable=False, reset_camera=False,
+                        pv_obj,
+                        color=color01,
+                        point_size=4,
+                        render_points_as_spheres=True,
+                        name=f"inst_{i}",
+                        pickable=False,
+                        reset_camera=False,
                     )
                 self._instance_actor_names.append(f"inst_{i}")
 
@@ -2402,8 +2679,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             axes_poly = pv.PolyData(axes_pts.astype(np.float32))
             axes_poly.lines = np.array([[2, 0, 1], [2, 0, 2], [2, 0, 3]]).flatten()
             plotter.add_mesh(
-                axes_poly, color=color01, line_width=4,
-                name=f"inst_axis_{i}", pickable=False, reset_camera=False, render_lines_as_tubes=True,
+                axes_poly,
+                color=color01,
+                line_width=4,
+                name=f"inst_axis_{i}",
+                pickable=False,
+                reset_camera=False,
+                render_lines_as_tubes=True,
             )
             self._instance_actor_names.append(f"inst_axis_{i}")
 
@@ -2411,8 +2693,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             plotter.add_point_labels(
                 np.array([origin + np.array([0, 0, -15], dtype=np.float32)]),
                 [f"#{i + 1}"],
-                point_size=1, font_size=14, text_color="white",
-                name=f"inst_label_{i}", always_visible=True, pickable=False, show_points=False,
+                point_size=1,
+                font_size=14,
+                text_color="white",
+                name=f"inst_label_{i}",
+                always_visible=True,
+                pickable=False,
+                show_points=False,
             )
             self._instance_actor_names.append(f"inst_label_{i}")
 
@@ -2489,9 +2776,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.btn_move.setEnabled(connected)
         self.btn_add_obj_to_seq.setEnabled(connected)
         flip_str = " [180° 적용]" if self._flip_applied else ""
-        self.main.statusBar().showMessage(
-            f"인스턴스 #{idx + 1} 선택{flip_str}: TCP X={tcp['x']:.1f}, Y={tcp['y']:.1f}, Z={tcp['z']:.1f}"
-        )
+        self.main.statusBar().showMessage(f"인스턴스 #{idx + 1} 선택{flip_str}: TCP X={tcp['x']:.1f}, Y={tcp['y']:.1f}, Z={tcp['z']:.1f}")
 
         # 3D 뷰에 Tool 자세 시각화 (Tool 좌표축 + approach 지점 + 경로선)
         self._render_tcp_visualization()
@@ -2516,23 +2801,20 @@ class CADMatchingTab(RobotControlMixin, QWidget):
                 pass
         self._tcp_viz_actors.clear()
 
-        if (
-            self.target_pose is None
-            or self.selected_idx is None
-            or self.T_calib is None
-            or self.selected_idx >= len(self.instances)
-        ):
+        if self.target_pose is None or self.selected_idx is None or self.T_calib is None or self.selected_idx >= len(self.instances):
             plotter.render()
             return
 
         # 위치: 인스턴스 변환 + grasp_offset → 카메라 좌표계 grasp 점
         T_inst = self.instances[self.selected_idx]["transformation"]
-        grasp_local = np.array([
-            self.grasp_position_cad[0],
-            self.grasp_position_cad[1],
-            self.grasp_position_cad[2],
-            1.0,
-        ])
+        grasp_local = np.array(
+            [
+                self.grasp_position_cad[0],
+                self.grasp_position_cad[1],
+                self.grasp_position_cad[2],
+                1.0,
+            ]
+        )
         origin = (T_inst @ grasp_local)[:3].astype(np.float32)
 
         # 회전: 베이스 좌표계 target 자세 → 카메라 좌표계
@@ -2557,8 +2839,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             line.lines = np.array([2, 0, 1])
             name = f"tcp_axis_{suffix}"
             plotter.add_mesh(
-                line, color=color, line_width=6, name=name,
-                render_lines_as_tubes=True, pickable=False, reset_camera=False,
+                line,
+                color=color,
+                line_width=6,
+                name=name,
+                render_lines_as_tubes=True,
+                pickable=False,
+                reset_camera=False,
             )
             self._tcp_viz_actors.append(name)
 
@@ -2567,7 +2854,11 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         approach_pos = (origin - R_in_cam[:, 2] * offset).astype(np.float32)
         sphere = pv.Sphere(radius=4, center=approach_pos)
         plotter.add_mesh(
-            sphere, color="#ffaa00", name="tcp_approach", pickable=False, reset_camera=False,
+            sphere,
+            color="#ffaa00",
+            name="tcp_approach",
+            pickable=False,
+            reset_camera=False,
         )
         self._tcp_viz_actors.append("tcp_approach")
 
@@ -2575,8 +2866,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         path = pv.PolyData(np.array([approach_pos, origin], dtype=np.float32))
         path.lines = np.array([2, 0, 1])
         plotter.add_mesh(
-            path, color="#ffaa00", line_width=3, name="tcp_path",
-            render_lines_as_tubes=True, pickable=False, reset_camera=False,
+            path,
+            color="#ffaa00",
+            line_width=3,
+            name="tcp_path",
+            render_lines_as_tubes=True,
+            pickable=False,
+            reset_camera=False,
         )
         self._tcp_viz_actors.append("tcp_path")
 
