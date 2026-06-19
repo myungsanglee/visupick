@@ -1,6 +1,6 @@
 """
 Bin Picking 탭
-- 2D 이미지 뷰: 캡처, 마우스 드래그 ROI, vidnn 객체 탐지 bbox 표시
+- 2D 이미지 뷰: 캡처, 마우스 드래그 ROI, RF-DETR 객체 탐지 bbox 표시
 - 3D 포인트 클라우드 뷰 (PyVista): ROI 박스, 검출 객체 마커, 마우스 클릭 선택
 - Hand-eye calibration 적용하여 로봇 base 좌표계로 피킹 위치 변환
 """
@@ -43,11 +43,12 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 import open3d as o3d
 
-# vidnn 경로 추가
-# 환경변수 VIDNN_PATH 로 override 가능 (다른 환경에서 클론 시 ~/.bashrc 등에 설정).
-VIDNN_PATH = os.environ.get("VIDNN_PATH", "/home/robotegra/michael/vidnn")
-if VIDNN_PATH not in sys.path:
-    sys.path.insert(0, VIDNN_PATH)
+# RF-DETR detector.py 경로 추가 (ONNX / TensorRT 통합 추론 래퍼).
+# detector.py 가 있는 디렉터리를 sys.path 에 넣어 `from detector import Detector` 가능하게 함.
+# 환경변수 RFDETR_DETECTOR_DIR 로 override 가능 (다른 환경에서 경로가 다르면 ~/.bashrc 등에 설정).
+RFDETR_DETECTOR_DIR = os.environ.get("RFDETR_DETECTOR_DIR", "/home/robotegra/michael/rf-detr/tmp")
+if RFDETR_DETECTOR_DIR not in sys.path:
+    sys.path.insert(0, RFDETR_DETECTOR_DIR)
 
 from calibration import tcp_to_homogeneous
 from kuka_robot import normalize_robot_mode, is_auto_mode
@@ -74,6 +75,8 @@ class DraggableImageLabel(ZoomableImageLabel):
         super().__init__()
         # [(x1, y1, x2, y2, color, label, obj_index), ...]
         self._overlay_boxes: List[tuple] = []
+        # [(mask(H,W) bool, color(BGR), obj_index), ...] — seg 모델일 때만 채워짐
+        self._overlay_masks: List[tuple] = []
         self._roi_rect: Optional[tuple] = None  # (x1, y1, x2, y2) 원본 이미지 좌표
         self._highlighted_idx: Optional[int] = None
 
@@ -87,6 +90,11 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._overlay_boxes = boxes
         self._refresh()
 
+    def set_masks(self, masks: List[tuple]):
+        """seg 모델 객체별 mask 오버레이. 빈 리스트면 아무것도 안 그림 (det 모델)."""
+        self._overlay_masks = masks
+        self._refresh()
+
     def set_highlight(self, idx: Optional[int]):
         self._highlighted_idx = idx
         self._refresh()
@@ -97,6 +105,7 @@ class DraggableImageLabel(ZoomableImageLabel):
 
     def clear_all(self):
         self._overlay_boxes = []
+        self._overlay_masks = []
         self._roi_rect = None
         self._highlighted_idx = None
         self.clear_image()
@@ -106,6 +115,24 @@ class DraggableImageLabel(ZoomableImageLabel):
         if self._bgr is None:
             return None
         canvas = self._bgr.copy()
+
+        # seg mask 반투명 오버레이 (bbox 아래 레이어). det 모델이면 빈 리스트 → 스킵.
+        for m_item in self._overlay_masks:
+            mask, color = m_item[0], m_item[1]
+            obj_idx = m_item[2] if len(m_item) > 2 else None
+            if mask is None or mask.shape[:2] != canvas.shape[:2] or not mask.any():
+                continue
+
+            if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
+                fill, alpha = (0, 255, 0), 0.55  # 선택된 객체: 초록 진하게
+            elif self._highlighted_idx is not None:
+                fill, alpha = tuple(int(c * 0.5) for c in color), 0.25  # 나머지 흐리게
+            else:
+                fill, alpha = color, 0.45
+
+            fill_arr = np.array(fill, dtype=np.float32)
+            region = canvas[mask].astype(np.float32)
+            canvas[mask] = (region * (1.0 - alpha) + fill_arr * alpha).astype(np.uint8)
 
         for box in self._overlay_boxes:
             x1, y1, x2, y2, color, label = box[:6]
@@ -130,15 +157,12 @@ class DraggableImageLabel(ZoomableImageLabel):
                 (tw, th), _ = cv2.getTextSize(full_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 ty = max(iy1 - 4, th + 2)
                 cv2.rectangle(canvas, (ix1, ty - th - 4), (ix1 + tw + 4, ty + 2), box_color, -1)
-                cv2.putText(canvas, full_label, (ix1 + 2, ty - 2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(canvas, full_label, (ix1 + 2, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         if self._roi_rect is not None:
             rx1, ry1, rx2, ry2 = self._roi_rect
-            cv2.rectangle(canvas, (int(rx1), int(ry1)), (int(rx2), int(ry2)),
-                          (0, 255, 255), 2)
-            cv2.putText(canvas, "ROI", (int(rx1), max(int(ry1) - 5, 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            cv2.rectangle(canvas, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (0, 255, 255), 2)
+            cv2.putText(canvas, "ROI", (int(rx1), max(int(ry1) - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         return canvas
 
@@ -522,10 +546,22 @@ class BinPickingTab(RobotControlMixin, QWidget):
     - 캡처 → 객체 탐지 → 포즈 계산 → 로봇 좌표 변환
     """
 
-    # 환경변수 VIDNN_MODEL_PATH 로 override 가능 (다른 환경에서 다른 모델 사용).
-    VIDNN_MODEL_PATH = os.environ.get(
-        "VIDNN_MODEL_PATH", "/home/robotegra/michael/vidnn/runs/ladybug.pt"
+    # RF-DETR TensorRT 엔진 경로. 환경변수 RFDETR_MODEL_PATH 로 override 가능.
+    # det / seg 엔진 모두 지원 — 결과에 mask 가 있으면(seg) 자동으로 mask 픽셀의 XYZ 로
+    # 중심을 계산하고 2D 뷰에 mask 를 칠한다. mask 가 없으면(det) bbox 사각형 크롭으로 폴백.
+    # 아래 두 경로 중 원하는 쪽을 활성화 (또는 RFDETR_MODEL_PATH 환경변수로 지정).
+    RFDETR_MODEL_PATH = os.environ.get(
+        "RFDETR_MODEL_PATH",
+        # "/home/robotegra/michael/rf-detr/tmp/rfdetr-det-nano/trt/rfdetr-nano.engine",       # det: bbox 만
+        "/home/robotegra/michael/rf-detr/tmp/rfdetr-seg-nano/trt/rfdetr-seg-nano.engine",     # seg: mask 사용
     )
+
+    # 모델 클래스 id → 이름 매핑 (rf-detr/tmp/inference.py 의 CLASSES 와 동일).
+    RFDETR_CLASSES = {
+        0: "ladybug",
+        1: "heart",
+        2: "wings",
+    }
 
     def __init__(self, main_window):
         super().__init__()
@@ -539,7 +575,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.current_intrinsics = None  # 3x3
         self.roi_2d = None  # (x1, y1, x2, y2) 픽셀
         self.roi_3d = None  # {x_min, x_max, y_min, y_max, z_min, z_max} mm
-        self.detections = []  # vidnn 탐지 리스트
+        self.detections = []  # RF-DETR 탐지 리스트
         self.pick_objects = []  # 포즈 계산된 객체
         self.selected_idx = None
         self.target_pose = None  # 선택된 객체의 로봇 base 좌표계 자세
@@ -852,7 +888,10 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
     def _load_calibration(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "캘리브레이션 파일 선택", "data", "JSON Files (*.json)",
+            self,
+            "캘리브레이션 파일 선택",
+            "data",
+            "JSON Files (*.json)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
@@ -989,49 +1028,55 @@ class BinPickingTab(RobotControlMixin, QWidget):
         QApplication.processEvents()
 
         try:
-            from vidnn.module.inference import Predictor
+            from detector import Detector
         except ImportError as e:
-            QMessageBox.critical(self, "오류", f"vidnn import 실패:\n{e}")
+            QMessageBox.critical(
+                self,
+                "오류",
+                f"detector 모듈 import 실패:\n{e}\n\n" f"경로: {RFDETR_DETECTOR_DIR}\n" "필요 패키지: supervision, tensorrt, pycuda",
+            )
             return
 
-        if not os.path.exists(self.VIDNN_MODEL_PATH):
-            QMessageBox.critical(self, "오류", f"모델 파일 없음:\n{self.VIDNN_MODEL_PATH}")
+        if not os.path.exists(self.RFDETR_MODEL_PATH):
+            QMessageBox.critical(self, "오류", f"모델 파일 없음:\n{self.RFDETR_MODEL_PATH}")
             return
 
         try:
-            # Predictor 캐싱
-            if not hasattr(self, "_predictor"):
-                self._predictor = Predictor(
-                    model_path=self.VIDNN_MODEL_PATH,
-                    task="detect",
-                    conf=self.conf_spin.value(),
-                    iou=0.6,
-                    imgsz=640,
+            # Detector 캐싱 (엔진 로드는 비싸므로 1회만). conf 는 매 추론마다 갱신.
+            if not hasattr(self, "_detector"):
+                self._detector = Detector(
+                    model_path=self.RFDETR_MODEL_PATH,
+                    model_name="rf-detr",
+                    class_names=self.RFDETR_CLASSES,
+                    conf_thresh=self.conf_spin.value(),
                 )
-            model = self._predictor
-            model.conf = self.conf_spin.value()
+            detector = self._detector
+            detector.conf_thresh = self.conf_spin.value()
 
-            pred, _ = model(self.current_image)
-            pred = pred.cpu().numpy()
+            _, result = detector.predict(self.current_image)
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"vidnn 추론 실패:\n{e}")
+            QMessageBox.critical(self, "오류", f"RF-DETR 추론 실패:\n{e}")
             return
 
-        # 검출 결과 + ROI 필터링
+        # 결과 dict(병렬 배열) → 기존 list-of-dict 포맷으로 변환 (downstream 호환).
         detections = []
-        for row in pred:
-            x1, y1, x2, y2 = row[:4]
-            conf = float(row[4])
-            cls_id = int(row[5])
-            cls_name = model.names.get(cls_id, f"class_{cls_id}")
-            detections.append(
-                {
-                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                    "confidence": conf,
-                    "class_id": cls_id,
-                    "class_name": cls_name,
-                }
-            )
+        xyxy = result["xyxy"]
+        confs = result["confidence"]
+        class_ids = result["class_id"]
+        class_names = result["class_name"]
+        masks = result.get("mask")  # seg 모델이면 (N, H, W) bool, det 모델이면 None
+        for i in range(len(xyxy)):
+            x1, y1, x2, y2 = xyxy[i]
+            det = {
+                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                "confidence": float(confs[i]),
+                "class_id": int(class_ids[i]),
+                "class_name": class_names[i],
+            }
+            # seg 모델이면 객체별 mask(H, W)를 동봉 → 이후 크롭/표시가 자동으로 mask 사용.
+            if masks is not None and i < len(masks):
+                det["mask"] = np.asarray(masks[i], dtype=bool)
+            detections.append(det)
 
         # ROI 필터
         if self.roi_3d is not None:
@@ -1064,6 +1109,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80), (255, 80, 255), (80, 255, 255)]
         valid_indices = {o["index"] for o in self.pick_objects}
         boxes = []
+        mask_overlays = []  # seg 모델일 때만 채워짐 (det 모델이면 빈 채 set_masks → 오버레이 없음)
         draw_i = 0  # 유효 객체만 순차 색 할당 (raw index 기준이면 팔레트가 듬성듬성 쓰여
         #            테이블/3D 순서와 색이 어긋남)
         for i, det in enumerate(detections):
@@ -1073,7 +1119,10 @@ class BinPickingTab(RobotControlMixin, QWidget):
             draw_i += 1
             label = f"{det['class_name']} {det['confidence']:.2f}"
             boxes.append((*det["bbox"], color, label, i))
+            if det.get("mask") is not None:
+                mask_overlays.append((det["mask"], color, i))
         self.view_2d.set_boxes(boxes)
+        self.view_2d.set_masks(mask_overlays)
 
         # 테이블 갱신
         self._update_table()
@@ -1115,9 +1164,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
             ix2 = min(w, int(x2))
             iy2 = min(h, int(y2))
 
-            crop_region = self.current_xyz[iy1:iy2, ix1:ix2].reshape(-1, 3)
-            valid_mask = ~np.any(np.isnan(crop_region), axis=1)
-            crop = crop_region[valid_mask]
+            # seg 모델이면 mask True 픽셀의 XYZ만 사용 (배경/이웃 객체 제외 → 중심 정확도↑).
+            # det 모델(mask 없음)이거나 shape 불일치면 기존처럼 bbox 사각형 크롭.
+            seg_mask = det.get("mask")
+            if seg_mask is not None and seg_mask.shape[:2] == (h, w):
+                obj_pixels = seg_mask & ~np.any(np.isnan(self.current_xyz), axis=2)
+                crop = self.current_xyz[obj_pixels]
+            else:
+                crop_region = self.current_xyz[iy1:iy2, ix1:ix2].reshape(-1, 3)
+                crop = crop_region[~np.any(np.isnan(crop_region), axis=1)]
             if len(crop) < 20:
                 logger.warning(f"[{i}] 3D 포인트 부족: {len(crop)}")
                 continue
@@ -1354,8 +1409,13 @@ class BinPickingTab(RobotControlMixin, QWidget):
             line.lines = np.array([2, 0, 1])
             name = f"tcp_axis_{suffix}"
             plotter.add_mesh(
-                line, color=color, line_width=6, name=name,
-                render_lines_as_tubes=True, pickable=False, reset_camera=False,
+                line,
+                color=color,
+                line_width=6,
+                name=name,
+                render_lines_as_tubes=True,
+                pickable=False,
+                reset_camera=False,
             )
             self._tcp_viz_actors.append(name)
 
@@ -1364,7 +1424,11 @@ class BinPickingTab(RobotControlMixin, QWidget):
         approach_pos = (origin - R_in_cam[:, 2] * offset).astype(np.float32)
         sphere = pv.Sphere(radius=4, center=approach_pos)
         plotter.add_mesh(
-            sphere, color="#ffaa00", name="tcp_approach", pickable=False, reset_camera=False,
+            sphere,
+            color="#ffaa00",
+            name="tcp_approach",
+            pickable=False,
+            reset_camera=False,
         )
         self._tcp_viz_actors.append("tcp_approach")
 
@@ -1372,8 +1436,13 @@ class BinPickingTab(RobotControlMixin, QWidget):
         path = pv.PolyData(np.array([approach_pos, origin], dtype=np.float32))
         path.lines = np.array([2, 0, 1])
         plotter.add_mesh(
-            path, color="#ffaa00", line_width=3, name="tcp_path",
-            render_lines_as_tubes=True, pickable=False, reset_camera=False,
+            path,
+            color="#ffaa00",
+            line_width=3,
+            name="tcp_path",
+            render_lines_as_tubes=True,
+            pickable=False,
+            reset_camera=False,
         )
         self._tcp_viz_actors.append("tcp_path")
 
