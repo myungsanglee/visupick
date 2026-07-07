@@ -96,6 +96,22 @@ class PercipioCamera(BaseCamera):
     # ===========================================================
     # 연결 / 설정
     # ===========================================================
+    # DiscoverCameras 가 반환하는 무효 항목의 model 값 (SN 은 유효 항목과 동일).
+    _INVALID_MODELS = {"InvalidNetCam", ""}
+
+    @classmethod
+    def _select_valid_camera(cls, infos):
+        """discovery 결과에서 유효한 CameraInfo 하나를 선택.
+
+        같은 SN 이 유효/무효(model="InvalidNetCam") 두 항목으로 중복 반환되는
+        케이스를 방어. 유효 항목 우선, 하나도 없으면 None.
+        """
+        for info in infos:
+            model = getattr(info, "model", None)
+            if model not in cls._INVALID_MODELS:
+                return info
+        return None
+
     def connect(self) -> bool:
         try:
             vcam.CameraUtils.Init(True)
@@ -104,9 +120,18 @@ class PercipioCamera(BaseCamera):
                 logger.error("Percipio 카메라를 찾지 못했습니다 (DiscoverCameras 결과 비어 있음)")
                 return False
 
-            self._cam_info = infos[0]
+            # DiscoverCameras 는 같은 카메라를 두 번 반환할 수 있다 —
+            # 유효 항목(model=FM815-IX-E1 등) + 무효 항목(model="InvalidNetCam").
+            # 무효 항목을 먼저 걸러내고, 순서에 의존하지 않고 유효한 것을 고른다.
+            self._cam_info = self._select_valid_camera(infos)
+            if self._cam_info is None:
+                logger.error(
+                    "Percipio: 유효한 카메라가 없습니다 "
+                    f"(발견 {len(infos)}개가 모두 InvalidNetCam 등 무효 상태)"
+                )
+                return False
             sn = getattr(self._cam_info, "serial_number", str(self._cam_info))
-            logger.info(f"Percipio 카메라 발견: SN={sn}")
+            logger.info(f"Percipio 카메라 발견: SN={sn}, model={getattr(self._cam_info, 'model', '?')}")
 
             self._cam = vcam.CameraFactory.GetCameraBySerialNumber(sn)
             status = self._cam.Connect()
@@ -133,11 +158,11 @@ class PercipioCamera(BaseCamera):
             except Exception as e:
                 logger.warning(f"SetMapDepthToTextureEnabled 실패 (무시): {e}")
 
-            # 왜곡 보정 활성화 (있다면) — 후속 핀홀 모델 계산이 정확해짐
-            try:
-                self._cam.SetUndistortionEnabled(True)
-            except Exception as e:
-                logger.warning(f"SetUndistortionEnabled 실패 (무시): {e}")
+            # 왜곡 보정 활성화 (있다면) — SDK 가 rectify 한 이미지를 주므로
+            # 후속 핀홀 backproject(왜곡 무시)가 정확해진다. 센서별로 지정해야 함
+            # (이 SDK 시그니처: SetUndistortionEnabled(sensor_id, enable)).
+            self._enable_undistortion_if_present(vcam.SensorType.Depth, "Depth")
+            self._enable_undistortion_if_present(vcam.SensorType.Texture, "Color")
 
             # 콜백 등록 + 캡처 시작
             self._cam.RegisterFrameSetCallback(self._on_frame_set)
@@ -169,6 +194,24 @@ class PercipioCamera(BaseCamera):
         status = self._cam.SetSensorEnabled(sensor_type, True)
         if not status:
             logger.warning(f"Percipio {label} 센서 활성화 실패: {status.message()}")
+
+    def _enable_undistortion_if_present(self, sensor_type, label: str) -> None:
+        """존재하는 센서에만 왜곡 보정 활성화. HasSensor 가 False 면 조용히 skip."""
+        try:
+            has, _ = self._cam.HasSensor(sensor_type)
+        except Exception:
+            has = True   # API 차이로 호출 실패 시, 무조건 활성화 시도
+        if not has:
+            return
+        try:
+            status = self._cam.SetUndistortionEnabled(sensor_type, True)
+            if status:
+                logger.info(f"Percipio {label} 왜곡 보정 활성화")
+            else:
+                # 일부 센서(예: Depth)는 undistortion 미지원 — best-effort 라 info 로만.
+                logger.info(f"Percipio {label} 왜곡 보정 미지원/생략: {status.message()}")
+        except Exception as e:
+            logger.info(f"SetUndistortionEnabled({label}) 생략 (무시): {e}")
 
     def _set_feature_int(self, name: str, value: int) -> bool:
         """Int 타입 feature 설정. 실패 시 False + 로그."""
@@ -226,17 +269,33 @@ class PercipioCamera(BaseCamera):
         if not self._connected or self._cam is None:
             logger.error("Percipio 미연결 — 설정 로드 불가")
             return False
+        # feature 로드는 캡처 중이면 실패한다 → 잠시 멈추고 로드 후 재개.
+        was_capturing = self._capturing
         try:
-            status = self._cam.LoadFeaturesFromFile(path)
+            if was_capturing:
+                self._cam.StopCapture()
+                self._capturing = False
+
+            # LoadFeaturesFromFile 는 (status, info) 튜플을 반환한다.
+            # info 는 적용/스킵된 feature 에 대한 SDK 메시지.
+            status, info = self._cam.LoadFeaturesFromFile(path)
             if not status:
                 logger.error(f"LoadFeaturesFromFile 실패: {status.message()}")
                 return False
             self.settings = {"_path": path}
-            logger.info(f"Percipio 설정 로드 완료: {path}")
+            logger.info(f"Percipio 설정 로드 완료: {path}" + (f" ({info})" if info else ""))
             return True
         except Exception as e:
             logger.error(f"Percipio 설정 로드 예외: {e}")
             return False
+        finally:
+            # 로드 성패와 무관하게 원래 캡처 중이었으면 재개.
+            if was_capturing and not self._capturing and self._cam is not None:
+                try:
+                    self._cam.StartCapture()
+                    self._capturing = True
+                except Exception as e:
+                    logger.error(f"설정 로드 후 캡처 재개 실패: {e}")
 
     # ===========================================================
     # 콜백 (비동기) → Queue (동기)

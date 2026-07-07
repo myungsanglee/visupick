@@ -1,0 +1,35 @@
+{
+    "model": "FM815-IX-E1",
+    "sn": "207000159423",
+    "version": "3.6.67",
+    "firmware": "3.13.85",
+    "algorithmConfig": "{\"operators\": {\"depth_inpainter\": {\"description\": \"Depth Inpainter - Fills holes in depth images\", \"enabled\": false, \"parameters\": [{\"description\": \"Kernel size for inpainting (must be odd)\", \"max\": 15, \"min\": 1, \"name\": \"kernel_size\", \"step\": 2, \"type\": 1, \"value\": 5}, {\"description\": \"Maximum internal hole size to fill\", \"max\": 500, \"min\": 0, \"name\": \"max_internal_hole\", \"step\": 1, \"type\": 1, \"value\": 50}]}, \"depth_speckle_filter\": {\"description\": \"Depth Speckle Filter - Removes speckle noise from depth images\", \"enabled\": true, \"parameters\": [{\"description\": \"Maximum speckle size to be filtered\", \"max\": 1000, \"min\": 0, \"name\": \"max_speckle_size\", \"step\": 1, \"type\": 1, \"value\": 150}, {\"description\": \"Maximum difference between speckle pixels\", \"max\": 255, \"min\": 0, \"name\": \"max_speckle_diff\", \"step\": 1, \"type\": 1, \"value\": 64}, {\"description\": \"Maximum Speckle Physical Size to be Filtered-Out\", \"max\": 10000, \"min\": 0, \"name\": \"max_physical_size\", \"step\": 0.10000000149011612, \"type\": 2, \"value\": 20}]}}, \"version\": {\"major\": 1, \"minor\": 1, \"patch\": 0}}",
+    "enabledComponents": [
+        {
+            "id": "0x00010000",
+            "desc": "TY_COMPONENT_DEPTH_CAM"
+        },
+        {
+            "id": "0x00100000",
+            "desc": "TY_COMPONENT_RGB_CAM_LEFT"
+        }
+    ],
+    "component": [
+        {
+            "id": "0x80000000",
+            "desc": "TY_COMPONENT_DEVICE",
+            "feature": [
+                {
+                    "name": "TY_STRUCT_TRIGGER_PARAM_EX",
+                    "id": "0x00007525",
+                    "value": {
+                        "mode": 1,
+                        "led_gain": 0,
+                        "fps": 0,
+                        "led_expo": 0
+                    }
+                }
+            ]
+        }
+    ]
+}
