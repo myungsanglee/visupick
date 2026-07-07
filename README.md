@@ -18,7 +18,7 @@
 - 비선형 정밀화 + greedy outlier 제거 → **일관성 0.2 mm 이하 달성**
 - 자세한 원리: [docs/hand_eye_calibration.md](docs/hand_eye_calibration.md)
 
-### 2. Bin Picking (YOLO + 3D 포인트클라우드)
+### 2. Bin Picking (RF-DETR + 3D 포인트클라우드)
 - `RF-DETR` 객체 검출 (ONNX/TensorRT) → 객체별 3D 중심 + 표면 법선 추정
 - 2D 이미지 ROI 드래그 + 3D 시점 자동 매칭
 - 객체 중심에 **Tool 좌표축 시각화** (그리퍼 접근 자세를 실시간 미리보기)
@@ -138,7 +138,7 @@ GUI가 열리면 다음 순서로 진행:
 3. 작업 시나리오 선택:
    - **데이터 수집** 탭 → 캘리브레이션
    - **검증** 탭 → 캘리브레이션 정확도 확인
-   - **Bin Picking** 탭 → YOLO + 픽킹
+   - **Bin Picking** 탭 → RF-DETR + 픽킹
    - **CAD 매칭** 탭 → CAD 6D pose + 픽킹
 
 ### 단축키 (탭에 따라 다름)
@@ -155,7 +155,7 @@ GUI가 열리면 다음 순서로 진행:
 ```
 visupick/
 ├── main.py                      # 진입점 + 메인 윈도우 + 데이터 수집/검증 탭
-├── bin_picking_tab.py           # Bin Picking 탭 (YOLO + 3D)
+├── bin_picking_tab.py           # Bin Picking 탭 (RF-DETR + 3D)
 ├── cad_matching_tab.py          # CAD 6D 매칭 탭 (FPFH/PPF/FGR)
 ├── robot_control_mixin.py       # 두 탭 공통: 로봇 이동·시퀀스 큐·안전·E-stop
 ├── calibration.py               # Hand-eye 알고리즘 + 객체 자세 계산
@@ -217,7 +217,7 @@ visupick/
 이 프로젝트가 어떻게 동작하는지 학습 목적으로 정리한 한국어 문서들입니다.
 
 - **[docs/hand_eye_calibration.md](docs/hand_eye_calibration.md)** — Hand-eye calibration 이란 / Eye-in-Hand vs Eye-to-Hand / 데이터 수집 / 5종 알고리즘 / 비선형 정밀화 / 3D 카메라가 mm 절대 측정이 가능한 이유
-- **[docs/bin_picking.md](docs/bin_picking.md)** — Bin picking 4단계 / YOLO 검출 / 3D 포즈 추정 / 좌표 변환 / 수직 접근 자세 계산 / Tool 자세 시각화 / 안전장치
+- **[docs/bin_picking.md](docs/bin_picking.md)** — Bin picking 4단계 / RF-DETR 검출 / 3D 포즈 추정 / 좌표 변환 / 수직 접근 자세 계산 / Tool 자세 시각화 / 안전장치
 - **[docs/cad_matching.md](docs/cad_matching.md)** — CAD 기반 6D pose / FPFH+ICP vs PPF / DBSCAN 클러스터링 / 작업대 평면 제거 / Grasp 위치·회전 / 멀티 인스턴스
 - **[docs/kuka_communication.md](docs/kuka_communication.md)** — C3Bridge 프로토콜 / 메시지 포맷 (Type 0/1/11) / KRL 20슬롯 모션 큐 / Python ↔ KRL 흐름 / 비상정지 인터럽트 + RESUME / RobotControlMixin
 

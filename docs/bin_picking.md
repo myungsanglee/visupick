@@ -40,24 +40,23 @@
 
 ---
 
-## 3. 객체 검출 (YOLO/vidnn)
+## 3. 객체 검출 (RF-DETR)
 
-본 프로그램은 자체 YOLO 추론 라이브러리 `vidnn`을 사용한다 ([bin_picking_tab.py:1029](../bin_picking_tab.py#L1029) `_detect()`).
+본 프로그램은 RF-DETR 추론 래퍼 `detector.py`(별도 리포, 환경변수로 경로 지정)를 사용한다 ([bin_picking_tab.py:1030](../bin_picking_tab.py#L1030) `_detect()`). 엔진 로드는 비싸므로 `Detector` 인스턴스는 1회만 생성해 캐싱하고, 신뢰도 임계값만 매 추론마다 갱신한다.
 
 ```python
-from vidnn.module.inference import Predictor
+from detector import Detector
 
-self._predictor = Predictor(
-    model_path="/home/robotegra/michael/vidnn/runs/ladybug.pt",
-    task="detect",
-    conf=0.5,         # 신뢰도 임계값
-    iou=0.6,          # NMS IoU 임계값
-    imgsz=640,
+self._detector = Detector(
+    model_path=self.RFDETR_MODEL_PATH,     # .engine(TensorRT) 또는 .onnx
+    model_name="rf-detr",
+    class_names=self.RFDETR_CLASSES,       # {0: ladybug, 1: heart, 2: wings}
+    conf_thresh=self.conf_spin.value(),    # 신뢰도 임계값
 )
-pred, _ = model(self.current_image)
+_, result = self._detector.predict(self.current_image)
 ```
 
-출력은 `(N, 6)` 배열로 `[x1, y1, x2, y2, conf, class_id]` 형식.
+출력 `result`는 병렬 배열을 담은 dict: `xyxy` (N, 4), `confidence` (N,), `class_id` (N,), `class_name`, 그리고 seg 모델이면 `mask` (N, H, W) bool (det 모델이면 `None`). 이를 downstream 호환을 위해 `[{"bbox", "confidence", "class_id", "class_name", ("mask")}, ...]` list-of-dict 로 변환한다. seg 모델의 mask 는 이후 크롭/표시에 자동으로 사용된다.
 
 ### 3.1 ROI 필터링
 
@@ -456,7 +455,7 @@ Zivid → 2D 이미지 + 3D XYZ + 법선 맵 + intrinsics
 사용자 → "검출" 버튼
          ↓
 [객체 검출]
-vidnn YOLO → bbox 리스트 (N, 6)
+RF-DETR → 검출 리스트 (bbox + class + 선택적 mask)
          ↓
 ROI 필터링 (bbox 중심의 3D 좌표 검사)
          ↓
@@ -537,7 +536,7 @@ Mixin 안에 들어간 메서드 (19개):
 이 시스템이 다루지 못하는 / 단순화한 부분:
 
 - **수직 접근 가정**: 모든 객체에 표면 법선 수직 방향으로 다가간다. 더 복잡한 그리퍼/객체 형태에서는 객체 자체의 자세(orientation)도 같이 추정해야 한다 (6DoF pose estimation, 예: PVN3D, FoundationPose 등).
-- **형상 매칭 없음**: YOLO는 "물체가 거기 있다"만 알려준다. 실제로 그리퍼가 잡기 좋은 손잡이/평면이 어딘지는 본 시스템이 알지 못한다.
+- **형상 매칭 없음**: RF-DETR는 "물체가 거기 있다"만 알려준다. 실제로 그리퍼가 잡기 좋은 손잡이/평면이 어딘지는 본 시스템이 알지 못한다.
 - **충돌 회피 없음**: Approach → Target 직선 운동이 다른 물체를 안 건드린다는 보장은 없다. 점유 격자(occupancy grid) 기반 모션 플래너를 붙이면 안전성이 크게 올라간다.
 - **반복 가능성**: 한 번 검출한 후 시퀀스를 시작하면 그 사이 박스 내부 변화를 반영하지 못한다 (10장 참고).
 

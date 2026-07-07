@@ -18,6 +18,8 @@ zivid>=2.10
 # https://github.com/IntelRealSense/librealsense
 pyrealsense2>=2.54
 
-# --- (옵션) vidnn YOLO 추론 - bin picking 탭에서 사용 ---
-# 별도 리포지토리. 사용 안 하면 주석 처리.
-# vidnn @ git+https://github.com/<user>/vidnn.git
+# --- (옵션) RF-DETR 객체 검출 - bin picking 탭에서 사용 ---
+# detector.py(RF-DETR 추론 래퍼)는 별도 리포지토리. 경로는 환경변수
+# RFDETR_DETECTOR_DIR / RFDETR_MODEL_PATH 로 지정 (README 참고).
+# TensorRT 엔진 사용 시:  supervision, tensorrt, pycuda
+# ONNX 모델만 사용 시:    supervision, onnxruntime-gpu

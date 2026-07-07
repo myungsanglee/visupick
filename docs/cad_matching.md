@@ -10,7 +10,7 @@
 
 | | Bin Picking 탭 | CAD 매칭 탭 |
 |---|---|---|
-| 객체 인식 입력 | 학습된 **YOLO (vidnn)** | CAD 모델 (STL/OBJ/PLY) |
+| 객체 인식 입력 | 학습된 **RF-DETR** | CAD 모델 (STL/OBJ/PLY) |
 | 객체별 결과 | 중심점 + 표면 법선 (**5DoF**) | 완전한 6D 자세 (회전 3 + 위치 3) |
 | 학습 데이터 필요? | YES | **NO** (CAD만 있으면 됨) |
 | 무작위 자세 처리 | 약 (수직 접근 가정) | **강** (특히 PPF) |
@@ -260,4 +260,4 @@ CAD 매칭 탭의 로봇 제어 / 시퀀스 큐 / 비상정지 / Home 이동 등
 - OpenCV Surface Matching: [cv2.ppf_match_3d module](https://docs.opencv.org/4.x/d9/d25/group__surface__matching.html)
 - 본 시스템의 hand-eye calibration 원리: [hand_eye_calibration.md](hand_eye_calibration.md)
 - 본 시스템의 KUKA 통신 구조: [kuka_communication.md](kuka_communication.md)
-- 본 시스템의 빈 픽킹 (YOLO 기반): [bin_picking.md](bin_picking.md)
+- 본 시스템의 빈 픽킹 (RF-DETR 기반): [bin_picking.md](bin_picking.md)
