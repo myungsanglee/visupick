@@ -36,10 +36,13 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QProgressBar,
     QListWidget,
+    QDialog,
+    QDialogButtonBox,
 )
 
 import cv2
 import pyvista as pv
+from pyvistaqt import QtInteractor
 import open3d as o3d
 from scipy.spatial.transform import Rotation
 
@@ -965,6 +968,484 @@ def object_pose_to_tcp(
     return _apply_tool_rotation(T_tcp)
 
 
+def _frame_from_z(z: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """Tool +Z 방향과 참조 X 후보로부터 직교 3x3 회전(열=X/Y/Z축) 생성.
+
+    compute_grasp_pose 3단계와 동일한 Gram-Schmidt 방식 — ref 를 z에 수직인
+    평면에 투영해 X축으로 쓰고, 퇴화 시 월드 X→Y 순으로 fallback.
+    """
+    z = z / np.linalg.norm(z)
+    x = ref - np.dot(ref, z) * z
+    if np.linalg.norm(x) < 1e-6:
+        wx = np.array([1.0, 0.0, 0.0])
+        x = wx - np.dot(wx, z) * z
+        if np.linalg.norm(x) < 1e-6:
+            wy = np.array([0.0, 1.0, 0.0])
+            x = wy - np.dot(wy, z) * z
+    x = x / np.linalg.norm(x)
+    y = np.cross(z, x)
+    return np.column_stack([x, y, z])
+
+
+def _aligned_tool_frame(grasp_axis: str, grasp_flip: bool) -> Optional[np.ndarray]:
+    """compute_grasp_pose 3단계의 축 정렬을 CAD 좌표계(객체 자세=I)에서 재현.
+
+    반환: 3x3 회전 (열 = 정렬된 Tool X/Y/Z 축, CAD 좌표계 기준).
+    잡기 축이 "Off (자동)"면 정렬 기준이 없으므로 None.
+    """
+    if grasp_axis is None or str(grasp_axis).startswith("Off"):
+        return None
+    eye = np.eye(3)
+    axis_vec = {"X": eye[:, 0], "Y": eye[:, 1], "Z": eye[:, 2]}[grasp_axis]
+    base_z = -axis_vec if grasp_flip else axis_vec
+    ref_name = "X" if grasp_axis != "X" else "Y"
+    ref_axis = {"X": eye[:, 0], "Y": eye[:, 1], "Z": eye[:, 2]}[ref_name]
+    return _frame_from_z(base_z, ref_axis)
+
+
+def tool_frame_from_normal(
+    normal: np.ndarray, grasp_axis: str, grasp_flip: bool
+) -> Optional[np.ndarray]:
+    """표면 법선 → 제안되는 최종 Tool 좌표계 (CAD 기준, 열 = X/Y/Z축).
+
+    Tool+Z 는 표면 안쪽(-normal), X축은 정렬 X를 유지하려 시도해 손목
+    비틀림(twist)을 최소화. 잡기 축 Off 또는 법선 퇴화 시 None.
+    """
+    R_aligned = _aligned_tool_frame(grasp_axis, grasp_flip)
+    if R_aligned is None:
+        return None
+    n = np.asarray(normal, dtype=float)
+    ln = np.linalg.norm(n)
+    if not np.isfinite(ln) or ln < 1e-9:
+        return None
+    return _frame_from_z(-n / ln, R_aligned[:, 0])
+
+
+def suggest_rotation_from_normal(
+    normal: np.ndarray, grasp_axis: str, grasp_flip: bool
+) -> Optional[Tuple[float, float, float]]:
+    """CAD 표면 법선 → 그리퍼가 그 면에 수직 접근하도록 grasp 회전(A/B/C deg) 제안.
+
+    compute_grasp_pose 는 먼저 Tool+Z 를 잡기 축에 정렬한 뒤 Tool 좌표계 기준
+    추가 회전(grasp_rotation_abc)을 곱한다. 여기서는 그 "추가 회전"을 역산:
+    정렬 결과 R_aligned 와 원하는 자세(tool_frame_from_normal)의 차이를
+    ZYX intrinsic (KUKA A/B/C)로 분해. 잡기 축 "Off (자동)"면 None.
+    """
+    R_aligned = _aligned_tool_frame(grasp_axis, grasp_flip)
+    R_desired = tool_frame_from_normal(normal, grasp_axis, grasp_flip)
+    if R_aligned is None or R_desired is None:
+        return None
+    R_add = R_aligned.T @ R_desired
+    a, b, c = Rotation.from_matrix(R_add).as_euler("ZYX", degrees=True)
+    return float(a), float(b), float(c)
+
+
+class GraspPointDialog(QDialog):
+    """PickIt 스타일 3D grasp 지점 + 자세 설정 팝업.
+
+    이 창 하나에서 grasp 위치(X/Y/Z)와 회전(A/B/C)을 모두 설정한다:
+    - CAD 를 솔리드 메쉬로 표시 (기존 voxel 뷰와 별개)
+    - 표면 클릭 → 그리퍼 끝 마커(구)가 그 지점에 스냅
+    - 구를 드래그해 위치 미세조정
+    - 위치/회전 스핀박스로 정밀 조정 (3D 마커·삼각대가 실시간 반영)
+    - "표면 법선으로 회전 자동" 체크 시, 클릭/이동할 때마다 그 면에 수직
+      접근하도록 A/B/C 자동 계산
+    - 삼각대 화살표: 노랑=Tool+Z(접근), 빨강=Tool+X, 초록=Tool+Y —
+      항상 현재 A/B/C 값을 반영한 실제 그리퍼 자세
+
+    적용 시 result_position(CAD mm), result_abc(deg)에 결과 저장.
+    부모 탭이 exec() 후 grasp 상태에 반영한다.
+    """
+
+    def __init__(
+        self,
+        parent,
+        cad_mesh_o3d: Optional[o3d.geometry.TriangleMesh],
+        cad_pcd_o3d: Optional[o3d.geometry.PointCloud],
+        cad_path: Optional[str],
+        init_pos: Tuple[float, float, float],
+        init_abc: Tuple[float, float, float],
+        grasp_axis: str,
+        grasp_flip: bool,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Grasp 설정 (3D) — 위치·회전을 여기서 모두 조정")
+        self.resize(1040, 860)
+
+        self._grasp_axis = grasp_axis
+        self._grasp_flip = grasp_flip
+        self.result_position = np.array(init_pos, dtype=float)
+        self.result_abc = np.array(init_abc, dtype=float)
+        self._normal: Optional[np.ndarray] = None
+        self._guard = False  # 스핀박스↔위젯 신호 루프 방지
+
+        # ---- 메쉬 준비 (o3d → pyvista, 면 없으면 점군 fallback) ----
+        self._mesh = self._build_pv_mesh(cad_mesh_o3d, cad_pcd_o3d, cad_path)
+        self._has_faces = self._mesh is not None and self._mesh.n_cells > 0
+        self._normals_available = False
+        if self._has_faces:
+            try:
+                self._mesh = self._mesh.compute_normals(
+                    point_normals=True, cell_normals=False,
+                    auto_orient_normals=True, inplace=False,
+                )
+                self._normals_available = "Normals" in self._mesh.point_data
+            except Exception:
+                try:
+                    self._mesh = self._mesh.compute_normals(
+                        point_normals=True, cell_normals=False, inplace=False
+                    )
+                    self._normals_available = "Normals" in self._mesh.point_data
+                except Exception as e:
+                    logger.warning(f"메쉬 normal 계산 실패 (회전 자동 비활성): {e}")
+
+        diag = 100.0
+        if self._mesh is not None and self._mesh.n_points > 0:
+            b = self._mesh.bounds
+            diag = float(np.linalg.norm([b[1] - b[0], b[3] - b[2], b[5] - b[4]]))
+        self._diag = max(diag, 1e-3)
+        pos_lim = max(1000.0, self._diag * 5.0)
+
+        axis_off = str(grasp_axis).startswith("Off")
+
+        # ---- UI ----
+        vbox = QVBoxLayout(self)
+        guide = QLabel(
+            "🖱 <b>표면 클릭</b> = 마커 배치  |  <b>주황 구 드래그</b> = 위치 미세조정  |  "
+            "빈 곳 드래그 = 시점 회전, 휠 = 줌<br>"
+            "삼각대 = 그리퍼 자세(현재 A/B/C 반영):  "
+            "<span style='color:#c8a800'><b>노랑 = 접근(Tool +Z)</b></span>  ·  "
+            "<span style='color:#cc2222'><b>빨강 = Tool +X</b></span>  ·  "
+            "<span style='color:#22aa22'><b>초록 = Tool +Y</b></span>"
+        )
+        guide.setWordWrap(True)
+        vbox.addWidget(guide)
+
+        self.plotter = QtInteractor(self)
+        self.plotter.set_background("#1e1e1e")
+        vbox.addWidget(self.plotter, stretch=1)
+
+        # --- 위치 행 ---
+        pos_row = QHBoxLayout()
+        pos_row.addWidget(QLabel("Grasp 위치 (CAD mm):"))
+        self.x_spin, self.y_spin, self.z_spin = (QDoubleSpinBox() for _ in range(3))
+        for lbl, sp, val in (("X", self.x_spin, self.result_position[0]),
+                             ("Y", self.y_spin, self.result_position[1]),
+                             ("Z", self.z_spin, self.result_position[2])):
+            sp.setRange(-pos_lim, pos_lim)
+            sp.setDecimals(1)
+            sp.setSingleStep(1.0)
+            sp.setFixedWidth(90)
+            sp.setValue(float(val))
+            sp.valueChanged.connect(self._on_pos_spin)
+            pos_row.addWidget(QLabel(lbl))
+            pos_row.addWidget(sp)
+        self.btn_origin = QPushButton("원점")
+        self.btn_origin.setToolTip("위치를 CAD 원점(0,0,0)으로")
+        self.btn_origin.clicked.connect(lambda: self._set_position_ui(np.zeros(3)))
+        pos_row.addWidget(self.btn_origin)
+        self.btn_center = QPushButton("객체 중심")
+        self.btn_center.setToolTip("위치를 CAD bounding box 중심으로")
+        self.btn_center.clicked.connect(self._to_center)
+        pos_row.addWidget(self.btn_center)
+        pos_row.addStretch()
+        vbox.addLayout(pos_row)
+
+        # --- 회전 행 ---
+        rot_row = QHBoxLayout()
+        rot_row.addWidget(QLabel("Grasp 회전 (Tool deg):"))
+        self.a_spin, self.b_spin, self.c_spin = (QDoubleSpinBox() for _ in range(3))
+        tips = {
+            "A": "Tool +Z 둘레 회전 (yaw, 손목 돌림)",
+            "B": "Tool +Y 둘레 회전 (pitch, 비스듬한 접근)",
+            "C": "Tool +X 둘레 회전 (roll, 옆으로 기울임)",
+        }
+        for lbl, sp, val in (("A", self.a_spin, self.result_abc[0]),
+                             ("B", self.b_spin, self.result_abc[1]),
+                             ("C", self.c_spin, self.result_abc[2])):
+            sp.setRange(-180.0, 180.0)
+            sp.setDecimals(1)
+            sp.setSingleStep(5.0)
+            sp.setFixedWidth(90)
+            sp.setValue(float(val))
+            sp.setToolTip(tips[lbl])
+            sp.valueChanged.connect(self._on_rot_spin)
+            rot_row.addWidget(QLabel(lbl))
+            rot_row.addWidget(sp)
+        self.btn_rot0 = QPushButton("회전 0")
+        self.btn_rot0.setToolTip("A/B/C = 0 (잡기 축 기본 정렬만)")
+        self.btn_rot0.clicked.connect(lambda: self._set_abc_ui(np.zeros(3)))
+        rot_row.addWidget(self.btn_rot0)
+
+        self.normal_check = QCheckBox("표면 법선으로 회전 자동")
+        can_suggest = self._normals_available and not axis_off
+        # 기존 회전이 없을 때(0,0,0)만 기본 ON — 사용자가 이미 맞춰둔 값은 보존
+        self.normal_check.setChecked(can_suggest and np.allclose(self.result_abc, 0.0))
+        self.normal_check.setEnabled(can_suggest)
+        if axis_off:
+            self.normal_check.setToolTip("잡기 축이 'Off (자동)'이면 회전 자동 불가 (정렬 기준 축 없음)")
+        elif not self._normals_available:
+            self.normal_check.setToolTip("CAD 에 면이 없어 법선 계산 불가 (점군 파일)")
+        else:
+            self.normal_check.setToolTip("체크 시, 마커를 옮길 때마다 그 면에 수직 접근하도록 A/B/C 자동 설정")
+        self.normal_check.toggled.connect(self._on_normal_check)
+        rot_row.addWidget(self.normal_check)
+        rot_row.addStretch()
+        vbox.addLayout(rot_row)
+
+        self.info_label = QLabel("-")
+        self.info_label.setStyleSheet("font-family: monospace;")
+        vbox.addWidget(self.info_label)
+
+        buttons = QDialogButtonBox()
+        btn_apply = buttons.addButton("적용", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
+        btn_apply.setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        vbox.addWidget(buttons)
+
+        # ---- 3D 씬 구성 ----
+        if self._mesh is not None:
+            if self._has_faces:
+                self.plotter.add_mesh(
+                    self._mesh, color="#9ab0c4", smooth_shading=True,
+                    name="cad_mesh", pickable=True,
+                )
+            else:
+                self.plotter.add_mesh(
+                    self._mesh, color="#9ab0c4", point_size=3,
+                    render_points_as_spheres=True, name="cad_mesh", pickable=True,
+                )
+        self.plotter.add_axes()
+
+        # 그리퍼 끝 마커: 드래그 가능한 구 위젯
+        try:
+            self._sphere_widget = self.plotter.add_sphere_widget(
+                self._on_sphere_moved,
+                center=tuple(self.result_position),
+                radius=self._diag * 0.02,
+                color="#ff6633",
+                style="surface",
+                interaction_event="always",
+            )
+        except TypeError:
+            self._sphere_widget = self.plotter.add_sphere_widget(
+                self._on_sphere_moved,
+                center=tuple(self.result_position),
+                radius=self._diag * 0.02,
+                color="#ff6633",
+                style="surface",
+            )
+
+        # 표면 클릭 → 마커 스냅
+        try:
+            if self._has_faces:
+                self.plotter.enable_surface_point_picking(
+                    callback=self._on_surface_pick,
+                    show_message=False, show_point=False, left_clicking=True,
+                )
+            else:
+                self.plotter.enable_point_picking(
+                    callback=self._on_surface_pick,
+                    show_message=False, show_point=False,
+                    left_clicking=True, use_picker=False,
+                )
+        except Exception as e:
+            logger.warning(f"표면 픽킹 활성화 실패 (드래그만 가능): {e}")
+
+        self.plotter.view_isometric()
+        self.plotter.reset_camera()
+        self._recompute_normal()
+        self._redraw()
+
+    @staticmethod
+    def _build_pv_mesh(mesh_o3d, pcd_o3d, cad_path) -> Optional[pv.PolyData]:
+        """o3d mesh/pcd → pyvista PolyData. 면이 있으면 mesh, 없으면 점군."""
+        try:
+            if mesh_o3d is not None and len(mesh_o3d.triangles) > 0:
+                verts = np.asarray(mesh_o3d.vertices, dtype=float)
+                tris = np.asarray(mesh_o3d.triangles, dtype=np.int64)
+                faces = np.hstack([np.full((len(tris), 1), 3, dtype=np.int64), tris]).ravel()
+                return pv.PolyData(verts, faces)
+        except Exception as e:
+            logger.warning(f"o3d mesh → pyvista 변환 실패: {e}")
+        try:
+            if cad_path:
+                m = pv.read(cad_path)
+                if m.n_points > 0:
+                    return m
+        except Exception as e:
+            logger.warning(f"pv.read({cad_path}) 실패: {e}")
+        try:
+            if pcd_o3d is not None and len(pcd_o3d.points) > 0:
+                return pv.PolyData(np.asarray(pcd_o3d.points, dtype=float))
+        except Exception as e:
+            logger.warning(f"o3d pcd → pyvista 변환 실패: {e}")
+        return None
+
+    # ---- 상태 → 프레임 계산 ----
+    def _final_tool_frame(self) -> np.ndarray:
+        """현재 A/B/C 가 반영된 최종 Tool 좌표계 (CAD 기준, 열=X/Y/Z).
+
+        compute_grasp_pose 와 동일: 잡기 축 정렬(R_aligned) × ABC 보정.
+        잡기 축 Off 면 정렬 기준이 없으므로 항등을 기준으로 ABC 만 적용(미리보기용).
+        """
+        R_aligned = _aligned_tool_frame(self._grasp_axis, self._grasp_flip)
+        if R_aligned is None:
+            R_aligned = np.eye(3)
+        R_abc = Rotation.from_euler("ZYX", np.radians(self.result_abc)).as_matrix()
+        return R_aligned @ R_abc
+
+    def _recompute_normal(self):
+        """현재 위치 최근접 표면점의 법선 갱신."""
+        self._normal = None
+        if self._normals_available and self._mesh is not None and self._mesh.n_points > 0:
+            try:
+                idx = self._mesh.find_closest_point(self.result_position)
+                n = np.asarray(self._mesh.point_data["Normals"][idx], dtype=float)
+                if np.isfinite(n).all() and np.linalg.norm(n) > 1e-9:
+                    self._normal = n / np.linalg.norm(n)
+            except Exception:
+                pass
+
+    def _maybe_autofill_abc(self) -> bool:
+        """법선 자동 체크 상태면 현재 법선으로 A/B/C 재계산해 스핀박스 반영.
+
+        반영했으면 True (스핀박스 setValue 가 _on_rot_spin 을 통해 재그림 유발)."""
+        if not self.normal_check.isChecked() or self._normal is None:
+            return False
+        abc = suggest_rotation_from_normal(self._normal, self._grasp_axis, self._grasp_flip)
+        if abc is None:
+            return False
+        self._set_abc_ui(np.array(abc, dtype=float))
+        return True
+
+    # ---- 상호작용 콜백 ----
+    def _on_surface_pick(self, point):
+        if point is None:
+            return
+        pos = np.asarray(point, dtype=float)
+        if pos.size < 3 or not np.all(np.isfinite(pos)):
+            return
+        self._set_position_ui(pos[:3])
+
+    def _on_sphere_moved(self, center):
+        if self._guard:
+            return
+        self.result_position = np.array(center, dtype=float)[:3]
+        self._sync_pos_spins()
+        self._recompute_normal()
+        if not self._maybe_autofill_abc():
+            self._redraw()
+
+    def _on_pos_spin(self):
+        if self._guard:
+            return
+        self.result_position = np.array(
+            [self.x_spin.value(), self.y_spin.value(), self.z_spin.value()], dtype=float
+        )
+        self._move_sphere_widget()
+        self._recompute_normal()
+        if not self._maybe_autofill_abc():
+            self._redraw()
+
+    def _on_rot_spin(self):
+        if self._guard:
+            return
+        self.result_abc = np.array(
+            [self.a_spin.value(), self.b_spin.value(), self.c_spin.value()], dtype=float
+        )
+        self._redraw()
+
+    def _on_normal_check(self, _checked):
+        if not self._maybe_autofill_abc():
+            self._redraw()
+
+    # ---- 위치/회전 설정 헬퍼 (guard 로 신호 루프 차단) ----
+    def _set_position_ui(self, pos: np.ndarray):
+        self.result_position = np.array(pos, dtype=float)[:3]
+        self._sync_pos_spins()
+        self._move_sphere_widget()
+        self._recompute_normal()
+        if not self._maybe_autofill_abc():
+            self._redraw()
+
+    def _set_abc_ui(self, abc: np.ndarray):
+        self.result_abc = np.array(abc, dtype=float)[:3]
+        self._guard = True
+        self.a_spin.setValue(float(self.result_abc[0]))
+        self.b_spin.setValue(float(self.result_abc[1]))
+        self.c_spin.setValue(float(self.result_abc[2]))
+        self._guard = False
+        self._redraw()
+
+    def _sync_pos_spins(self):
+        self._guard = True
+        self.x_spin.setValue(float(self.result_position[0]))
+        self.y_spin.setValue(float(self.result_position[1]))
+        self.z_spin.setValue(float(self.result_position[2]))
+        self._guard = False
+
+    def _move_sphere_widget(self):
+        try:
+            self._guard = True
+            self._sphere_widget.SetCenter(*self.result_position)
+        except Exception:
+            pass
+        finally:
+            self._guard = False
+
+    def _to_center(self):
+        if self._mesh is None or self._mesh.n_points == 0:
+            return
+        b = self._mesh.bounds
+        center = np.array([(b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2])
+        self._set_position_ui(center)
+
+    # ---- 렌더링 ----
+    def _redraw(self):
+        """마커 삼각대(그리퍼 자세) 다시 그리기 + 정보 갱신."""
+        for name in ("approach_arrow", "tool_x_arrow", "tool_y_arrow"):
+            try:
+                self.plotter.remove_actor(name, render=False)
+            except Exception:
+                pass
+        pos = self.result_position
+        R = self._final_tool_frame()
+        L = self._diag * 0.18
+        L_xy = self._diag * 0.12
+        # 접근(노랑, Tool+Z): 바깥에서 마커로 들어옴
+        approach = pv.Arrow(start=pos - R[:, 2] * L, direction=R[:, 2], scale=L)
+        self.plotter.add_mesh(approach, color="#ffdd22", name="approach_arrow",
+                              pickable=False, reset_camera=False)
+        for name, vec, color in (("tool_x_arrow", R[:, 0], "#ff4444"),
+                                 ("tool_y_arrow", R[:, 1], "#44ff44")):
+            self.plotter.add_mesh(pv.Arrow(start=pos, direction=vec, scale=L_xy),
+                                  color=color, name=name, pickable=False, reset_camera=False)
+        self.plotter.render()
+        self._refresh_info()
+
+    def _refresh_info(self):
+        x, y, z = self.result_position
+        a, b, c = self.result_abc
+        text = (f"위치 X {x:8.1f}  Y {y:8.1f}  Z {z:8.1f} mm    |    "
+                f"회전 A {a:6.1f}  B {b:6.1f}  C {c:6.1f} °")
+        if self.normal_check.isChecked() and self._normal is not None:
+            text += "    (법선 자동)"
+        elif self._normals_available and self._normal is None:
+            text += "    (법선 없음 — 표면을 클릭하세요)"
+        self.info_label.setText(text)
+
+    def done(self, result: int):
+        """다이얼로그 종료 시 VTK 자원 해제 (QtInteractor 누수 방지)."""
+        try:
+            self.plotter.close()
+        except Exception:
+            pass
+        super().done(result)
+
+
 # ============================================================
 # CAD 매칭 탭
 # ============================================================
@@ -1505,85 +1986,23 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.ppf_params_widget.setVisible(False)  # 초기엔 숨김
         # (PPF 파라미터는 나중에 왼쪽 패널로 이동)
 
-        # === 상단 4행: Grasp 포인트 설정 (CAD 좌표계 기준) ===
+        # === 상단 4행: Grasp 설정 (3D 창에서 위치·회전 모두 조정) ===
         top4 = QHBoxLayout()
-        top4.addWidget(QLabel("Grasp 위치 (CAD mm):"))
-        top4.addWidget(QLabel("X"))
-        self.grasp_x_spin = QDoubleSpinBox()
-        self.grasp_x_spin.setRange(-1000.0, 1000.0)
-        self.grasp_x_spin.setSingleStep(1.0)
-        self.grasp_x_spin.setDecimals(1)
-        self.grasp_x_spin.setFixedWidth(80)
-        self.grasp_x_spin.valueChanged.connect(self._on_grasp_position_changed)
-        top4.addWidget(self.grasp_x_spin)
-        top4.addWidget(QLabel("Y"))
-        self.grasp_y_spin = QDoubleSpinBox()
-        self.grasp_y_spin.setRange(-1000.0, 1000.0)
-        self.grasp_y_spin.setSingleStep(1.0)
-        self.grasp_y_spin.setDecimals(1)
-        self.grasp_y_spin.setFixedWidth(80)
-        self.grasp_y_spin.valueChanged.connect(self._on_grasp_position_changed)
-        top4.addWidget(self.grasp_y_spin)
-        top4.addWidget(QLabel("Z"))
-        self.grasp_z_spin = QDoubleSpinBox()
-        self.grasp_z_spin.setRange(-1000.0, 1000.0)
-        self.grasp_z_spin.setSingleStep(1.0)
-        self.grasp_z_spin.setDecimals(1)
-        self.grasp_z_spin.setFixedWidth(80)
-        self.grasp_z_spin.valueChanged.connect(self._on_grasp_position_changed)
-        top4.addWidget(self.grasp_z_spin)
+        self.btn_grasp_3d = QPushButton("🎯 Grasp 3D 설정")
+        self.btn_grasp_3d.setToolTip(
+            "PickIt 스타일 3D 설정 창 — CAD 표면을 클릭하거나 그리퍼 끝 마커(구)를 드래그해\n"
+            "잡을 지점을 지정하고, 위치(X/Y/Z)·회전(A/B/C)을 그 창에서 모두 조정합니다.\n"
+            "표면 법선으로 접근 회전을 자동 계산할 수도 있습니다."
+        )
+        self.btn_grasp_3d.clicked.connect(self._open_grasp_point_dialog)
+        top4.addWidget(self.btn_grasp_3d)
 
-        self.btn_grasp_reset = QPushButton("원점(0,0,0)")
-        self.btn_grasp_reset.setToolTip("Grasp 위치를 CAD 좌표 원점(0,0,0)으로 리셋. CAD 원점이 곧 잡는 위치가 됨.")
-        self.btn_grasp_reset.clicked.connect(self._grasp_to_origin)
-        top4.addWidget(self.btn_grasp_reset)
-
-        self.btn_grasp_center = QPushButton("객체 중심")
-        self.btn_grasp_center.setToolTip("Grasp 위치를 CAD bounding box 중심으로 설정. CAD 원점이 객체 외부에 있을 때 유용.")
-        self.btn_grasp_center.clicked.connect(self._grasp_to_center)
-        top4.addWidget(self.btn_grasp_center)
-
+        self.grasp_summary_label = QLabel()
+        self.grasp_summary_label.setStyleSheet("color: #555; font-family: monospace;")
+        top4.addWidget(self.grasp_summary_label)
         top4.addStretch()
         layout.addLayout(top4)
-
-        # === 상단 5행: Grasp 회전 보정 (Tool 좌표계 기준, KUKA ZYX intrinsic) ===
-        top5 = QHBoxLayout()
-        top5.addWidget(QLabel("Grasp 회전 (Tool deg):"))
-        top5.addWidget(QLabel("A"))
-        self.grasp_a_spin = QDoubleSpinBox()
-        self.grasp_a_spin.setRange(-180.0, 180.0)
-        self.grasp_a_spin.setSingleStep(5.0)
-        self.grasp_a_spin.setDecimals(1)
-        self.grasp_a_spin.setFixedWidth(80)
-        self.grasp_a_spin.setToolTip("Tool +Z 둘레 회전 (yaw, 그리퍼 손목 돌림). 평면 잡기 정렬에 가장 자주 쓰임.")
-        self.grasp_a_spin.valueChanged.connect(self._on_grasp_rotation_changed)
-        top5.addWidget(self.grasp_a_spin)
-        top5.addWidget(QLabel("B"))
-        self.grasp_b_spin = QDoubleSpinBox()
-        self.grasp_b_spin.setRange(-180.0, 180.0)
-        self.grasp_b_spin.setSingleStep(5.0)
-        self.grasp_b_spin.setDecimals(1)
-        self.grasp_b_spin.setFixedWidth(80)
-        self.grasp_b_spin.setToolTip("Tool +Y 둘레 회전 (pitch, 비스듬한 접근).")
-        self.grasp_b_spin.valueChanged.connect(self._on_grasp_rotation_changed)
-        top5.addWidget(self.grasp_b_spin)
-        top5.addWidget(QLabel("C"))
-        self.grasp_c_spin = QDoubleSpinBox()
-        self.grasp_c_spin.setRange(-180.0, 180.0)
-        self.grasp_c_spin.setSingleStep(5.0)
-        self.grasp_c_spin.setDecimals(1)
-        self.grasp_c_spin.setFixedWidth(80)
-        self.grasp_c_spin.setToolTip("Tool +X 둘레 회전 (roll, 옆으로 기울임).")
-        self.grasp_c_spin.valueChanged.connect(self._on_grasp_rotation_changed)
-        top5.addWidget(self.grasp_c_spin)
-
-        self.btn_grasp_rot_reset = QPushButton("회전 0으로")
-        self.btn_grasp_rot_reset.setToolTip("Grasp 회전을 (0, 0, 0)으로 리셋. 기본 잡기 축 정렬만 사용.")
-        self.btn_grasp_rot_reset.clicked.connect(self._grasp_rotation_reset)
-        top5.addWidget(self.btn_grasp_rot_reset)
-
-        top5.addStretch()
-        layout.addLayout(top5)
+        self._update_grasp_summary()
 
         # === 왼쪽 패널: PPF 파라미터만 (스크롤 가능) ===
         ppf_layout = QVBoxLayout()
@@ -1849,59 +2268,25 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self._mode_timer.timeout.connect(self._refresh_mode_display)
         self._mode_timer.start(2000)
 
-    def _on_grasp_position_changed(self):
-        """Grasp spin 값 변경 시 CAD 미리보기와 현재 선택된 인스턴스 TCP 자세 모두 갱신."""
-        self.grasp_position_cad = np.array(
-            [
-                float(self.grasp_x_spin.value()),
-                float(self.grasp_y_spin.value()),
-                float(self.grasp_z_spin.value()),
-            ]
+    def _update_grasp_summary(self):
+        """상단 요약 라벨에 현재 grasp 위치/회전 표시 (3D 창 밖에서도 값 확인용)."""
+        if not hasattr(self, "grasp_summary_label"):
+            return
+        gx, gy, gz = self.grasp_position_cad
+        a, b, c = self.grasp_rotation_abc_deg
+        self.grasp_summary_label.setText(
+            f"위치 ({gx:.1f}, {gy:.1f}, {gz:.1f}) mm   회전 (A{a:.1f}, B{b:.1f}, C{c:.1f})°"
         )
-        # CAD 뷰가 열려 있으면 마커 위치 갱신 (전체 재그림은 비싸니까 마커만)
+
+    def _apply_grasp_state_change(self):
+        """grasp 위치/회전 상태가 바뀐 뒤 미리보기·마커·선택 인스턴스 자세 갱신."""
+        self._update_grasp_summary()
         if self.cad_pcd is not None:
             self._update_grasp_marker_in_cad_view()
-        # 매칭된 인스턴스가 선택되어 있으면 TCP 자세 재계산 (조용히 - 모달 억제)
         if self.selected_idx is not None:
             self._select_instance(self.selected_idx, silent=True)
-        # 3D 매칭 결과 뷰의 grasp 마커도 갱신
         if self.instances:
             self._update_grasp_markers_in_3d_view()
-
-    def _on_grasp_rotation_changed(self):
-        """Grasp 회전 spin 변경 시 현재 선택된 인스턴스 TCP 자세 재계산."""
-        self.grasp_rotation_abc_deg = np.array(
-            [
-                float(self.grasp_a_spin.value()),
-                float(self.grasp_b_spin.value()),
-                float(self.grasp_c_spin.value()),
-            ]
-        )
-        if self.selected_idx is not None:
-            self._select_instance(self.selected_idx, silent=True)
-
-    def _grasp_rotation_reset(self):
-        self.grasp_a_spin.setValue(0.0)
-        self.grasp_b_spin.setValue(0.0)
-        self.grasp_c_spin.setValue(0.0)
-
-    def _grasp_to_origin(self):
-        self.grasp_x_spin.setValue(0.0)
-        self.grasp_y_spin.setValue(0.0)
-        self.grasp_z_spin.setValue(0.0)
-
-    def _grasp_to_center(self):
-        """CAD bounding box 중심을 grasp 위치로 설정."""
-        if self.cad_pcd is None:
-            QMessageBox.warning(self, "오류", "CAD를 먼저 로드하세요")
-            return
-        pts = np.asarray(self.cad_pcd.points)
-        if len(pts) == 0:
-            return
-        center = (pts.min(axis=0) + pts.max(axis=0)) / 2.0
-        self.grasp_x_spin.setValue(float(center[0]))
-        self.grasp_y_spin.setValue(float(center[1]))
-        self.grasp_z_spin.setValue(float(center[2]))
 
     def _update_grasp_marker_in_cad_view(self):
         """CAD 미리보기 뷰의 grasp 마커만 갱신 (전체 재그림 없이)."""
@@ -2090,6 +2475,36 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.cad_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
         self.main.statusBar().showMessage(f"CAD 로드 완료: {name}, voxel size {recommended_voxel:.1f}mm 권장")
         logger.info(f"CAD 로드: {path}, {n_pts}점, 크기 {self.cad_size:.1f}mm")
+
+    def _open_grasp_point_dialog(self):
+        """PickIt 스타일 3D grasp 지점 설정 팝업 열기 → 적용 시 스핀박스 반영."""
+        if getattr(self, "cad_mesh", None) is None and getattr(self, "cad_pcd", None) is None:
+            QMessageBox.warning(self, "안내", "먼저 CAD 모델을 로드하세요.")
+            return
+
+        dlg = GraspPointDialog(
+            self,
+            cad_mesh_o3d=getattr(self, "cad_mesh", None),
+            cad_pcd_o3d=getattr(self, "cad_pcd", None),
+            cad_path=getattr(self, "cad_path", None),
+            init_pos=tuple(self.grasp_position_cad),
+            init_abc=tuple(self.grasp_rotation_abc_deg),
+            grasp_axis=self.grasp_axis_combo.currentText(),
+            grasp_flip=self.grasp_flip_check.isChecked(),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # 상태(소스 오브 트루스)에 직접 반영 후 미리보기/마커/선택 인스턴스 갱신
+        self.grasp_position_cad = np.array(dlg.result_position, dtype=float)
+        self.grasp_rotation_abc_deg = np.array(dlg.result_abc, dtype=float)
+        self._apply_grasp_state_change()
+
+        x, y, z = self.grasp_position_cad
+        a, b, c = self.grasp_rotation_abc_deg
+        self.main.statusBar().showMessage(
+            f"Grasp 설정: ({x:.1f}, {y:.1f}, {z:.1f})mm, 회전 A{a:.1f}° B{b:.1f}° C{c:.1f}°"
+        )
 
     def _load_calibration(self):
         import json
