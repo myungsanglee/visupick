@@ -20,6 +20,11 @@ DEFDAT ext_move
    ;   robo_speed_change    (BOOL)
    ;   robo_acc_speed[6]    (INT)
    ;   robo_vel_speed[6]    (INT)
+   ;
+   ; 진공 그리퍼용 (신규 — $config.dat 사용자 영역에 아래 세 줄 추가 필요):
+   ;   DECL BOOL robo_vac_on
+   ;   DECL BOOL robo_vac_blow
+   ;   DECL BOOL robo_vac_change
    ; ==============================================
 
 ENDDAT

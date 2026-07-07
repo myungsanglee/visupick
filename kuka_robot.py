@@ -610,6 +610,62 @@ class KUKARobot:
         logger.info("안전 일시정지 해제 (재개)")
         return self.client.write_variable("robo_safety_over", "FALSE")
 
+    # 진공 그리퍼 (SMC ZK2) 출력 번호 — WorkVisual I/O 매핑과 일치해야 함
+    VAC_ON_OUT = 7    # $OUT[7] = VAC_ON  (진공 켜기 = 잡기)
+    VAC_BLOW_OUT = 8  # $OUT[8] = VAC_Blow (블로우 = 놓기 보조)
+
+    def _set_gripper_out(self, var_name: str, out_no: int, on: bool, timeout: float = 2.0) -> bool:
+        """진공 그리퍼 출력 설정 (ext_move 계약 경유).
+
+        C3Bridge 변수 인터페이스는 $OUT 직접 쓰기를 거부하므로, 목표 상태를
+        커스텀 변수(robo_vac_*)에 쓰고 robo_vac_change=TRUE 트리거를 세우면
+        ext_move 의 인터럽트 83이 $OUT 에 적용한다 (robo_scram 과 같은 패턴).
+        $OUT 읽기는 가능하므로 실제 적용을 readback 으로 확인하고, 1회
+        재시도(트리거 엣지 유실 등 드문 경우 대비) 후 실패 처리.
+        """
+        val = "TRUE" if on else "FALSE"
+        for attempt in range(2):
+            if not self.client.write_variable(var_name, val):
+                return False
+            self.client.write_variable("robo_vac_change", "TRUE")
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if self.client.read_variable(f"$OUT[{out_no}]") == val:
+                    return True
+                time.sleep(0.05)
+            logger.warning(f"{var_name}={val} 적용 미확인 (시도 {attempt + 1}/2)")
+        logger.error(
+            f"진공 출력 $OUT[{out_no}] 적용 실패 — ext_move 가 실행 중인지 확인하세요"
+        )
+        return False
+
+    def set_vacuum(self, on: bool) -> bool:
+        """진공 그리퍼 ON/OFF. ON=흡착(잡기), OFF=진공 해제."""
+        logger.info(f"진공 그리퍼: {'ON (잡기)' if on else 'OFF (해제)'}")
+        return self._set_gripper_out("robo_vac_on", self.VAC_ON_OUT, on)
+
+    def vacuum_blow(self, duration: float = 0.5) -> bool:
+        """블로우 펄스 — 진공 해제 후 물체를 확실히 떨어뜨릴 때 사용."""
+        logger.info(f"블로우 펄스 {duration:.1f}s")
+        if not self._set_gripper_out("robo_vac_blow", self.VAC_BLOW_OUT, True):
+            return False
+        time.sleep(max(0.0, duration))
+        return self._set_gripper_out("robo_vac_blow", self.VAC_BLOW_OUT, False)
+
+    def vacuum_release(self, blow_duration: float = 0.5) -> bool:
+        """놓기: 진공 OFF + 블로우 펄스."""
+        ok = self.set_vacuum(False)
+        if blow_duration > 0:
+            ok = self.vacuum_blow(blow_duration) and ok
+        return ok
+
+    def get_vacuum_state(self) -> Optional[bool]:
+        """현재 진공 출력($OUT[7]) 상태. 읽기 실패 시 None."""
+        v = self.client.read_variable(f"$OUT[{self.VAC_ON_OUT}]")
+        if v is None:
+            return None
+        return v == "TRUE"
+
     def set_speed(self, vel_pct: int, acc_pct: Optional[int] = None) -> bool:
         """
         로봇 속도 설정 (1~100%)

@@ -23,6 +23,13 @@ DEF ext_move()
    ;   robo_speed_change (BOOL)
    ;   robo_acc_speed[6] (INT)
    ;   robo_vel_speed[6] (INT)
+   ;   robo_vac_on (BOOL)        - 진공 그리퍼 목표 상태 (KRL이 $OUT[7]=VAC_ON 에 적용)
+   ;   robo_vac_blow (BOOL)      - 블로우 목표 상태     (KRL이 $OUT[8]=VAC_Blow 에 적용)
+   ;   robo_vac_change (BOOL)    - 적용 트리거 (robo_scram 과 같은 플래그 패턴)
+   ;
+   ; 진공 제어 방식: C3Bridge 변수 인터페이스는 $OUT 직접 쓰기를 거부하므로
+   ;   외부 PC가 robo_vac_on/blow 를 쓴 뒤 robo_vac_change=TRUE 로 세우면
+   ;   인터럽트 83이 발화해 KRL이 $OUT 을 대신 설정한다.
    ; ==============================================
 
    INT i
@@ -32,9 +39,16 @@ DEF ext_move()
    robo_speed_change = FALSE
    robo_safety_over = FALSE
 
+   ; 진공 그리퍼: 목표 상태를 현재 출력값으로 초기화
+   ; (프로그램 재시작 시 잡고 있던 물체가 떨어지지 않도록 상태 변화 없음)
+   robo_vac_on = $OUT[7]
+   robo_vac_blow = $OUT[8]
+   robo_vac_change = FALSE
+
    ; 인터럽트 정의
    INTERRUPT DECL 81 WHEN robo_scram DO robo_scram_DEF()
    INTERRUPT DECL 82 WHEN robo_safety_over DO robo_safety_over_DEF()
+   INTERRUPT DECL 83 WHEN robo_vac_change DO robo_vac_DEF()
 
    $ADVANCE = 3
 
@@ -67,6 +81,7 @@ DEF ext_move()
 
    INTERRUPT ON 81
    INTERRUPT ON 82
+   INTERRUPT ON 83
 
    ; BCO (Block Coincidence)
    PTP $POS_ACT
@@ -164,4 +179,16 @@ DEF robo_safety_over_DEF()
    WAIT FOR (robo_safety_over == FALSE)
    INTERRUPT ON 82
    RESUME
+END
+
+
+; ---- 진공 그리퍼: robo_vac_change=TRUE 가 서면 목표 상태를 출력에 적용 ----
+;      $OUT[7]=VAC_ON, $OUT[8]=VAC_Blow. 모션은 건드리지 않음 (BRAKE 없음)
+;      robo_scram 과 동일한 플래그 트리거 패턴.
+DEF robo_vac_DEF()
+   INTERRUPT OFF 83
+   $OUT[7] = robo_vac_on
+   $OUT[8] = robo_vac_blow
+   robo_vac_change = FALSE
+   INTERRUPT ON 83
 END
