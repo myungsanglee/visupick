@@ -55,6 +55,21 @@ KUKARobot ──── TCP:7000 ────► C3Bridge Server
                                 실제 모터 구동
 ```
 
+### 1.3 먼저 알아야 할 KUKA 용어 (처음 보는 사람용)
+
+- **KRL (KUKA Robot Language)**: KUKA 컨트롤러에서 도는 로봇 전용 언어. `.src`(코드) + `.dat`(데이터) 파일 쌍으로 구성된다. 본 시스템의 [ext_move.src](../krl/ext_move.src)가 KRL 프로그램이다.
+- **TCP (Tool Center Point)**: 공구(그리퍼) 끝점. "로봇 위치"라고 하면 보통 이 점의 위치+자세 `(X,Y,Z,A,B,C)`를 말한다. (네트워크의 TCP 와는 무관한 약어 충돌이니 문맥으로 구분.)
+- **PTP (Point-To-Point)**: 각 관절이 목표 각도로 "가장 빨리" 도는 모션. TCP가 그리는 경로는 곡선이라 예측이 어렵지만, 빠르고 관절 한계에 안전하다. **큰 이동/큰 자세 변화**에 적합.
+- **LIN (Linear)**: TCP가 공간에서 **직선**을 그리도록 관절을 보간하는 모션. 경로가 예측 가능해서 **물체 근처 정밀 접근**에 적합. 대신 특이점(singularity) 근처에서 관절이 급회전할 수 있다.
+- **`*_REL`**: 현재 위치 기준 상대 이동 (PTP_REL, LIN_REL).
+- **운전 모드** (`$MODE_OP`):
+  - **T1** — 수동 감속. 데드맨 스위치(SmartPad 뒷면 안전 스위치)를 잡아야만 움직이고 250mm/s 제한. **모든 테스트는 여기서 시작.**
+  - **T2** — 수동 고속 (데드맨 필요, 속도 제한 없음)
+  - **AUT** — 자동. 사람이 잡지 않아도 프로그램이 연속 실행. 본 시스템의 실사용 모드 (그래서 소프트웨어 50% 속도 상한을 따로 걸어둠 — 6장)
+  - **EXT (AUT_EXT)** — 외부(PLC) 제어 자동
+- **`$` 변수**: `$OV_PRO`, `$POS_ACT`, `$OUT[7]` 처럼 `$`로 시작하면 KUKA **시스템 변수**. 그 외(`robo_*`)는 `$config.dat`에 선언한 **사용자 전역 변수**다.
+- **SmartPad**: 로봇 티치펜던트(조작 패널). 프로그램 선택/실행, 변수·입출력 표시/수정을 여기서 한다.
+
 ---
 
 ## 2. C3Bridge 프로토콜 (저수준)
@@ -182,6 +197,9 @@ for key, val in matches:
 | `robo_speed_change` | BOOL | 속도 변경 요청 플래그 |
 | `robo_vel_speed[6]` | INT | 축별 속도 % |
 | `robo_acc_speed[6]` | INT | 축별 가속도 % |
+| `robo_vac_on` | BOOL | 진공 그리퍼 목표 상태 — KRL이 `$OUT[7]`(VAC_ON)에 적용 (3.6절) |
+| `robo_vac_blow` | BOOL | 블로우 목표 상태 — KRL이 `$OUT[8]`(VAC_Blow)에 적용 |
+| `robo_vac_change` | BOOL | 진공 적용 트리거 (3.6절) |
 
 ### 3.2 KRL 메인 루프
 
@@ -300,6 +318,40 @@ ENDLOOP
 ```
 
 `PTP $POS_ACT`는 KUKA의 BCO 강제용 더미 모션 — KSS가 "프로그램이 현재 자세에 있다"고 인정하게 만든다. 이걸 안 하면 첫 모션 실행 시 BCO 에러가 난다.
+
+### 3.6 진공 그리퍼 제어 (robo_vac 계약)
+
+빈 픽킹용 SMC 진공 그리퍼는 디지털 출력 `$OUT[7]`(VAC_ON, 흡착 = 잡기) / `$OUT[8]`(VAC_Blow, 놓기 보조)로 구동된다. 그런데 실측 결과 **C3Bridge 변수 인터페이스는 `$OUT` 쓰기를 거부한다** — 읽기와 커스텀 변수/`$OV_PRO` 쓰기는 되는데, 디지털 출력 쓰기만 거부된다. 반면 **KRL 프로그램 안에서는 `$OUT[7]=TRUE`가 아무 제약 없이 된다.**
+
+그래서 모션 큐와 같은 철학("Python은 변수만 쓰고, 실행은 KRL이")으로 계약을 확장했다. `robo_scram`과 동일한 **플래그 트리거 인터럽트** 패턴이다:
+
+```krl
+; ext_move.src
+INTERRUPT DECL 83 WHEN robo_vac_change DO robo_vac_DEF()
+
+DEF robo_vac_DEF()
+   INTERRUPT OFF 83
+   $OUT[7] = robo_vac_on      ; 목표 상태 적용
+   $OUT[8] = robo_vac_blow
+   robo_vac_change = FALSE    ; 트리거 소비
+   INTERRUPT ON 83
+END
+```
+
+Python 측은 [kuka_robot.py](../kuka_robot.py)의 `set_vacuum()` / `vacuum_blow()` / `vacuum_release()`:
+
+```
+1. robo_vac_on = "TRUE"      (목표 상태 쓰기 — 커스텀 변수라 가능)
+2. robo_vac_change = "TRUE"  (트리거 → KRL 인터럽트 발화)
+3. $OUT[7] 읽기로 실제 적용 확인 ($OUT "읽기"는 되므로 진짜 검증, 1회 재시도 포함)
+```
+
+주의할 점:
+
+- 인터럽트는 **ext_move가 실행 중(`$PRO_STATE1 = #P_ACTIVE`)일 때만** 발화한다. T1에서 Start를 놓으면 프로그램이 멈춰 진공 명령도 대기 상태가 된다 (AUT에선 상시 동작).
+- 프로그램 (재)시작 시 `robo_vac_on = $OUT[7]`로 초기화한다 — **물체를 잡은 채 재시작해도 떨어뜨리지 않기 위해서다.**
+- KRL 인터럽트 조건은 **단순 전역 BOOL이어야 한다.** `WHEN (robo_vac_on <> $OUT[7])` 같은 변수 비교식은 컴파일 에러(SmartPad 파일명 옆 X 표시)가 났다 — 그래서 트리거 변수를 따로 둔다.
+- 핸들러에 BRAKE가 없어 모션과 무관 — **이동 중에도 진공 전환 가능** (접근하면서 미리 흡착 시작 같은 활용).
 
 ---
 

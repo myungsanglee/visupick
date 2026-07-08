@@ -20,7 +20,82 @@ CAD 매칭의 강점: **객체의 자세를 회전 포함 6개 자유도 모두 
 
 ---
 
-## 2. 매칭 알고리즘 3종 — 시나리오별 강약
+## 2. 기초 개념 — 매칭을 이해하기 위한 최소 지식
+
+이 장은 3D 매칭을 처음 접하는 사람을 위한 것이다. 3장의 알고리즘 설명은 여기 나오는 용어를 전제한다. (좌표계/변환 행렬 `T_a2b` 읽는 법은 [hand_eye_calibration.md § 1](hand_eye_calibration.md) 참고.)
+
+### 2.1 점군(Point Cloud)과 "정합(Registration)"이라는 문제
+
+- **점군**: 3D 점 `(x, y, z)` 들의 집합. 본 시스템에는 두 종류가 등장한다:
+  - **Model**: CAD 파일 표면에서 샘플링한 점들 (기준 자세, mm 단위)
+  - **Scene**: Zivid 카메라가 찍은 실제 장면의 점들 (카메라 좌표계, mm 단위)
+- **정합(registration)**: "Model 점군을 어떻게 회전/이동시키면 Scene 속 실제 객체와 겹쳐지는가?"를 푸는 문제. 답은 4×4 변환 행렬 **T** 하나다.
+- T 는 회전 3 자유도 + 이동 3 자유도 = **6DoF (Degrees of Freedom)**. 그래서 이 작업을 "6D pose estimation"이라 부른다. 크기(scale)는 풀지 않는다 — CAD 와 Zivid 둘 다 mm 절대 단위라 크기가 이미 맞기 때문 ([hand_eye_calibration.md § 6.5](hand_eye_calibration.md) 참고).
+
+### 2.2 왜 두 단계(global → local)로 나누나
+
+정합 알고리즘은 성격이 다른 두 부류가 있고, **반드시 둘을 이어서 쓴다**:
+
+| | Global registration | Local refinement (ICP) |
+|---|---|---|
+| 초기 자세 필요? | 불필요 | **필요** (대충이라도 맞아야 함) |
+| 결과 정밀도 | 거칠다 (수 mm ~ cm) | 정밀 (sub-mm) |
+| 본 시스템의 예 | FPFH+RANSAC, FGR, PPF | Point-to-Plane ICP |
+
+Global 이 "어디쯤 어떤 자세인지"를 대충 찾아주고, ICP 가 그 근처에서 정밀하게 붙인다. 하나만으로는 안 된다 — ICP 는 초기 자세가 틀리면 엉뚱한 지역해(local optimum)에 수렴하고, global 만으로는 mm 정밀도가 안 나온다.
+
+### 2.3 Voxel 다운샘플 — 모든 파라미터의 기준 단위
+
+원본 점군은 수십만 점이라 그대로 쓰면 느리다. 공간을 `voxel_size`(mm) 크기의 정육면체 격자로 나누고 **칸마다 점 하나만** 남기는 것이 voxel 다운샘플이다.
+
+중요한 건 `voxel_size` 가 단순 성능 옵션이 아니라 **이후 모든 거리 임계값의 기준 눈금**이라는 점: FPFH 탐색 반경 = voxel×5, RANSAC 대응 임계 = voxel×2, ICP 거리 = voxel×1.5→1.0 ... UI 에서 voxel 하나만 바꿔도 파이프라인 전체의 "자"가 같이 바뀐다. CAD 로드 시 대각선/40 을 권장값으로 자동 제안하는 이유이기도 하다 (객체 크기에 눈금을 맞춤).
+
+### 2.4 Descriptor(기술자) — 점의 "지문"
+
+두 점군을 겹치려면 "Model 의 이 점 = Scene 의 저 점" 같은 **대응(correspondence)** 후보가 필요하다. 그런데 점 하나의 좌표만으로는 대응을 알 수 없다 (두 점군의 좌표계가 다르니까 좌표 비교는 무의미).
+
+해법: **점 주변의 국소 형상**을 숫자 벡터로 요약한 것이 descriptor 다. 좌표계와 무관하게 "이 점 주변이 어떻게 생겼나"만 담는다.
+
+- 평평한 면 위의 점, 모서리의 점, 구멍 가장자리의 점은 서로 다른 지문을 갖는다.
+- Model 과 Scene 에서 **지문이 비슷한 점끼리 = 같은 부위일 후보**.
+- **FPFH**(Fast Point Feature Histogram)는 그런 지문의 하나로, 주변 점들과의 법선 각도 관계를 **33개 숫자의 히스토그램**으로 요약한다.
+
+### 2.5 RANSAC — 가설을 던지고 검증하기
+
+대응 후보에는 오답이 많이 섞인다 (지문이 우연히 비슷한 다른 부위). RANSAC(RANdom SAmple Consensus)은 오답이 섞인 데이터에서 답을 찾는 일반 전략이다:
+
+1. 대응 후보에서 **무작위로 최소 개수**(점 3~4쌍)만 뽑는다.
+2. 그것만으로 변환 T 가설을 계산한다.
+3. 가설대로 Model 을 옮겨보고, Scene 에 가까워진 점의 수(**inlier**)를 센다.
+4. 1~3 을 수만 번 반복 → **inlier 가 가장 많은 가설**을 채택.
+
+무작위 표본에 의존하므로 **실행할 때마다 결과가 조금씩 다르다**(비결정적). FGR 은 같은 문제를 최적화로 풀어 같은 입력 → 같은 결과(결정적)라는 차이가 있다.
+
+### 2.6 ICP — 반복해서 딱 붙이기
+
+ICP(Iterative Closest Point)는 이름 그대로를 반복한다:
+
+1. 현재 자세에서 Model 각 점의 **최근접 Scene 점**을 임시 대응으로 삼는다 (임계 거리 이내만).
+2. 그 대응들을 가장 잘 맞추는 강체 변환을 닫힌 형태로 푼다 ([hand_eye_calibration.md § 4.1(d)](hand_eye_calibration.md)의 Kabsch/SVD 와 같은 수학).
+3. 변환을 적용하고 1 로 돌아간다. 대응이 더 안 바뀌면 수렴.
+
+"최근접 점 = 진짜 대응"이라는 가정이 성립하려면 초기 자세가 대충 맞아야 한다 — 2.2절에서 global 단계가 먼저 필요한 이유가 이것이다. 변형 두 가지:
+
+- **Point-to-Point**: 점↔점 거리를 최소화
+- **Point-to-Plane**: 점↔(상대 점의 접평면) 거리를 최소화 — 평평한 면 위에서 미끄러지듯 정렬되어 더 빠르고 정확하게 수렴. **본 시스템이 쓰는 방식.**
+
+### 2.7 매칭 품질 지표 — fitness 와 RMSE
+
+진단 로그에 항상 나오는 두 숫자의 정확한 의미:
+
+- **fitness** (0~1): Model 점 중 임계 거리 안에서 Scene 대응을 찾은 **비율**. "얼마나 많이 겹쳤나". 객체 일부가 가려져 있으면 보이는 부분만 붙으므로 1.0 이 나올 수 없다 — 그래서 빈 픽킹에선 0.4~0.7 도 정상 범위다.
+- **inlier RMSE** (mm): 그 대응들의 평균 거리 오차. "겹친 부분이 얼마나 정확한가". Zivid 노이즈 수준(≲1mm)에 도달하면 사실상 한계 정밀도다.
+
+인스턴스 채택 여부는 fitness 임계값(`fitness_spin`)으로 거른다 — RMSE 가 작아도 fitness 가 낮으면 "일부만 우연히 겹친" 오탐일 수 있기 때문.
+
+---
+
+## 3. 매칭 알고리즘 3종 — 시나리오별 강약
 
 | 알고리즘 | 비결정적? | 무작위 자세 | 부분 가시성 | 본 시스템 사용 시점 |
 |---|:-:|:-:|:-:|---|
@@ -28,7 +103,7 @@ CAD 매칭의 강점: **객체의 자세를 회전 포함 6개 자유도 모두 
 | **FPFH + ICP (FGR)** | X | 약 (cull 필요) | 약 | RANSAC 변동성을 피하고 싶을 때 |
 | **PPF (OpenCV)** | O | **강** | **강** | 진짜 빈 픽킹 (무작위 자세, 가림) |
 
-### 2.1 FPFH + ICP
+### 3.1 FPFH + ICP
 
 - **FPFH (Fast Point Feature Histogram)**: 각 점 + 주변 점들의 법선 분포를 33D 히스토그램으로 인코딩. 점 단위 지역 기술자.
 - **RANSAC**: scene과 model의 FPFH descriptor가 비슷한 점쌍 4개를 무작위로 골라 자세 가설을 만들고, 가장 inlier 많은 가설을 선택. 비결정적 — 매번 다른 결과.
@@ -37,11 +112,13 @@ CAD 매칭의 강점: **객체의 자세를 회전 포함 6개 자유도 모두 
 
 한계: FPFH가 객체 표면 곡률에 민감해서 **부분만 보이는 무작위 자세**에 약함 → cull (visible-side only) 같은 우회가 필요한데 그건 정자세 가정.
 
-### 2.2 PPF (Point Pair Features)
+### 3.2 PPF (Point Pair Features)
 
 Drost et al. 2010 "Model Globally, Match Locally" 알고리즘. 본 시스템은 OpenCV `cv2.ppf_match_3d` 모듈 (contrib) 사용.
 
-**핵심 아이디어**: 객체 표면의 **모든 점쌍 (p1, p2)** 에 대해 4D 특징을 계산해 해시 테이블에 저장. 매칭 시 scene 점쌍들의 4D 특징으로 voting → 가장 표 많이 받은 자세 채택.
+**핵심 아이디어**: 객체 표면의 **모든 점쌍 (p1, p2)** 에 대해 4D 특징을 계산해 해시 테이블에 저장(학습 1회). 매칭 시 scene 점쌍들의 4D 특징으로 voting → 가장 표 많이 받은 자세 채택.
+
+**voting 이 실제로 어떻게 자세가 되나**: scene 에서 기준점 하나를 잡고, 다른 점들과 쌍을 만들어 4D 특징을 계산 → 해시 테이블에서 **같은 특징을 가진 model 점쌍들**을 조회 → 각 조회 결과는 "scene 기준점이 model 의 이 점이고, 이만큼 회전돼 있다"는 가설 하나 → 그 가설 칸에 한 표. 모든 점쌍을 처리하고 나면 **표가 누적된 칸 = 여러 점쌍이 동의하는 자세**가 후보로 떠오른다. 진단 로그의 `votes=[1209, 1061, ...]` 가 이 득표수다.
 
 ```
 4D 특징 F:
@@ -62,19 +139,19 @@ Drost et al. 2010 "Model Globally, Match Locally" 알고리즘. 본 시스템은
 
 ---
 
-## 3. 전처리: 작업대 평면 제거 + DBSCAN 클러스터링
+## 4. 전처리: 작업대 평면 제거 + DBSCAN 클러스터링
 
 매칭 전 scene을 정제한다.
 
-### 3.1 작업대 평면 제거
+### 4.1 작업대 평면 제거
 
 ROI 안의 scene 포인트클라우드에서 **RANSAC plane fitting** 으로 가장 큰 평면 (작업대 표면) 검출 → 해당 inlier 점들 제거. [`remove_table_plane`](../cad_matching_tab.py) 가 Open3D `segment_plane` 으로 한 번에 처리.
 
 이게 없으면 작업대 점들이 한 거대 클러스터를 만들어 그 안에 객체가 묻힌다.
 
-### 3.2 DBSCAN 클러스터링
+### 4.2 DBSCAN 클러스터링
 
-남은 점들에 **DBSCAN** (밀도 기반 클러스터링) 적용 → 객체 단위로 분리:
+남은 점들에 **DBSCAN** (밀도 기반 클러스터링) 적용 → 객체 단위로 분리. 원리는 단순하다: "가까운 점(eps 이내)이 충분히 많으면 같은 덩어리" — 서로 연결된 점들을 타고 가며 덩어리를 키우고, 어디에도 안 붙는 점은 노이즈로 버린다. 클러스터 개수를 미리 정할 필요가 없어서 (k-means 와 달리) 몇 개가 놓여 있는지 모르는 빈 픽킹에 맞는다:
 
 ```python
 labels = scene_pcd.cluster_dbscan(eps=15.0, min_points=100)
@@ -88,7 +165,7 @@ labels = scene_pcd.cluster_dbscan(eps=15.0, min_points=100)
 
 ---
 
-## 4. 매칭 파이프라인 흐름
+## 5. 매칭 파이프라인 흐름
 
 ```
 캡처 → ROI → 작업대 평면 제거 → DBSCAN 클러스터
@@ -116,21 +193,31 @@ Grasp 위치/회전 + Tool 정렬 → TCP 자세 (KUKA ABC)
 
 ---
 
-## 5. Grasp 위치/회전 설정 — CAD 매칭 탭만의 기능
+## 6. Grasp 설정 — CAD 매칭 탭만의 기능
 
-bin picking 탭은 객체 중심을 잡지만, CAD 매칭 탭은 **CAD 좌표계의 임의 위치를 잡는 점**으로 지정할 수 있다.
+bin picking 탭은 객체 중심을 잡지만, CAD 매칭 탭은 **CAD 좌표계의 임의 위치를 임의 자세로 잡도록** 지정할 수 있다.
 
-### 5.1 Grasp 위치 (X/Y/Z, CAD 좌표계 mm)
+### 6.1 Grasp 3D 설정 창 (PickIt 스타일)
 
-UI 의 spin 으로 입력. CAD 원점이 객체 외부(예: 모델링 좌표계 원점)에 있어도 사용자가 객체 중심이나 손잡이 위치로 grasp 점을 조정 가능. "객체 중심" 버튼 한 번이면 CAD bbox 중심으로 자동 설정.
+"🎯 Grasp 3D 설정" 버튼을 누르면 별도 창([`GraspPointDialog`](../cad_matching_tab.py))이 열리고, CAD 를 솔리드 메쉬로 보면서 잡을 지점/자세를 직접 지정한다:
 
-매칭 결과 적용 시:
+- **표면 클릭** → 그리퍼 끝 마커(주황 구)가 그 지점에 스냅
+- **구 드래그 / X·Y·Z 스핀박스** → 위치 미세조정 ("원점", "객체 중심" 버튼 포함)
+- **A·B·C 스핀박스** → Tool 좌표계 기준 회전 보정 (6.3절)
+- **삼각대 화살표** (노랑 = Tool+Z 접근 방향, 빨강 = +X, 초록 = +Y) 가 **현재 A/B/C 값을 실시간 반영** — 적용 시 실제 로봇 자세와 어긋나지 않도록 같은 수학을 공유한다
+- **"표면 법선으로 회전 자동"** 체크 시, 마커를 옮길 때마다 그 면에 수직으로 접근하도록 A/B/C 를 자동 계산 ([`suggest_rotation_from_normal`](../cad_matching_tab.py) — 잡기 축 정렬 자세와 "Tool+Z = -법선" 자세의 차이 회전을 KUKA ZYX 로 분해)
+
+### 6.2 왜 grasp 값을 CAD 좌표계로 저장하나
+
+설정된 위치/회전은 **CAD 좌표계 기준**으로 저장된다 (`grasp_position_cad`, `grasp_rotation_abc_deg`). 매칭 결과 적용 시:
+
 ```python
 grasp_in_base = T_object_base @ [gx, gy, gz, 1]
 ```
-객체가 어떤 자세로 잡혀있든 grasp 점이 객체와 함께 회전 + 이동.
 
-### 5.2 Grasp 회전 (A/B/C, Tool deg)
+객체가 어떤 자세로 놓여 있든 **grasp 점이 객체와 함께 회전 + 이동**한다. 장면 좌표로 저장했다면 객체가 조금만 움직여도 무효가 되지만, CAD 좌표라서 "이 객체의 이 부위"라는 의미가 영구히 유지된다 — 한 번 설정하면 끝나는 이유.
+
+### 6.3 Grasp 회전 (A/B/C, Tool deg)
 
 KUKA ZYX intrinsic Euler. **잡기 축 정렬 후 Tool 좌표계 기준** 추가 회전:
 
@@ -140,7 +227,7 @@ KUKA ZYX intrinsic Euler. **잡기 축 정렬 후 Tool 좌표계 기준** 추가
 
 (0, 0, 0) 이면 보정 없음. 잡기 축 + 뒤집기로 결정된 기본 자세에서 출발해 사용자가 미세 조정.
 
-### 5.3 잡기 축 (`grasp_axis`)
+### 6.4 잡기 축 (`grasp_axis`)
 
 콤보로 `Z / X / Y / Off (자동)` 선택. CAD 좌표계의 어느 축을 Tool +Z 에 정렬할지 결정.
 
@@ -150,7 +237,7 @@ KUKA ZYX intrinsic Euler. **잡기 축 정렬 후 Tool 좌표계 기준** 추가
 
 PPF 모드로 전환 시 잡기 축은 **유지**하지만 cull 옵션만 자동 OFF (PPF 가 무작위 자세에 강건하므로 cull 불필요). 다시 FPFH+ICP 로 돌아오면 cull 선호가 복원됨. 자세한 자동 토글 로직은 [`_on_algo_changed`](../cad_matching_tab.py).
 
-### 5.4 6D pose → TCP 자세 변환
+### 6.5 6D pose → TCP 자세 변환
 
 [`object_pose_to_tcp`](../cad_matching_tab.py) 가 모든 보정을 한 번에 처리:
 
@@ -178,7 +265,7 @@ def object_pose_to_tcp(T_object_cam, T_calib, calib_mode, current_tcp,
 
 ---
 
-## 6. 클러스터당 후보 1개 출력 — 시각/시퀀스 일관성
+## 7. 클러스터당 후보 1개 출력 — 시각/시퀀스 일관성
 
 PPF 는 voting 결과로 상위 N 개 후보를 내는데, 거의 동일한 자세가 여러 개 나와 3D 뷰에 겹쳐 보이는 문제가 있다. [`ppf_match_per_cluster`](../cad_matching_tab.py) 의 `n_show_per_cluster=1` 로 **클러스터당 best 1개만** 인스턴스로 출력 — fitness 기준 정렬 후 최상위 채택.
 
@@ -190,7 +277,7 @@ PPF 는 voting 결과로 상위 N 개 후보를 내는데, 거의 동일한 자�
 
 ---
 
-## 7. 시각화 — 사용자가 매칭/잡기 자세를 직접 확인
+## 8. 시각화 — 사용자가 매칭/잡기 자세를 직접 확인
 
 CAD 매칭 탭은 4개의 독립 뷰를 갖는다 (`view_stack`):
 
@@ -214,11 +301,11 @@ bin picking 탭과 동일하게:
 
 좌표계 변환 주의: `target_pose` 는 베이스 좌표계인데 3D 뷰는 카메라 좌표계라 회전을 변환해야 한다 — `R_in_cam = T_calib[:3,:3].T @ R_target_base` 등. 자세한 변환은 [`_render_tcp_visualization`](../cad_matching_tab.py).
 
-이 시각화 덕분에 grasp 위치/회전 spin을 조정하면 **실시간으로 그리퍼 자세가 어떻게 바뀌는지** 3D 뷰에 즉시 반영된다.
+grasp 조정은 6.1절의 3D 설정 창에서 하고, 적용하면 CAD 뷰의 마커·매칭 결과 뷰의 인스턴스별 grasp 마커·선택 인스턴스의 TCP 시각화가 모두 갱신된다.
 
 ---
 
-## 8. 180° flip 토글 — 좌우 대칭 객체의 모호성 보정
+## 9. 180° flip 토글 — 좌우 대칭 객체의 모호성 보정
 
 차단기처럼 윗면이 거의 좌우 대칭인 객체는 PPF/ICP 가 정자세 vs 180° 회전된 자세에 거의 동등하게 voting → 한쪽이 임의로 선택됨. 알고리즘적 자동 해결은 어려운 본질적 한계.
 
@@ -231,7 +318,7 @@ UI 의 **"180° 회전"** 버튼:
 
 ---
 
-## 9. 안전 + 시퀀스 큐 + Mixin
+## 10. 안전 + 시퀀스 큐 + Mixin
 
 CAD 매칭 탭의 로봇 제어 / 시퀀스 큐 / 비상정지 / Home 이동 등은 빈 픽킹 탭과 완전히 동일하게 [`RobotControlMixin`](../robot_control_mixin.py) 을 상속해서 처리. 자세한 내용은 [bin_picking.md § 8, § 10.5](bin_picking.md) 와 [kuka_communication.md § 6–7](kuka_communication.md).
 
@@ -241,7 +328,7 @@ CAD 매칭 탭의 로봇 제어 / 시퀀스 큐 / 비상정지 / Home 이동 등
 
 ---
 
-## 10. 한계와 다음 단계
+## 11. 한계와 다음 단계
 
 - **객체끼리 맞닿/겹친 경우**: DBSCAN 으로 분리 불가 → SAM 같은 학습 기반 segmentation 필요
 - **윗면 좌우 대칭**: PPF/ICP 자동 해결 불가 → 수동 180° flip 토글로 대응
@@ -251,7 +338,7 @@ CAD 매칭 탭의 로봇 제어 / 시퀀스 큐 / 비상정지 / Home 이동 등
 
 ---
 
-## 11. 참고 자료
+## 12. 참고 자료
 
 - Drost et al. (2010). *Model Globally, Match Locally: Efficient and Robust 3D Object Recognition.* CVPR — PPF 원논문
 - Zhou et al. (2016). *Fast Global Registration.* ECCV — FGR
