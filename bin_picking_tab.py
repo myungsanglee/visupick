@@ -785,6 +785,9 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
         move_layout.addLayout(home_row)
 
+        # 진공 그리퍼 제어 (Mixin 공용 — ON/OFF/블로우)
+        move_layout.addLayout(self._build_vacuum_row())
+
         # 큐 비우기 버튼 (이전 명령 취소)
         self.btn_clear_queue = QPushButton("🗑 큐 비우기 (이전 명령 취소)")
         self.btn_clear_queue.setStyleSheet("background-color: #F57C00; color: white; font-weight: bold;")

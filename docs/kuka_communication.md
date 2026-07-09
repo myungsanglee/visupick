@@ -226,7 +226,9 @@ DEF robo_move()
       robo_move_AXIS()     ; 관절 모션
    ENDIF
 
-   robo_motion_type[robo_motion_index] = 0   ; 완료 표시
+   WAIT SEC 0   ; ★ 물리적 모션 완료까지 대기 (아래 설명)
+
+   robo_motion_type[robo_motion_index] = 0   ; 완료 표시 (= 물리적 도착)
    robo_motion_index = robo_motion_index + 1
    IF (robo_motion_index == 21) THEN
       robo_motion_index = 1
@@ -242,6 +244,8 @@ END
 4. 인덱스를 다음 슬롯으로 (20 → 1로 순환).
 
 이 함수는 메인의 `LOOP { robo_move() } ENDLOOP`로 무한 반복된다.
+
+**`WAIT SEC 0` 가 왜 필요한가 (advance run 함정):** KRL 인터프리터는 `$ADVANCE = 3` 설정으로 로봇의 실제 움직임보다 **최대 3개 모션 앞서** 코드를 실행한다(선행 실행, advance run). 이게 없으면 `PTP ...` 를 모션 파이프라인에 등록만 하고 곧바로 `robo_motion_type = 0` 줄을 실행해서, **로봇이 아직 이동 중인데 슬롯이 "완료"로 표시**된다. 외부 PC 는 이 0 을 보고 픽 사이클의 진공 ON/OFF 타이밍을 잡기 때문에, 실제로 "이동 중에 진공이 꺼져 물건을 떨어뜨리는" 버그가 났었다. `WAIT SEC 0` 은 선행 실행을 그 자리에 멈추는 표준 KRL 기법 — 메인 실행(물리 모션)이 따라올 때까지 기다리므로, 이후의 `= 0` 은 **물리적 도착 완료**를 의미하게 된다.
 
 ### 3.3 카르테시안 모션 분기
 
@@ -353,6 +357,8 @@ Python 측은 [kuka_robot.py](../kuka_robot.py)의 `set_vacuum()` / `vacuum_blow
 - KRL 인터럽트 조건은 **단순 전역 BOOL이어야 한다.** `WHEN (robo_vac_on <> $OUT[7])` 같은 변수 비교식은 컴파일 에러(SmartPad 파일명 옆 X 표시)가 났다 — 그래서 트리거 변수를 따로 둔다.
 - 핸들러에 BRAKE가 없어 모션과 무관 — **이동 중에도 진공 전환 가능** (접근하면서 미리 흡착 시작 같은 활용).
 
+UI: 빈 픽킹 / CAD 매칭 / 표면 추적 탭에 공통으로 "진공 ON / 진공 OFF / 블로우" 버튼이 있다 ([robot_control_mixin.py](../robot_control_mixin.py) `_build_vacuum_row` — 세 탭이 같은 Mixin 을 상속하므로 한 곳에서 관리).
+
 ---
 
 ## 4. Python 측 큐 인터페이스
@@ -406,7 +412,7 @@ while time.time() - start < timeout:
     time.sleep(0.1)
 ```
 
-KRL이 슬롯의 모션을 끝내면 `motion_type[slot]`을 0으로 리셋하므로, 그 값을 100ms마다 폴링한다.
+KRL이 슬롯의 모션을 끝내면 `motion_type[slot]`을 0으로 리셋하므로, 그 값을 100ms마다 폴링한다. 3.2절의 `WAIT SEC 0` 덕분에 이 0 은 "명령 접수"가 아니라 **물리적 도착 완료**를 뜻한다 — 픽 사이클 실행기([robot_control_mixin.py](../robot_control_mixin.py) `_cycle_tick`)가 진공/블로우 스텝 전에 pending 슬롯이 모두 0 이 되기를 기다리는 것도 이 보장에 기반한다.
 
 ### 4.4 비동기(`add_*`) vs 블로킹(`move_*`)
 
@@ -421,25 +427,26 @@ KRL이 슬롯의 모션을 끝내면 `motion_type[slot]`을 0으로 리셋하므
 
 ## 5. 속도 제어
 
-[kuka_robot.py:573](../kuka_robot.py#L573) `set_speed()`는 두 가지를 동시에 한다:
+[kuka_robot.py](../kuka_robot.py) `set_speed()`는 **단일 손잡이** 설계다 — 사용자 속도 %는 `$OV_PRO` 하나에만 적용한다:
 
 ```python
-# 1. 전역 속도 오버라이드 (PTP/LIN 모두에 즉시 적용)
+# 1. 전역 속도 오버라이드 (PTP/LIN 모두에 즉시 적용) — 유일한 속도 손잡이
 self.client.write_variable("$OV_PRO", str(vel_pct))
 
-# 2. PTP 축별 속도 (다음 모션부터 - robo_speed_change 플래그로 트리거)
+# 2. PTP 축별 속도/가속도는 "고정 기준값" (사용자 %를 곱하지 않음!)
 for i in range(1, 7):
-    self.client.write_variable(f"robo_vel_speed[{i}]", str(vel_pct))
-    self.client.write_variable(f"robo_acc_speed[{i}]", str(acc_pct))
+    self.client.write_variable(f"robo_vel_speed[{i}]", str(self.PTP_AXIS_VEL_BASE))  # 100
+    self.client.write_variable(f"robo_acc_speed[{i}]", str(acc_base))                # 50
 self.client.write_variable("robo_speed_change", "TRUE")
 ```
 
-**왜 두 개를 다 쓰느냐?**
+관련 변수의 역할:
 
-- `robo_vel_speed[i]` → `$VEL_AXIS[i]`: PTP 같은 관절 보간 모션의 축속도. **LIN 모션에는 영향이 거의 없다.**
-- `$OV_PRO`: 글로벌 속도 오버라이드(SmartPAD의 속도 슬라이더와 같은 변수). **PTP, LIN 모두에 즉시 적용된다.**
+- `$OV_PRO`: 글로벌 속도 오버라이드 (SmartPad 속도 슬라이더와 같은 변수). **PTP, LIN 모두에 즉시 곱해진다.** 사용자 속도 스핀은 이것만 조절한다.
+- `robo_vel_speed[i]` → `$VEL_AXIS[i]`: PTP(관절 보간)의 축속도 상한. LIN 에는 영향 없음. **고정 100%.**
+- `$VEL.CP` (BAS(#VEL_CP, 1) = 1 m/s): LIN 의 기준 속도. ext_move 시작 시 설정, 이후 $OV_PRO 로만 스케일.
 
-이전 버전에서는 `robo_vel_speed`만 썼는데, LIN 모션 속도가 안 바뀌는 문제가 있었다 ($VEL_CP를 안 건드렸기 때문). `$OV_PRO`를 추가한 뒤 둘 다 정상 작동.
+**왜 사용자 %를 축속도에 곱하면 안 되나 (과거 버그):** 예전 구현은 스핀 값(예: 30%)을 `$OV_PRO` 와 `$VEL_AXIS` 양쪽에 다 썼다. 그러면 PTP 의 실효 속도는 30% × 30% = **9%** 로 제곱 감속되는 반면, LIN 은 1 m/s × 30% = 300 mm/s 로 선형 감속 — "원래 가장 빨라야 할 PTP 가 LIN 보다 훨씬 느린" 증상이 났다 (픽 사이클의 Approach/이송이 PTP 라 특히 두드러졌음). 축속도를 고정 기준값으로 두면 PTP/LIN 이 같은 비율로 스케일되어 정상 관계(PTP ≥ LIN)가 유지된다.
 
 ---
 

@@ -778,6 +778,9 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         home_row.addWidget(self.btn_set_home, stretch=1)
         exec_layout.addLayout(home_row)
 
+        # 진공 그리퍼 제어 (Mixin 공용 — ON/OFF/블로우)
+        exec_layout.addLayout(self._build_vacuum_row())
+
         self.btn_clear_queue = QPushButton("🗑 큐 비우기")
         self.btn_clear_queue.setStyleSheet("background-color: #F57C00; color: white;")
         self.btn_clear_queue.clicked.connect(self._clear_motion_queue)

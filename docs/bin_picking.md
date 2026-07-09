@@ -374,6 +374,47 @@ slot3 = self.main.robot.add_move_lin(ax, ay, az, p["a"], p["b"], p["c"])      # 
 
 세 모션이 큐에 한꺼번에 들어가면 KRL이 알아서 차례대로 실행한다 ([kuka_communication.md](kuka_communication.md) 3장).
 
+> **주의**: 이 "Approach → Target → Retract" 는 **한 지점을 찍고 바로 빠지는** 동작이라, 진공/집기 그리퍼로 **실제로 물건을 집는 픽 사이클과는 다르다**. 물건을 집으려면 Target 도착 후 그리퍼를 작동시키고 물건을 든 채 빠져나와야 한다 — 다음 장의 픽 사이클을 참고.
+
+---
+
+## 7.5. 픽 사이클 (진공 그리퍼 — 잡기→놓기)
+
+상용 빈 픽킹 프로그램의 표준 동작이다. 단순 "이동"과 달리 **모션 사이사이에 그리퍼 작동을 끼워 넣어야** 물건을 실제로 집는다:
+
+```
+① Approach  (PTP, 빠르게)   물체 위 offset mm 지점으로
+② 하강      (LIN, 정밀)     물체 표면까지 직선
+③ 진공 ON   + 흡착 대기(dwell)   빨아들일 시간을 준다
+④ 상승      (LIN, 잡은 채)  다시 Approach 높이로
+⑤ 놓기 이동 (PTP)           티칭해둔 Place 위치로
+⑥ 진공 OFF  + 블로우 펄스    확실히 떨어뜨림
+⑦ Home 복귀 (PTP, 선택)
+```
+
+### 왜 "모든 모션을 큐에 한꺼번에" 방식이 안 되나
+
+7장의 단순 이동은 Approach/Target/Retract 3개를 KRL 큐에 한 번에 쌓고 KRL이 알아서 연속 실행했다. 그런데 픽 사이클은 **③에서 로봇이 ②까지 끝나고 멈춘 정확한 순간에** 진공을 켜야 한다. 모션을 한꺼번에 던지면 "언제 ②가 끝났는지" Python이 알 수 없어 진공 타이밍을 못 맞춘다.
+
+그래서 [robot_control_mixin.py](../robot_control_mixin.py)는 **단계별 실행기(`_run_cycle` / `_cycle_tick`)** 를 쓴다 — `QTimer`로 150ms마다 상태를 확인하는 상태 머신:
+
+1. 모션 스텝: 슬롯 **하나**만 KRL 큐에 넣고, 그 슬롯의 `robo_motion_type[slot]`이 0으로 돌아올 때까지(=완료) 다음 스텝으로 안 넘어감.
+2. 진공 스텝: `set_vacuum()` 호출 ($OUT readback 으로 실제 적용 확인).
+3. dwell 스텝: 지정 시간만큼 대기.
+
+스텝은 `_build_pick_steps()`가 생성하고, `("move","ptp"|"lin",pose)` / `("vacuum",bool)` / `("blow",초)` / `("dwell",초)` / `("status",문구)` 형식이다.
+
+### Place(놓기) 위치 티칭
+
+Home 과 똑같은 방식으로, 로봇을 놓을 자리로 조그(jog)한 뒤 **"📍 놓기 위치 저장"** 을 누르면 현재 TCP 가 `main.place_pose` 에 저장된다 (탭 공용). 픽 사이클/시퀀스 픽이 여기에 내려놓는다.
+
+### 두 가지 사용 방식
+
+- **원버튼 픽** ("🤖 픽 실행"): 선택한 대상 1개를 즉시 픽 사이클 실행 (Home 복귀까지).
+- **시퀀스 픽** ("➕ 픽 시퀀스 추가"): 여러 대상의 픽을 시퀀스 큐에 쌓아 한 번에 연속 실행 (§10). 이때 각 픽은 Home 복귀를 빼고, 필요하면 사용자가 "Home 추가"로 사이에 끼운다.
+
+비상정지(Space/버튼)를 누르면 진행 중이던 픽/시퀀스 사이클도 즉시 중단되어 남은 스텝이 전송되지 않는다.
+
 ---
 
 ## 8. 안전장치
@@ -525,6 +566,7 @@ Mixin 안에 들어간 메서드 (19개):
 - 안전: `_validate_z`, `_effective_speed`, `_is_aut_mode`, `_emergency_stop`, `_emergency_stop_release`
 - Home: `_set_home_to_current`, `_move_to_home`, `_clear_motion_queue`
 - 시퀀스 큐: `_refresh_action_list`, `_enqueue_object_move`, `_enqueue_home_to_sequence`, `_remove_selected_action`, `_clear_user_queue`, `_start_sequence`, `_send_action_to_krl_queue`
+- 진공 그리퍼 / 픽 사이클: `_build_vacuum_row` (진공+픽 버튼 2행 생성), `_set_vacuum_ui`, `_vacuum_blow_ui`, `_set_place_to_current`, `_execute_pick_cycle`, `_enqueue_pick`, 단계별 실행기 `_run_cycle`/`_cycle_tick`/`_build_pick_steps`/`_expand_action_to_steps`
 - 기타: `_on_robot_connected`, `_compute_approach_position` (staticmethod)
 
 `_refresh_mode_display` 만 탭별 표시 스타일이 달라서 Mixin 밖에 남았다 (logic은 공통 `is_auto_mode` 사용).

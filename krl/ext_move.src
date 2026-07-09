@@ -114,6 +114,14 @@ DEF robo_move()
       robo_move_AXIS()
    ENDIF
 
+   ; 모션이 "물리적으로" 끝날 때까지 대기 (advance run 동기화).
+   ; WAIT SEC 0 은 선행 실행(advance run) 정지 지점을 만드는 표준 기법 —
+   ; 이게 없으면 인터프리터($ADVANCE=3)가 모션을 파이프라인에 등록만 하고
+   ; 바로 아래 줄로 진행해, 로봇이 아직 이동 중인데 motion_type 이 0(완료)
+   ; 으로 표시된다. 외부 PC 는 이 0 을 보고 진공 ON/OFF 타이밍을 잡으므로
+   ; "0 = 물리적 도착 완료" 가 보장되어야 한다.
+   WAIT SEC 0
+
    robo_motion_type[robo_motion_index] = 0
    robo_motion_index = robo_motion_index + 1
 

@@ -611,7 +611,7 @@ class KUKARobot:
         return self.client.write_variable("robo_safety_over", "FALSE")
 
     # 진공 그리퍼 (SMC ZK2) 출력 번호 — WorkVisual I/O 매핑과 일치해야 함
-    VAC_ON_OUT = 7    # $OUT[7] = VAC_ON  (진공 켜기 = 잡기)
+    VAC_ON_OUT = 7  # $OUT[7] = VAC_ON  (진공 켜기 = 잡기)
     VAC_BLOW_OUT = 8  # $OUT[8] = VAC_Blow (블로우 = 놓기 보조)
 
     def _set_gripper_out(self, var_name: str, out_no: int, on: bool, timeout: float = 2.0) -> bool:
@@ -634,9 +634,7 @@ class KUKARobot:
                     return True
                 time.sleep(0.05)
             logger.warning(f"{var_name}={val} 적용 미확인 (시도 {attempt + 1}/2)")
-        logger.error(
-            f"진공 출력 $OUT[{out_no}] 적용 실패 — ext_move 가 실행 중인지 확인하세요"
-        )
+        logger.error(f"진공 출력 $OUT[{out_no}] 적용 실패 — ext_move 가 실행 중인지 확인하세요")
         return False
 
     def set_vacuum(self, on: bool) -> bool:
@@ -666,29 +664,37 @@ class KUKARobot:
             return None
         return v == "TRUE"
 
+    # PTP 관절 속도/가속도의 고정 기준값 (%).
+    # 속도 조절은 $OV_PRO 하나로만 한다 (SmartPad 오버라이드와 같은 개념).
+    # 예전에는 축속도에도 사용자 %를 같이 써서 PTP 만 "제곱"으로 감속되는
+    # 버그가 있었다 (스핀 30% → 관절속도 30% × OV 30% = 실효 9%).
+    PTP_AXIS_VEL_BASE = 100  # 관절 최대 속도의 100% — 실제 속도는 $OV_PRO 가 스케일
+    PTP_AXIS_ACC_BASE = 50  # 가속은 절반으로 완만하게 (급가속으로 인한 진동/흔들림 방지)
+
     def set_speed(self, vel_pct: int, acc_pct: Optional[int] = None) -> bool:
         """
-        로봇 속도 설정 (1~100%)
+        로봇 속도 설정 (1~100%) — 단일 손잡이 방식.
 
-        - $OV_PRO (전역 속도 오버라이드): 즉시 모든 모션에 적용 ⭐ 핵심
-        - robo_vel_speed/acc_speed[6]: PTP 축속도 (다음 모션부터)
+        - $OV_PRO (전역 속도 오버라이드)에 사용자 % 를 적용: PTP/LIN 모두 즉시 ⭐
+        - 관절 속도/가속도는 고정 기준값(PTP_AXIS_VEL/ACC_BASE)으로 유지 —
+          사용자 % 를 여기에도 곱하면 PTP 만 이중(제곱) 감속되기 때문.
+        - acc_pct 를 명시하면 가속 기준값을 그 값으로 대체 (특수한 경우만).
         """
         vel_pct = max(1, min(100, vel_pct))
-        if acc_pct is None:
-            acc_pct = vel_pct
-        acc_pct = max(1, min(100, acc_pct))
+        acc_base = self.PTP_AXIS_ACC_BASE if acc_pct is None else max(1, min(100, acc_pct))
 
-        # 1. 전역 속도 오버라이드 (PTP / LIN 모두에 즉시 적용)
+        # 1. 전역 속도 오버라이드 (PTP / LIN 모두에 즉시 적용) — 유일한 속도 손잡이
         ok_ov = self.client.write_variable("$OV_PRO", str(vel_pct))
 
-        # 2. PTP 축별 속도/가속도 (다음 모션부터)
+        # 2. PTP 축별 속도/가속도는 고정 기준값으로 (ext_move 재시작 시 50% 초기화를
+        #    덮어써서 항상 일관된 기준을 보장. 다음 모션부터 적용)
         for i in range(1, 7):
-            self.client.write_variable(f"robo_vel_speed[{i}]", str(vel_pct))
-            self.client.write_variable(f"robo_acc_speed[{i}]", str(acc_pct))
+            self.client.write_variable(f"robo_vel_speed[{i}]", str(self.PTP_AXIS_VEL_BASE))
+            self.client.write_variable(f"robo_acc_speed[{i}]", str(acc_base))
         self.client.write_variable("robo_speed_change", "TRUE")
 
         if ok_ov:
-            logger.info(f"속도 설정: $OV_PRO={vel_pct}%, 축속도={vel_pct}%")
+            logger.info(f"속도 설정: $OV_PRO={vel_pct}% (축속도 기준 {self.PTP_AXIS_VEL_BASE}%, 가속 {acc_base}%)")
         return ok_ov
 
     def clear_queue(self) -> bool:
