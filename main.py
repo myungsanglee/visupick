@@ -5,6 +5,7 @@ PySide6 기반 데이터 수집 및 캘리브레이션 검증 프로그램
 
 import sys
 import json
+import shutil
 import logging
 import numpy as np
 import cv2
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QFileDialog,
     QMessageBox,
+    QInputDialog,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -36,6 +38,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut, QKeySequence
 
 from kuka_robot import KUKARobot
+from base_camera import BaseCamera
 from camera_factory import create_camera, list_available_camera_names, get_settings_file_filter
 from image_view import ZoomableImageLabel
 from bin_picking_tab import BinPickingTab
@@ -190,10 +193,21 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         # 포즈 테이블
         pose_group = QGroupBox("수집된 포즈")
         pose_layout = QVBoxLayout(pose_group)
-        self.pose_table = QTableWidget(0, 7)
-        self.pose_table.setHorizontalHeaderLabels(["#", "X", "Y", "Z", "A", "B", "C"])
+        self.pose_table = QTableWidget(0, 8)
+        self.pose_table.setHorizontalHeaderLabels(["#", "X", "Y", "Z", "A", "B", "C", ""])
         self.pose_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.pose_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Fixed)
+        self.pose_table.setColumnWidth(7, 34)
         self.pose_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.pose_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.pose_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.pose_table.setToolTip("더블클릭: 저장된 이미지/체커보드 검출 결과 보기\nDelete 키 또는 ✕: 포즈 삭제")
+        # 더블클릭 → 저장된 포즈 리뷰 (이미지 + 체커보드 검출 결과)
+        self.pose_table.cellDoubleClicked.connect(self._review_pose)
+        # Delete 키 → 선택된 포즈 삭제 (테이블에 포커스 있을 때만)
+        sc_del = QShortcut(QKeySequence(Qt.Key_Delete), self.pose_table)
+        sc_del.setContext(Qt.WidgetShortcut)
+        sc_del.activated.connect(self._delete_selected_pose)
         pose_layout.addWidget(self.pose_table)
 
         self.pose_count_label = QLabel("수집된 포즈: 0")
@@ -239,23 +253,43 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
 
         layout.addLayout(btn_layout)
 
-    def _init_session(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.session_dir = Path("data") / f"session_{timestamp}"
+    def _init_session(self, name: str):
+        self.session_dir = Path("data") / name
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.session_label.setText(str(self.session_dir))
         logger.info(f"세션 디렉토리: {self.session_dir}")
 
     def _new_session(self):
-        """새 세션 시작 (테이블 초기화, 디렉토리 새로 생성)"""
+        """새 세션 시작 — 폴더명을 물어본 뒤 생성 (취소 시 기존 세션 유지)"""
+        default_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        name, ok = QInputDialog.getText(
+            self,
+            "새 세션",
+            "세션 폴더명 (data/ 아래에 생성):",
+            text=default_name,
+        )
+        if not ok:
+            return  # 취소 — 기존 세션/테이블 그대로 유지
+        name = name.strip()
+        if not name or any(c in name for c in '/\\:*?"<>|'):
+            QMessageBox.warning(self, "오류", f"폴더명이 비었거나 사용할 수 없는 문자가 있습니다:\n{name}")
+            return
+        if (Path("data") / name).exists():
+            QMessageBox.warning(
+                self, "오류",
+                f"data/{name} 폴더가 이미 있습니다.\n"
+                "다른 이름을 쓰거나, 이어서 작업하려면 '기존 세션 불러오기'를 사용하세요.",
+            )
+            return
+
         self.pose_count = 0
         self.pose_table.setRowCount(0)
         self.pose_count_label.setText("수집된 포즈: 0")
         self.current_frame = None
         self.current_image = None
         self.btn_save.setEnabled(False)
-        self._init_session()
-        self.main.statusBar().showMessage("새 세션 시작")
+        self._init_session(name)
+        self.main.statusBar().showMessage(f"새 세션 시작: data/{name}")
 
     def _load_session(self):
         """기존 세션 폴더 로드 (pose_*/tcp.json 파일 스캔)"""
@@ -292,12 +326,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
                 except ValueError:
                     pose_num = loaded + 1
 
-                row = self.pose_table.rowCount()
-                self.pose_table.insertRow(row)
-                self.pose_table.setItem(row, 0, QTableWidgetItem(str(pose_num)))
-                for i, axis in enumerate(["x", "y", "z", "a", "b", "c"]):
-                    val = tcp_data.get(axis, 0)
-                    self.pose_table.setItem(row, i + 1, QTableWidgetItem(f"{val:.2f}"))
+                self._append_pose_row(pose_num, tcp_data)
                 loaded += 1
             except Exception as e:
                 logger.warning(f"포즈 로드 실패 ({pose_dir.name}): {e}")
@@ -318,6 +347,96 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
             f"세션 로드 완료: {loaded}개 포즈 ({session_path.name})"
         )
         logger.info(f"세션 로드: {session_path}, {loaded}개 포즈")
+
+    def _append_pose_row(self, pose_num: int, tcp_data: dict):
+        """테이블에 포즈 행 추가 (+ ✕ 삭제 버튼). 저장/세션 로드 공용."""
+        row = self.pose_table.rowCount()
+        self.pose_table.insertRow(row)
+        self.pose_table.setItem(row, 0, QTableWidgetItem(str(pose_num)))
+        for i, axis in enumerate(["x", "y", "z", "a", "b", "c"]):
+            val = tcp_data.get(axis, 0)
+            self.pose_table.setItem(row, i + 1, QTableWidgetItem(f"{val:.2f}"))
+        btn = QPushButton("✕")
+        btn.setToolTip(f"포즈 {pose_num} 삭제 (폴더 포함)")
+        btn.setStyleSheet("color: #D32F2F; font-weight: bold; border: none;")
+        # 삭제로 행 인덱스가 밀릴 수 있으므로 포즈 번호로 찾아서 삭제
+        btn.clicked.connect(lambda _=False, n=pose_num: self._delete_pose_by_num(n))
+        self.pose_table.setCellWidget(row, 7, btn)
+
+    def _update_pose_count_label(self):
+        self.pose_count_label.setText(f"수집된 포즈: {self.pose_table.rowCount()}")
+
+    def _delete_selected_pose(self):
+        """Delete 키: 현재 선택된 행의 포즈 삭제."""
+        row = self.pose_table.currentRow()
+        if row >= 0:
+            self._delete_pose_at_row(row)
+
+    def _delete_pose_by_num(self, pose_num: int):
+        """✕ 버튼: 포즈 번호로 행을 찾아 삭제."""
+        for row in range(self.pose_table.rowCount()):
+            item = self.pose_table.item(row, 0)
+            if item and item.text() == str(pose_num):
+                self._delete_pose_at_row(row)
+                return
+
+    def _delete_pose_at_row(self, row: int):
+        """확인 후 포즈 폴더(디스크)와 테이블 행을 함께 삭제."""
+        item = self.pose_table.item(row, 0)
+        if item is None or self.session_dir is None:
+            return
+        pose_num = int(item.text())
+        pose_dir = self.session_dir / f"pose_{pose_num:03d}"
+        reply = QMessageBox.question(
+            self,
+            "포즈 삭제",
+            f"포즈 {pose_num} 을(를) 삭제할까요?\n\n{pose_dir}\n"
+            "폴더와 저장된 파일(이미지/포인트클라우드)이 함께 삭제됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if pose_dir.exists():
+            shutil.rmtree(pose_dir, ignore_errors=True)
+        self.pose_table.removeRow(row)
+        self._update_pose_count_label()
+        # pose_count(다음 저장 번호)는 줄이지 않는다 — 삭제된 번호를 재사용해
+        # 남은 폴더와 새 데이터가 섞이는 사고 방지 (번호에 빈 구멍이 생겨도 무해)
+        self.main.statusBar().showMessage(f"포즈 {pose_num} 삭제됨: {pose_dir}")
+        logger.info(f"포즈 삭제: {pose_dir}")
+
+    def _review_pose(self, row: int, _col: int):
+        """포즈 더블클릭: 저장해뒀던 이미지 + 체커보드 검출 결과를 다시 보여준다.
+        '캡처' 버튼을 누르면 평소처럼 실시간 카메라 화면으로 돌아간다."""
+        item = self.pose_table.item(row, 0)
+        if item is None or self.session_dir is None:
+            return
+        pose_num = int(item.text())
+        img_path = self.session_dir / f"pose_{pose_num:03d}" / "image.png"
+        if not img_path.exists():
+            QMessageBox.warning(self, "오류", f"저장된 이미지가 없습니다:\n{img_path}")
+            return
+        image = cv2.imread(str(img_path))
+        if image is None:
+            QMessageBox.warning(self, "오류", f"이미지를 읽을 수 없습니다:\n{img_path}")
+            return
+
+        # 카메라 연결 없이도 동작 (BaseCamera.detect_checkerboard 는 OpenCV 전용 static)
+        board_size = (self.board_w.value(), self.board_h.value())
+        found, corners, overlay = BaseCamera.detect_checkerboard(image, board_size)
+        self._display_image(overlay if found else image)
+        if found:
+            self.checkerboard_status.setText(f"[포즈 {pose_num} 리뷰] 체커보드 검출 성공 ({len(corners)} 코너)")
+            self.checkerboard_status.setStyleSheet("color: #1565C0; font-weight: bold; font-size: 14px;")
+        else:
+            self.checkerboard_status.setText(f"[포즈 {pose_num} 리뷰] 체커보드 검출 실패")
+            self.checkerboard_status.setStyleSheet("color: #E65100; font-weight: bold; font-size: 14px;")
+        # 리뷰 중 저장 방지 — 새로 '캡처' 해야 저장 버튼이 다시 활성화됨
+        self.btn_save.setEnabled(False)
+        self.main.statusBar().showMessage(
+            f"포즈 {pose_num} 리뷰 중 — '캡처'를 누르면 실시간 화면으로 돌아갑니다"
+        )
 
     def _update_tcp(self):
         if not self.main.robot:
@@ -400,14 +519,8 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         if not intrinsics_file.exists():
             self._save_intrinsics(intrinsics_file)
 
-        row = self.pose_table.rowCount()
-        self.pose_table.insertRow(row)
-        self.pose_table.setItem(row, 0, QTableWidgetItem(str(self.pose_count)))
-        for i, axis in enumerate(["x", "y", "z", "a", "b", "c"]):
-            val = tcp_data.get(axis, 0)
-            self.pose_table.setItem(row, i + 1, QTableWidgetItem(f"{val:.2f}"))
-
-        self.pose_count_label.setText(f"수집된 포즈: {self.pose_count}")
+        self._append_pose_row(self.pose_count, tcp_data)
+        self._update_pose_count_label()
         self.btn_save.setEnabled(False)
         self.main.statusBar().showMessage(f"포즈 {self.pose_count} 저장 완료: {pose_dir}")
         logger.info(f"포즈 {self.pose_count} 저장: {pose_dir}")
@@ -875,7 +988,8 @@ class VisuPickApp(QMainWindow):
 
         self.robot = None
         self.camera = None
-        self.home_pose = None  # 로봇 연결 시 저장되는 홈 위치
+        self.home_pose = None
+        self.place_pose = None  # 픽 사이클의 놓기(Place) 위치 — 탭 공용, '놓기 위치 저장'으로 티칭
 
         self._init_ui()
 
@@ -966,6 +1080,27 @@ class VisuPickApp(QMainWindow):
         self.statusBar().showMessage("프로그램 시작됨")
 
     def _connect_robot(self):
+        """로봇 연결 / 해제 토글 (카메라와 동일한 패턴).
+        해제해도 KRL(ext_move) 쪽에서 이미 실행 중인 모션은 계속 진행된다 —
+        정지가 필요하면 해제 전에 비상정지/큐 비우기를 사용할 것."""
+        # 이미 연결되어 있으면 해제만 수행
+        if self.robot is not None:
+            try:
+                self.robot.disconnect()
+            except Exception as e:
+                logger.warning(f"로봇 disconnect 중 오류 (무시): {e}")
+            self.robot = None
+            self.home_pose = None
+            self.robot_status.setText("미연결")
+            self.robot_status.setStyleSheet("color: red; font-weight: bold;")
+            self.btn_connect_robot.setText("로봇 연결")
+            self.robot_ip_input.setEnabled(True)
+            self.tool_num_input.setEnabled(True)
+            self.base_num_input.setEnabled(True)
+            self.statusBar().showMessage("로봇 연결 해제됨 (IP/Tool/Base 변경 후 재연결 가능)")
+            return
+
+        # 연결 시도
         try:
             ip = self.robot_ip_input.text().strip()
             tool = self.tool_num_input.value()
@@ -974,7 +1109,7 @@ class VisuPickApp(QMainWindow):
             if self.robot.connect():
                 self.robot_status.setText("연결됨")
                 self.robot_status.setStyleSheet("color: green; font-weight: bold;")
-                self.btn_connect_robot.setEnabled(False)
+                self.btn_connect_robot.setText("로봇 연결 해제")
                 self.robot_ip_input.setEnabled(False)
                 self.tool_num_input.setEnabled(False)
                 self.base_num_input.setEnabled(False)
@@ -1004,6 +1139,8 @@ class VisuPickApp(QMainWindow):
                 self.robot = None
         except Exception as e:
             QMessageBox.critical(self, "오류", f"로봇 연결 실패:\n{e}")
+            # 반쯤 생성된 인스턴스가 남으면 토글이 "연결됨"으로 착각 → 반드시 정리
+            self.robot = None
 
     def _connect_camera(self):
         """카메라 연결 / 해제 토글.
