@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QListWidget,
     QScrollArea,
+    QLineEdit,
 )
 
 import pyvista as pv
@@ -49,6 +50,12 @@ import open3d as o3d
 RFDETR_DETECTOR_DIR = os.environ.get("RFDETR_DETECTOR_DIR", "/home/robotegra/michael/rf-detr/tmp")
 if RFDETR_DETECTOR_DIR not in sys.path:
     sys.path.insert(0, RFDETR_DETECTOR_DIR)
+
+# SAM 3 (Meta 공식 repo, facebookresearch/sam3) — 선택적. 텍스트(명사구) 프롬프트만으로
+# 별도 검출기 없이 개념 분할(Promptable Concept Segmentation) 수행. 설치 안 돼 있으면
+# "SAM3 검출" 버튼만 안내 에러와 함께 실패하고, 앱과 다른 기능은 정상 동작.
+# repo 가 pip 설치 경로에 없으면 환경변수 SAM3_MODEL_DIR 로 repo 루트를 지정.
+SAM3_MODEL_DIR = os.environ.get("SAM3_MODEL_DIR", "")
 
 from calibration import tcp_to_homogeneous
 from kuka_robot import normalize_robot_mode, is_auto_mode
@@ -77,6 +84,10 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._overlay_boxes: List[tuple] = []
         # [(mask(H,W) bool, color(BGR), obj_index), ...] — seg 모델일 때만 채워짐
         self._overlay_masks: List[tuple] = []
+        # [(box_pts(4,2) int, color(BGR), obj_index, angle_deg), ...] — OBB 검출 시
+        self._overlay_obbs: List[tuple] = []
+        # [(start(x,y), end(x,y), color(BGR), obj_index), ...] — 여는 방향 화살표
+        self._overlay_arrows: List[tuple] = []
         self._roi_rect: Optional[tuple] = None  # (x1, y1, x2, y2) 원본 이미지 좌표
         self._highlighted_idx: Optional[int] = None
 
@@ -95,6 +106,16 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._overlay_masks = masks
         self._refresh()
 
+    def set_obbs(self, obbs: List[tuple]):
+        """OBB(회전 사각형) 오버레이. [(box_pts(4,2), color, obj_idx, angle), ...]. 빈 리스트면 스킵."""
+        self._overlay_obbs = obbs
+        self._refresh()
+
+    def set_arrows(self, arrows: List[tuple]):
+        """여는 방향 화살표 오버레이. [(start(x,y), end(x,y), color, obj_idx), ...]. 빈 리스트면 스킵."""
+        self._overlay_arrows = arrows
+        self._refresh()
+
     def set_highlight(self, idx: Optional[int]):
         self._highlighted_idx = idx
         self._refresh()
@@ -106,6 +127,8 @@ class DraggableImageLabel(ZoomableImageLabel):
     def clear_all(self):
         self._overlay_boxes = []
         self._overlay_masks = []
+        self._overlay_obbs = []
+        self._overlay_arrows = []
         self._roi_rect = None
         self._highlighted_idx = None
         self.clear_image()
@@ -158,6 +181,38 @@ class DraggableImageLabel(ZoomableImageLabel):
                 ty = max(iy1 - 4, th + 2)
                 cv2.rectangle(canvas, (ix1, ty - th - 4), (ix1 + tw + 4, ty + 2), box_color, -1)
                 cv2.putText(canvas, full_label, (ix1 + 2, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # OBB(회전 사각형) — bbox 위 레이어. minAreaRect 결과.
+        for obb in self._overlay_obbs:
+            box_pts, color = obb[0], obb[1]
+            obj_idx = obb[2] if len(obb) > 2 else None
+            angle = obb[3] if len(obb) > 3 else None
+            if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
+                obb_color, thickness = (0, 255, 0), 3
+            elif self._highlighted_idx is not None:
+                obb_color, thickness = tuple(int(c * 0.5) for c in color), 2
+            else:
+                obb_color, thickness = color, 2
+            pts = np.asarray(box_pts, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [pts], isClosed=True, color=obb_color, thickness=thickness)
+            if angle is not None:
+                cx = int(np.mean(pts[:, 0, 0]))
+                cy = int(np.mean(pts[:, 0, 1]))
+                cv2.putText(canvas, f"{angle:.1f}deg", (cx - 20, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, obb_color, 2)
+
+        # 여는 방향 화살표 — 중심 → 여는 쪽(뚜껑 열림). OBB 위 최상단 레이어.
+        for arr in self._overlay_arrows:
+            start, end, color = arr[0], arr[1], arr[2]
+            obj_idx = arr[3] if len(arr) > 3 else None
+            if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
+                arr_color, thickness = (0, 255, 0), 3
+            elif self._highlighted_idx is not None:
+                arr_color, thickness = tuple(int(c * 0.5) for c in color), 2
+            else:
+                arr_color, thickness = color, 3
+            p0 = (int(round(start[0])), int(round(start[1])))
+            p1 = (int(round(end[0])), int(round(end[1])))
+            cv2.arrowedLine(canvas, p0, p1, arr_color, thickness, tipLength=0.25)
 
         if self._roi_rect is not None:
             rx1, ry1, rx2, ry2 = self._roi_rect
@@ -553,7 +608,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
     RFDETR_MODEL_PATH = os.environ.get(
         "RFDETR_MODEL_PATH",
         # "/home/robotegra/michael/rf-detr/tmp/rfdetr-det-nano/trt/rfdetr-nano.engine",       # det: bbox 만
-        "/home/robotegra/michael/rf-detr/tmp/rfdetr-seg-nano/trt/rfdetr-seg-nano.engine",     # seg: mask 사용
+        "/home/robotegra/michael/rf-detr/tmp/rfdetr-seg-nano/trt/rfdetr-seg-nano.engine",  # seg: mask 사용
     )
 
     # 모델 클래스 id → 이름 매핑 (rf-detr/tmp/inference.py 의 CLASSES 와 동일).
@@ -630,6 +685,17 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.conf_spin.setFixedWidth(70)
         top_row.addWidget(self.conf_spin)
 
+        top_row.addSpacing(15)
+        self.btn_detect_obb = QPushButton("OBB 검출")
+        self.btn_detect_obb.setToolTip(
+            "검출된 각 객체의 마스크에 cv2.minAreaRect 를 적용해\n"
+            "회전 사각형(OBB: 중심·크기·회전각)을 구한다. 마스크가 있는\n"
+            "검출(객체 검출/SAM3 검출)에만 동작."
+        )
+        self.btn_detect_obb.clicked.connect(self._detect_obb)
+        self.btn_detect_obb.setStyleSheet("background-color: #00838F; color: white; font-weight: bold;")
+        top_row.addWidget(self.btn_detect_obb)
+
         top_row.addStretch()
 
         # 로봇 모드 표시 라벨 (2초마다 자동 갱신)
@@ -653,6 +719,84 @@ class BinPickingTab(RobotControlMixin, QWidget):
         top_widget.setLayout(top_row)
         top_widget.setFixedHeight(top_widget.sizeHint().height())
         layout.addWidget(top_widget)
+
+        # === 2행: SAM3 텍스트 프롬프트 검출 (검출기 없이 텍스트만으로 분할) ===
+        sam3_row = QHBoxLayout()
+        sam3_row.addWidget(QLabel("SAM3 텍스트:"))
+        self.sam3_prompt_input = QLineEdit("rectangular")
+        self.sam3_prompt_input.setPlaceholderText("검출할 객체를 영어 명사구로 (예: cosmetic case, transparent box)")
+        self.sam3_prompt_input.setToolTip(
+            "SAM 3 개념 분할 — 이 텍스트에 해당하는 모든 객체를 캡처 이미지에서 찾아\n"
+            "분할 마스크를 만든다. Grounding DINO 없이 SAM 3 하나로 동작.\n"
+            "Conf 값이 점수 임계값으로 함께 적용됨."
+        )
+        self.sam3_prompt_input.returnPressed.connect(self._detect_sam3)
+        sam3_row.addWidget(self.sam3_prompt_input, stretch=1)
+
+        self.btn_detect_sam3 = QPushButton("SAM3 검출")
+        self.btn_detect_sam3.clicked.connect(self._detect_sam3)
+        self.btn_detect_sam3.setStyleSheet("background-color: #6A1B9A; color: white; font-weight: bold;")
+        sam3_row.addWidget(self.btn_detect_sam3)
+
+        sam3_widget = QWidget()
+        sam3_widget.setLayout(sam3_row)
+        sam3_widget.setFixedHeight(sam3_widget.sizeHint().height())
+        layout.addWidget(sam3_widget)
+
+        # === 3행: 여는 방향(클램셸 힌지/뚜껑) 추정 — 방식 선택 + 조정값 ===
+        op_row = QHBoxLayout()
+        op_row.addWidget(QLabel("여는 방향 방식:"))
+        self.opening_method_combo = QComboBox()
+        # userData = 내부 식별자
+        self.opening_method_combo.addItem("이음선 에지", "seam")
+        self.opening_method_combo.addItem("내부 밝기 비대칭", "brightness")
+        self.opening_method_combo.setToolTip(
+            "이음선 에지: 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지 무게중심으로 판별.\n"
+            "내부 밝기 비대칭: 투명 케이스 내부(팬/거울/힌지)의 밝기 무게중심으로 판별.\n"
+            "두 방식 모두 여는 축은 OBB 단축으로 고정, 부호(어느 긴 변이 립인지)만 정함."
+        )
+        op_row.addWidget(self.opening_method_combo)
+
+        op_row.addSpacing(10)
+        op_row.addWidget(QLabel("침식%:"))
+        self.opening_erode_spin = QSpinBox()
+        self.opening_erode_spin.setRange(0, 25)
+        self.opening_erode_spin.setValue(10)
+        self.opening_erode_spin.setFixedWidth(60)
+        self.opening_erode_spin.setToolTip(
+            "마스크를 단축의 이 %만큼 침식해 외곽 실루엣 에지를 제외한다.\n" "실루엣이 새어들면 키우고, 내부 이음선까지 깎이면 줄인다. (두 방식 공통)"
+        )
+        op_row.addWidget(self.opening_erode_spin)
+
+        op_row.addSpacing(10)
+        op_row.addWidget(QLabel("에지 임계%:"))
+        self.opening_thr_spin = QSpinBox()
+        self.opening_thr_spin.setRange(0, 95)
+        self.opening_thr_spin.setValue(0)
+        self.opening_thr_spin.setFixedWidth(60)
+        self.opening_thr_spin.setToolTip(
+            "이음선 방식 전용: 지지영역 에지 크기의 이 백분위 미만은 0으로 버려\n"
+            "약한 텍스처 노이즈를 억제한다. 0 = 사용 안 함. (예: 70 → 상위 30% 에지만)"
+        )
+        op_row.addWidget(self.opening_thr_spin)
+
+        op_row.addSpacing(10)
+        self.opening_invert_chk = QCheckBox("방향 반전")
+        self.opening_invert_chk.setToolTip("추정된 여는 방향 벡터를 180° 뒤집는다 (부호 규칙이 제품과 반대일 때).")
+        op_row.addWidget(self.opening_invert_chk)
+
+        op_row.addStretch()
+
+        self.btn_detect_opening = QPushButton("여는 방향")
+        self.btn_detect_opening.setToolTip("위 방식·조정값으로 각 객체의 여는 쪽을 추정해 화살표로 표시. 마스크 필요.")
+        self.btn_detect_opening.clicked.connect(self._detect_opening)
+        self.btn_detect_opening.setStyleSheet("background-color: #EF6C00; color: white; font-weight: bold;")
+        op_row.addWidget(self.btn_detect_opening)
+
+        op_widget = QWidget()
+        op_widget.setLayout(op_row)
+        op_widget.setFixedHeight(op_widget.sizeHint().height())
+        layout.addWidget(op_widget)
 
         # === 중앙: 2D/3D 스택 + 정보 패널 ===
         splitter = QSplitter(Qt.Horizontal)
@@ -955,6 +1099,9 @@ class BinPickingTab(RobotControlMixin, QWidget):
         # 2D 뷰 갱신
         self.view_2d.set_image(image)
         self.view_2d.set_boxes([])
+        self.view_2d.set_masks([])
+        self.view_2d.set_obbs([])
+        self.view_2d.set_arrows([])
         self.view_2d.set_highlight(None)
 
         # 3D 뷰 갱신 (2D 이미지와 동일한 화각)
@@ -1081,26 +1228,374 @@ class BinPickingTab(RobotControlMixin, QWidget):
                 det["mask"] = np.asarray(masks[i], dtype=bool)
             detections.append(det)
 
-        # ROI 필터
-        if self.roi_3d is not None:
+        self._apply_detections(detections, "검출")
+
+    @staticmethod
+    def _to_numpy(x):
+        """torch.Tensor / list / ndarray 무엇이 오든 numpy 로 통일 (SAM3 출력 대비).
+
+        autocast 때문에 텐서가 bfloat16/float16 으로 나올 수 있는데 numpy 는
+        bfloat16 을 지원 안 하므로("unsupported ScalarType BFloat16"), 축소정밀
+        부동소수는 float32 로 승격한 뒤 변환한다.
+        """
+        if x is None:
+            return None
+        if hasattr(x, "detach"):
+            x = x.detach().cpu()
+            if "float16" in str(x.dtype) or "bfloat16" in str(x.dtype):
+                x = x.float()  # → float32 (numpy 호환)
+            x = x.numpy()
+        return np.asarray(x)
+
+    def _detect_sam3(self):
+        """SAM 3 (Meta 공식 repo) 텍스트 프롬프트로 검출/분할.
+
+        Grounding DINO 없이 명사구 하나로 개념 분할. 결과를 RF-DETR 경로와
+        동일한 detections 포맷으로 변환해 _apply_detections 로 넘긴다.
+        """
+        if self.current_image is None:
+            QMessageBox.warning(self, "오류", "캡처를 먼저 하세요")
+            return
+        prompt = self.sam3_prompt_input.text().strip()
+        if not prompt:
+            QMessageBox.warning(self, "오류", "검출할 객체를 설명하는 텍스트를 입력하세요 (예: cosmetic case)")
+            return
+
+        self.main.statusBar().showMessage(f"SAM3 검출 중... ('{prompt}')")
+        QApplication.processEvents()
+
+        try:
+            if SAM3_MODEL_DIR and SAM3_MODEL_DIR not in sys.path:
+                sys.path.insert(0, SAM3_MODEL_DIR)
+            import torch
+            from PIL import Image
+            from sam3.model_builder import build_sam3_image_model
+            from sam3.model.sam3_image_processor import Sam3Processor
+        except ImportError as e:
+            QMessageBox.critical(
+                self,
+                "오류",
+                f"SAM3 import 실패:\n{e}\n\n"
+                "Meta 공식 repo(facebookresearch/sam3)를 설치하세요.\n"
+                "repo 가 pip 경로에 없으면 환경변수 SAM3_MODEL_DIR 로 repo 루트를 지정.",
+            )
+            return
+
+        try:
+            # 모델 로드는 비싸므로 1회만 (프로세서 캐싱)
+            if not hasattr(self, "_sam3_processor"):
+                self.main.statusBar().showMessage("SAM3 모델 로드 중... (최초 1회, 수십 초 소요 가능)")
+                QApplication.processEvents()
+                self._sam3_processor = Sam3Processor(build_sam3_image_model())
+            processor = self._sam3_processor
+
+            # current_image 는 BGR(OpenCV) → SAM3 는 RGB PIL 기대
+            rgb = cv2.cvtColor(self.current_image, cv2.COLOR_BGR2RGB)
+            # SAM3 가중치는 bf16 → 입력(float32)과 dtype 불일치 방지 위해 공식 예제처럼
+            # autocast(bfloat16) 컨텍스트에서 추론해야 한다 (프로세서 내부엔 autocast 없음).
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            with torch.autocast(device_type=dev, dtype=torch.bfloat16):
+                state = processor.set_image(Image.fromarray(rgb))
+                output = processor.set_text_prompt(state=state, prompt=prompt)
+            masks = self._to_numpy(output["masks"])
+            boxes = self._to_numpy(output["boxes"])
+            scores = self._to_numpy(output["scores"])
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"SAM3 추론 실패:\n{e}")
+            return
+
+        # SAM3 출력 → detections 포맷. Conf 스핀을 점수 임계값으로 재사용.
+        conf = self.conf_spin.value()
+        detections = []
+        n = 0 if boxes is None else len(boxes)
+        for i in range(n):
+            score = float(scores[i]) if scores is not None and i < len(scores) else 1.0
+            if score < conf:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in np.asarray(boxes[i]).ravel()[:4]]
+            det = {
+                "bbox": [x1, y1, x2, y2],
+                "confidence": score,
+                "class_id": 0,
+                "class_name": prompt,
+            }
+            if masks is not None and i < len(masks):
+                m = np.squeeze(np.asarray(masks[i]))  # (1,H,W)/(H,W), bool 또는 logit
+                if m.ndim == 2:
+                    det["mask"] = m if m.dtype == bool else (m > 0.5)
+            detections.append(det)
+
+        if not detections:
+            self.main.statusBar().showMessage(f"SAM3: '{prompt}' 에 해당하는 객체를 못 찾음 (Conf {conf:.2f} 이상). 텍스트/Conf 조정")
+        self._apply_detections(detections, f"SAM3 검출 ('{prompt}')")
+
+    # 검출된 각 객체의 팔레트 색 (bbox/mask 표시와 동일 규칙: 유효 픽 객체를 draw 순으로)
+    _OBJ_COLORS = [(255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80), (255, 80, 255), (80, 255, 255)]
+
+    def _object_color_map(self) -> Dict[int, tuple]:
+        """검출 index → 표시 색. bbox/mask/OBB 오버레이가 같은 색을 쓰도록 한 곳에서 계산."""
+        valid_indices = {o["index"] for o in self.pick_objects}
+        cmap = {}
+        draw_i = 0
+        for i in range(len(self.detections)):
+            if i not in valid_indices:
+                continue
+            cmap[i] = self._OBJ_COLORS[draw_i % len(self._OBJ_COLORS)]
+            draw_i += 1
+        return cmap
+
+    @staticmethod
+    def _obb_from_mask(mask) -> Optional[Dict]:
+        """마스크(H×W)에서 cv2.minAreaRect 로 OBB 딕셔너리 계산. 실패 시 None."""
+        mask_u8 = (np.asarray(mask) > 0).astype(np.uint8)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        cnt = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(cnt) < 10:
+            return None
+        rect = cv2.minAreaRect(cnt)  # ((cx,cy),(w,h),angle)
+        (cx, cy), (rw, rh), angle = rect
+        box_pts = cv2.boxPoints(rect)  # (4,2) float
+        return {
+            "center": (float(cx), float(cy)),
+            "size": (float(rw), float(rh)),
+            "angle": float(angle),
+            "box_pts": box_pts.tolist(),
+        }
+
+    def _detect_obb(self):
+        """검출된 각 객체의 마스크에 cv2.minAreaRect 를 적용해 OBB(회전 사각형)를 구한다.
+
+        검출 방식(객체 검출/SAM3)과 무관하게 det["mask"](H×W bool)가 있으면 동작.
+        결과는 det["obb"] = {center(px), size(px), angle(deg), box_pts(4×2)} 로 저장하고
+        2D 뷰에 회전 사각형을 그린다. bbox 만 있고 마스크가 없는 검출은 건너뛴다.
+        """
+        if not self.detections:
+            QMessageBox.warning(self, "오류", "먼저 객체를 검출하세요 (객체 검출 또는 SAM3 검출)")
+            return
+
+        cmap = self._object_color_map()  # bbox 와 동일 색
+        obb_overlays = []
+        n_ok = 0
+        n_no_mask = 0
+        for i, det in enumerate(self.detections):
+            mask = det.get("mask")
+            if mask is None:
+                det.pop("obb", None)
+                n_no_mask += 1
+                continue
+            obb = self._obb_from_mask(mask)
+            if obb is None:
+                det.pop("obb", None)
+                continue
+            det["obb"] = obb
+            color = cmap.get(i, (200, 200, 200))  # 유효 픽 객체가 아니면 회색
+            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, obb["angle"]))
+            n_ok += 1
+
+        self.view_2d.set_obbs(obb_overlays)
+        if n_ok == 0:
+            msg = "OBB 를 구할 마스크가 없습니다 (마스크 없는 검출뿐)" if n_no_mask else "OBB 검출 실패 (윤곽선 없음)"
+            self.main.statusBar().showMessage(msg)
+            QMessageBox.warning(self, "OBB 검출", msg + "\n\nRF-DETR seg 모델 또는 SAM3 검출처럼 마스크가 있는 검출이 필요합니다.")
+        else:
+            skip = f", 마스크 없음 {n_no_mask}개 건너뜀" if n_no_mask else ""
+            self.main.statusBar().showMessage(f"OBB 검출 완료: {n_ok}개{skip}")
+
+    @staticmethod
+    def _opening_from_weight(mask, weight, obb, erode_ratio: float = 0.06) -> Optional[Dict]:
+        """가중치 맵의 무게중심 비대칭으로 클램셸의 여는 방향을 추정한다 (방식 공통).
+
+        원리: 힌지와 립(여는 쪽)은 둘 다 **긴 변**이므로, 여는 방향은 두 긴 변
+        사이 = **짧은 extent 축(단축)** 을 향한다. 여는 축은 단축으로 고정하고,
+        가중치 무게중심의 오프셋 **부호(둘 중 어느 긴 변이 립인가)** 만 정한다.
+        weight 는 방식마다 다르다: 이음선=에지 크기, 내부=밝기. 외곽 실루엣의
+        영향은 마스크를 침식(erode)해 제외 → 내부만 반영.
+
+        반환: {"dir"(단위벡터), "angle_deg", "confidence"(단축 오프셋/반길이 비),
+               "half_len"(단축 반길이), "axis": "short"} — 실패 시 None.
+        """
+        mask_u8 = (np.asarray(mask) > 0).astype(np.uint8)
+        pts = np.asarray(obb["box_pts"], dtype=np.float64)  # (4,2) 순서대로 인접
+        e1 = pts[1] - pts[0]
+        e2 = pts[2] - pts[1]
+        l1 = float(np.linalg.norm(e1))
+        l2 = float(np.linalg.norm(e2))
+        if l1 < 2 or l2 < 2:
+            return None
+        u1 = e1 / l1
+        u2 = e2 / l2  # 서로 수직인 두 OBB 축 단위벡터
+
+        # 외곽 실루엣 제외: 마스크를 짧은 변의 erode_ratio 만큼 침식
+        k = int(round(min(l1, l2) * max(0.0, erode_ratio)))
+        eroded = mask_u8
+        if k >= 1:
+            ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
+            e = cv2.erode(mask_u8, ker)
+            if int(e.sum()) >= 20:
+                eroded = e  # 너무 작아지면 침식 생략
+        ys, xs = np.nonzero(eroded)
+        if len(xs) < 20:
+            return None
+        w = weight[ys, xs].astype(np.float64)
+        w = np.clip(w, 0.0, None)  # 음수 가중치 방지
+        wsum = float(w.sum())
+        if wsum < 1e-6:
+            return None
+
+        gx0 = float(xs.mean())
+        gy0 = float(ys.mean())  # 지지영역 기하 중심 (오프셋 0 기준)
+        ex = float((xs * w).sum() / wsum)
+        ey = float((ys * w).sum() / wsum)  # 가중 무게중심
+        off = np.array([ex - gx0, ey - gy0])
+
+        # 여는 축 = 짧은 extent 축으로 고정. u1 은 길이 l1 변을 따라가므로 그 축의
+        # extent 는 l1 → extent 가 작은 쪽이 단축.
+        if l1 <= l2:
+            axis, proj, half = u1, float(off.dot(u1)), l1 / 2.0
+        else:
+            axis, proj, half = u2, float(off.dot(u2)), l2 / 2.0
+        ratio = abs(proj) / half  # 단축 반길이로 정규화한 오프셋
+        s = 1.0 if proj >= 0 else -1.0
+        d = axis * s  # 여는 방향(무게중심이 치우친 쪽)
+        return {
+            "dir": (float(d[0]), float(d[1])),
+            "angle_deg": float(np.degrees(np.arctan2(d[1], d[0]))),
+            "confidence": float(ratio),
+            "half_len": float(half),
+            "axis": "short",
+        }
+
+    def _opening_weight_map(self, gray: np.ndarray, method: str, thr_pct: int) -> np.ndarray:
+        """방식별 가중치 맵. seam=Sobel 에지 크기(선택적 백분위 임계), brightness=밝기."""
+        if method == "brightness":
+            # 내부 밝기 비대칭: 밝은 쪽으로 무게중심이 치우침. 최솟값을 빼 민감도↑.
+            g = gray.astype(np.float32)
+            return g - float(g.min())
+        # seam(기본): 에지 크기
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        grad = cv2.magnitude(gx, gy)
+        if thr_pct > 0:
+            # 지지영역이 아니라 전체 이미지 기준 백분위 — 객체별 지지영역은
+            # _opening_from_weight 에서 잘리므로 여기선 전역 임계로 약한 에지만 제거
+            t = float(np.percentile(grad, thr_pct))
+            grad = np.where(grad >= t, grad, 0.0).astype(np.float32)
+        return grad
+
+    def _detect_opening(self):
+        """검출된 각 객체의 여는 방향(힌지 반대편)을 선택한 방식으로 추정.
+
+        방식(콤보): 이음선 에지 / 내부 밝기 비대칭. 조정값: 침식%, 에지 임계%, 방향 반전.
+        마스크가 있는 검출마다: OBB(없으면 즉시 계산) + 방향 → det["opening"].
+        2D 뷰에 회전 사각형과 중심→여는 쪽 화살표를 함께 그린다.
+        """
+        if not self.detections:
+            QMessageBox.warning(self, "오류", "먼저 객체를 검출하세요 (객체 검출 또는 SAM3 검출)")
+            return
+        img = self.current_rgb
+        if img is None:
+            QMessageBox.warning(self, "오류", "캡처된 이미지가 없습니다")
+            return
+
+        method = self.opening_method_combo.currentData()
+        erode_ratio = self.opening_erode_spin.value() / 100.0
+        thr_pct = self.opening_thr_spin.value()
+        invert = self.opening_invert_chk.isChecked()
+
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else np.asarray(img)
+        weight = self._opening_weight_map(gray, method, thr_pct)
+
+        cmap = self._object_color_map()
+        obb_overlays = []
+        arrows = []
+        n_ok = 0
+        n_no_mask = 0
+        low_conf = 0
+        for i, det in enumerate(self.detections):
+            mask = det.get("mask")
+            if mask is None:
+                det.pop("opening", None)
+                n_no_mask += 1
+                continue
+            obb = det.get("obb") or self._obb_from_mask(mask)
+            if obb is None:
+                continue
+            det["obb"] = obb
+            res = self._opening_from_weight(mask, weight, obb, erode_ratio)
+            if res is None:
+                det.pop("opening", None)
+                continue
+            if invert:
+                dx, dy = res["dir"]
+                res["dir"] = (-dx, -dy)
+                res["angle_deg"] = float(np.degrees(np.arctan2(-dy, -dx)))
+            res["method"] = method
+            det["opening"] = res
+            color = cmap.get(i, (200, 200, 200))
+            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, obb["angle"]))
+            cx, cy = obb["center"]
+            dx, dy = res["dir"]
+            end = (cx + dx * res["half_len"], cy + dy * res["half_len"])
+            arrows.append(((cx, cy), end, color, i))
+            if res["confidence"] < 0.02:
+                low_conf += 1
+            n_ok += 1
+
+        self.view_2d.set_obbs(obb_overlays)
+        self.view_2d.set_arrows(arrows)
+        method_name = self.opening_method_combo.currentText()
+        if n_ok == 0:
+            msg = "여는 방향을 구할 마스크가 없습니다" if n_no_mask else "여는 방향 추정 실패"
+            self.main.statusBar().showMessage(msg)
+            QMessageBox.warning(self, "여는 방향", msg + "\n\n마스크가 있는 검출(객체 검출 seg / SAM3)이 필요합니다.")
+        else:
+            warn = f", 신뢰도 낮음 {low_conf}개(비대칭 불충분)" if low_conf else ""
+            self.main.statusBar().showMessage(f"여는 방향 추정 완료({method_name}): {n_ok}개{warn}")
+
+    def _apply_detections(self, detections: List[Dict], source: str = "검출"):
+        """검출 결과(공통 포맷) → ROI 필터 → 3D 포즈 → 2D/3D/테이블 갱신.
+
+        RF-DETR(_detect)와 SAM3(_detect_sam3)가 공유하는 다운스트림.
+        detections 각 항목: {bbox[xyxy], confidence, class_id, class_name, (mask HxW bool)}
+        """
+        # ROI 필터.
+        # 1차 게이트 = 사용자가 그린 2D 사각형(roi_2d) — 깊이와 무관하게 항상 적용.
+        #   투명 객체(SAM3)는 중심 깊이가 NaN 이라 3D-only 필터로는 못 거르므로
+        #   반드시 2D 게이트가 필요하다.
+        # 2차(보조) = 중심 픽셀 깊이가 유효하고 roi_3d 가 있으면 깊이 밴드까지 확인
+        #   (불투명 객체를 깊이로 분리하는 기존 장점 유지). 깊이가 NaN 이면 이 단계는
+        #   건너뛰어 검출을 버리지 않는다.
+        if self.roi_2d is not None:
+            rx1, ry1, rx2, ry2 = self.roi_2d
+            rx_lo, rx_hi = sorted((rx1, rx2))
+            ry_lo, ry_hi = sorted((ry1, ry2))
+            xyz = self.current_xyz
             filtered = []
             for det in detections:
-                bbox = det["bbox"]
-                bcx = int((bbox[0] + bbox[2]) / 2)
-                bcy = int((bbox[1] + bbox[3]) / 2)
-                h, w = self.current_xyz.shape[:2]
-                if 0 <= bcx < w and 0 <= bcy < h:
-                    pt = self.current_xyz[bcy, bcx]
-                    if not np.any(np.isnan(pt)):
-                        in_roi = (
-                            self.roi_3d["x_min"] <= pt[0] <= self.roi_3d["x_max"]
-                            and self.roi_3d["y_min"] <= pt[1] <= self.roi_3d["y_max"]
-                            and self.roi_3d["z_min"] <= pt[2] <= self.roi_3d["z_max"]
-                        )
-                        if in_roi:
-                            filtered.append(det)
-                            continue
-            logger.info(f"ROI 필터링: {len(detections)} → {len(filtered)}")
+                bx1, by1, bx2, by2 = det["bbox"]
+                bx_lo, bx_hi = sorted((bx1, bx2))
+                by_lo, by_hi = sorted((by1, by2))
+                # 1차: bbox 전체가 2D ROI 사각형 안에 포함되는가 (부분 걸침은 제외)
+                if not (rx_lo <= bx_lo and bx_hi <= rx_hi and ry_lo <= by_lo and by_hi <= ry_hi):
+                    continue
+                # 2차: 중심 픽셀 깊이가 유효하고 roi_3d 있으면 깊이 밴드까지 확인
+                if self.roi_3d is not None and xyz is not None:
+                    h, w = xyz.shape[:2]
+                    ix = int((bx1 + bx2) / 2.0)
+                    iy = int((by1 + by2) / 2.0)
+                    if 0 <= ix < w and 0 <= iy < h:
+                        pt = xyz[iy, ix]
+                        if not np.any(np.isnan(pt)):
+                            if not (
+                                self.roi_3d["x_min"] <= pt[0] <= self.roi_3d["x_max"]
+                                and self.roi_3d["y_min"] <= pt[1] <= self.roi_3d["y_max"]
+                                and self.roi_3d["z_min"] <= pt[2] <= self.roi_3d["z_max"]
+                            ):
+                                continue  # 깊이 밴드 밖 → 제외
+                filtered.append(det)
+            logger.info(f"ROI 필터링(2D bbox 포함{'+3D' if self.roi_3d else ''}): {len(detections)} → {len(filtered)}")
             detections = filtered
 
         self.detections = detections
@@ -1112,7 +1607,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80), (255, 80, 255), (80, 255, 255)]
         valid_indices = {o["index"] for o in self.pick_objects}
         boxes = []
-        mask_overlays = []  # seg 모델일 때만 채워짐 (det 모델이면 빈 채 set_masks → 오버레이 없음)
+        mask_overlays = []  # seg 결과일 때만 채워짐 (bbox만 있으면 오버레이 없음)
         draw_i = 0  # 유효 객체만 순차 색 할당 (raw index 기준이면 팔레트가 듬성듬성 쓰여
         #            테이블/3D 순서와 색이 어긋남)
         for i, det in enumerate(detections):
@@ -1126,6 +1621,8 @@ class BinPickingTab(RobotControlMixin, QWidget):
                 mask_overlays.append((det["mask"], color, i))
         self.view_2d.set_boxes(boxes)
         self.view_2d.set_masks(mask_overlays)
+        self.view_2d.set_obbs([])  # 새 검출 → 이전 OBB/방향 은 무효 (버튼으로 다시 계산)
+        self.view_2d.set_arrows([])
 
         # 테이블 갱신
         self._update_table()
@@ -1133,7 +1630,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         # 3D 뷰: 포인트클라우드는 유지하고 객체 마커만 갱신
         self.view_3d.show_pick_objects(self.pick_objects)
 
-        self.main.statusBar().showMessage(f"검출 완료: {len(detections)}개, 피킹 포즈 {len(self.pick_objects)}개")
+        self.main.statusBar().showMessage(f"{source} 완료: {len(detections)}개, 피킹 포즈 {len(self.pick_objects)}개")
 
     def _compute_pick_poses(self):
         """

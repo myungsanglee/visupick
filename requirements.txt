@@ -4,9 +4,14 @@ pyvista>=0.43
 pyvistaqt>=0.11
 
 # --- 수치 / 비전 ---
-numpy>=1.24
+# numpy 는 2 미만으로 고정: SAM 3(facebookresearch/sam3)가 numpy>=1.26,<2 를
+# 요구하기 때문. opencv 4.11+ 와 numpy 2 는 이 제약과 충돌하므로 아래처럼 맞춘다.
+numpy>=1.26,<2
 scipy>=1.10
-opencv-contrib-python>=4.8        # contrib: cv2.ppf_match_3d 모듈 포함
+# opencv 는 numpy<2 호환 마지막 계열인 4.10.x 로 고정 (4.11+ 는 numpy>=2 요구).
+# contrib: cv2.ppf_match_3d 포함 + opencv-python 상위집합이라 SAM3/supervision 등의
+# opencv-python 의존도 이 하나로 충족 (opencv-python/-headless 는 설치하지 말 것 — cv2 충돌).
+opencv-contrib-python==4.10.0.84
 open3d>=0.17                       # FPFH / ICP / DBSCAN / FGR
 
 # --- 3D 카메라 SDK (사용하는 것만 설치하면 됨) ---
@@ -23,3 +28,14 @@ pyrealsense2>=2.54
 # RFDETR_DETECTOR_DIR / RFDETR_MODEL_PATH 로 지정 (README 참고).
 # TensorRT 엔진 사용 시:  supervision, tensorrt, pycuda
 # ONNX 모델만 사용 시:    supervision, onnxruntime-gpu
+
+# --- (옵션) SAM 3 텍스트 프롬프트 검출 - bin picking 탭 "SAM3 검출" ---
+# Meta 공식 repo(facebookresearch/sam3)를 clone 후 `pip install -e .` 로 설치.
+# repo 가 pip 경로에 없으면 환경변수 SAM3_MODEL_DIR 로 repo 루트 지정.
+# 주의 1: SAM3 가 numpy<2 를 요구 → 위 numpy/opencv 핀은 이 제약에 맞춘 것.
+# 주의 2: SAM3 설치 시 opencv-python(numpy2)을 딸려 올 수 있으니, 설치 후 반드시
+#   pip uninstall -y opencv-python opencv-python-headless
+#   pip install "opencv-contrib-python==4.10.0.84"
+# 로 opencv 를 contrib 하나로 되돌릴 것.
+# 주의 3: SAM3 pyproject 가 런타임 의존성 일부를 누락함 → 아래를 별도 설치해야 import 됨:
+#   pip install einops pycocotools psutil hydra-core omegaconf timm huggingface_hub ftfy iopath
