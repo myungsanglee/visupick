@@ -2221,6 +2221,8 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.btn_add_home_to_seq.clicked.connect(self._enqueue_home_to_sequence)
         self.btn_add_home_to_seq.setEnabled(False)
         add_row.addWidget(self.btn_add_home_to_seq)
+
+        add_row.addWidget(self._make_add_pick_to_seq_button())
         seq_layout.addLayout(add_row)
 
         # 제거 버튼들
@@ -3193,6 +3195,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         connected = self.main.robot is not None
         self.btn_move.setEnabled(connected)
         self.btn_add_obj_to_seq.setEnabled(connected)
+        self.btn_add_pick_to_seq.setEnabled(connected)
         flip_str = " [180° 적용]" if self._flip_applied else ""
         self.main.statusBar().showMessage(f"인스턴스 #{idx + 1} 선택{flip_str}: TCP X={tcp['x']:.1f}, Y={tcp['y']:.1f}, Z={tcp['z']:.1f}")
 

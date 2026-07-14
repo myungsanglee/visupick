@@ -165,14 +165,19 @@ class RobotControlMixin:
         self.vac_dwell_spin.setFixedWidth(70)
         self.vac_dwell_spin.setToolTip("진공 ON 후 상승 전 대기 시간 (흡착이 자리잡을 시간)")
         pick_row.addWidget(self.vac_dwell_spin)
+        pick_row.addStretch()
+        vbox.addLayout(pick_row)
+        return vbox
 
-        self.btn_add_pick_to_seq = QPushButton("➕ 픽 시퀀스 추가")
+    def _make_add_pick_to_seq_button(self) -> QPushButton:
+        """'픽(잡기→놓기)을 시퀀스 큐에 추가' 버튼 생성. 시퀀스 큐 그룹의 추가 버튼 행에
+        '객체 이동 추가'/'Home 추가' 와 나란히 배치하려고 탭이 호출한다."""
+        self.btn_add_pick_to_seq = QPushButton("➕ 픽 추가")
+        self.btn_add_pick_to_seq.setStyleSheet("background-color: #8E24AA; color: white;")
         self.btn_add_pick_to_seq.setToolTip("선택된 대상의 '픽(잡기→놓기)' 액션을 시퀀스 큐에 추가")
         self.btn_add_pick_to_seq.clicked.connect(self._enqueue_pick)
         self.btn_add_pick_to_seq.setEnabled(False)
-        pick_row.addWidget(self.btn_add_pick_to_seq)
-        vbox.addLayout(pick_row)
-        return vbox
+        return self.btn_add_pick_to_seq
 
     def _set_vacuum_ui(self, on: bool):
         if self.main.robot is None:
@@ -549,7 +554,7 @@ class RobotControlMixin:
         logger.info(f"Home 재설정: {cur}")
 
     def _move_to_home(self):
-        """저장된 Home 위치로 LIN 이동."""
+        """저장된 Home 위치로 PTP 이동 (먼 거리 복귀라 관절 공간 이동이 빠르고 안전)."""
         if self.main.robot is None:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
             return
@@ -563,7 +568,7 @@ class RobotControlMixin:
         speed = self._effective_speed(self.speed_spin.value())
         msg = (
             f"🏠 Home 위치로 이동\n\n"
-            f"방식: LIN (직선)\n"
+            f"방식: PTP (관절)\n"
             f"속도: {speed}%" + (" (AUT 50% 상한 적용)" if self._is_aut_mode() else "") + "\n\n"
             f"목표:\n"
             f"  X: {h['x']:.2f}\n  Y: {h['y']:.2f}\n  Z: {h['z']:.2f}\n"
@@ -576,7 +581,7 @@ class RobotControlMixin:
 
         try:
             self.main.robot.set_speed(speed)
-            slot = self.main.robot.add_move_lin(h["x"], h["y"], h["z"], h["a"], h["b"], h["c"])
+            slot = self.main.robot.add_move_ptp(h["x"], h["y"], h["z"], h["a"], h["b"], h["c"])
             if slot is None:
                 QMessageBox.critical(self, "오류", "Home 이동 명령 큐에 추가 실패")
                 return
@@ -762,7 +767,7 @@ class RobotControlMixin:
         a_type = action["type"]
 
         if a_type == "home":
-            return [("move", "lin", dict(target))]
+            return [("move", "ptp", dict(target))]  # Home 복귀는 PTP 로 통일
 
         if a_type == "object_move":
             is_lin = action.get("is_lin", True)

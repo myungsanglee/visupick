@@ -409,6 +409,49 @@ R_in_cam = T_calib[:3, :3].T @ T_g2b[:3, :3].T @ R_target_base
 
 ---
 
+## 6.7 Grasp 설정 (파지 전략) — CAD 없이 잡을 때
+
+§4~§6 의 기본 파이프라인은 **3D 중심 + 표면 법선**으로 6자유도(6-DOF) 전부를 유도한다. 그런데 **투명 객체**는 카메라 깊이가 불안정해서 중심 Z·법선이 흔들리고, 그러면 파지 자세 전체가 틀어진다. CAD 파일이 있으면 (CAD 매칭 탭처럼) 객체 좌표계에 파지점을 정의하면 되지만, **여기는 CAD 없이 AI 검출로만** 잡는다.
+
+**현업이 CAD 없이 잡는 방식 = "grasp 레시피 + 자유도 고정".** 검출된 기하(마스크 중심·OBB·열림 방향)로 좌표계를 세우는 규칙을 정하고, 노이즈가 심한 자유도는 **고정**한다. 특히 평평한 물체를 위에서 잡을 때 표준이 **4-DOF top-down 파지**다: 접근을 항상 수직으로 두고(피치·롤 고정), **위치(X,Y,Z) + 수직축 회전(yaw) 4개만** 쓴다 (연구의 Dex-Net/GG-CNN, 산업의 Pickit·Photoneo 등이 쓰는 단순화).
+
+탭 3행 **"⚙ Grasp 설정" 버튼**([bin_picking_tab.py](../bin_picking_tab.py) `GraspConfigDialog`)이 `self.grasp_config` 를 편집하고, 객체 선택 시 `_compute_grasp_tcp` 가 이 설정대로 TCP 를 만든다(기존 단일 `compute_approach_pose` 경로를 대체). **기본값은 기존 동작**(3D 중심 + 법선)이라 하위 호환되고, 투명체는 아래로 바꾼다.
+
+### 설정 항목 (3그룹)
+
+**① 위치** — `pos_mode`:
+- `cloud` (기존): 마스크 3D점 median 을 base 로 변환.
+- `plane` (투명체 권장): 깊이를 안 쓰고 **픽셀을 알려진 작업 평면에 광선 투영**해 XY 를 얻고, Z 는 **고정값**(`z_pick`). 투영할 픽셀은 `xy_source`(OBB 중심 / 마스크 중심 / bbox 중심).
+
+**② 접근(Tool +Z)** — `approach`:
+- `normal` (기존): 표면 법선 반대 방향.
+- `vertical` (top-down): 항상 수직 접근 → **B·C 를 고정값**(`b_fixed`, `c_fixed`)으로.
+
+**③ 회전(수직축 A = 그리퍼 X축 방향)** — `vertical` 일 때만, `yaw_source`:
+- `opening`: 그리퍼 X 를 **열림 방향**(§3.4)에 맞춤.
+- `obb_long`: OBB 장축에 맞춤.
+- `fixed`: 고정 A(`a_fixed`).
+
+### 핵심 계산 — 픽셀 → base 평면 광선 투영
+
+깊이 없이 XY·회전 방향을 구하는 열쇠는 `_pixel_to_base_on_plane(u, v, z_plane)` 다:
+
+1. 픽셀 → 카메라 광선 방향 `d_cam = ((u−cx)/fx, (v−cy)/fy, 1)` (intrinsics 역투영).
+2. 캘리브레이션으로 카메라 원점 `O` 와 광선 `d` 를 **base 로** 변환 (eye-to-hand 는 `T_calib`, eye-in-hand 는 `T_g2b·T_calib`).
+3. base 평면 `Z = z_plane` 과 교차: `t = (z_plane − O_z) / d_z`, 교점 `P = O + t·d`.
+
+이러면 **깊이 픽셀을 전혀 안 쓰고** XY 가 나온다. 회전(A)은 OBB 중심과 "중심+열림 방향" 두 픽셀을 같은 평면에 투영해 base 방향 벡터를 만든 뒤 `A = atan2(Δy, Δx) + a_offset` (`_yaw_from_direction`).
+
+> **A 보정 오프셋(`a_offset`):** 이미지에서 잰 각도를 그리퍼 A 로 바꿀 때 더하는 상수. 카메라 장착 방향 때문에 생기는 고정 오프셋이라 **한 번만 맞추면** 된다.
+
+### 고정값 티칭
+
+`z_pick`·`b_fixed`·`c_fixed` 는 다이얼로그에서 **직접 입력**하거나, 로봇을 원하는 top-down 파지 자세로 jog 한 뒤 **"📍 현재 로봇 자세로 Z·B·C 고정"** 버튼으로 현재 TCP 에서 가져온다(`_teach_from_current`). 실측 기반이라 정확하다.
+
+> 예 — 투명 케이스 4-DOF 세팅: `pos_mode=plane`, `xy_source=obb_center`, `approach=vertical`, `yaw_source=opening`, 그리고 로봇을 케이스 윗면 파지 자세로 jog → 티칭. 이후 검출→선택하면 XY 는 OBB 중심 투영, Z·B·C 는 고정, A 는 열림 방향으로 자동 계산된다.
+
+---
+
 ## 7. 접근/철수(Approach/Retract) 모션
 
 물체로 곧장 직선으로 다가가면 옆 물체와 충돌할 수 있다. 그래서 **3단계 모션**을 쓴다:
@@ -481,7 +524,7 @@ Home 과 똑같은 방식으로, 로봇을 놓을 자리로 조그(jog)한 뒤 *
 ### 두 가지 사용 방식
 
 - **원버튼 픽** ("🤖 픽 실행"): 선택한 대상 1개를 즉시 픽 사이클 실행 (Home 복귀까지).
-- **시퀀스 픽** ("➕ 픽 시퀀스 추가"): 여러 대상의 픽을 시퀀스 큐에 쌓아 한 번에 연속 실행 (§10). 이때 각 픽은 Home 복귀를 빼고, 필요하면 사용자가 "Home 추가"로 사이에 끼운다.
+- **시퀀스 픽** (시퀀스 큐 그룹의 "➕ 픽 추가"): 여러 대상의 픽을 시퀀스 큐에 쌓아 한 번에 연속 실행 (§10). 이때 각 픽은 Home 복귀를 빼고, 필요하면 사용자가 "Home 추가"로 사이에 끼운다.
 
 비상정지(Space/버튼)를 누르면 진행 중이던 픽/시퀀스 사이클도 즉시 중단되어 남은 스텝이 전송되지 않는다.
 
@@ -605,12 +648,16 @@ ROI 필터링 (bbox 중심의 3D 좌표 검사)
 
 ## 10. 보너스: 시퀀스 큐 (배치 픽킹)
 
-여러 객체를 한 번에 자동으로 처리하고 싶다면, 사용자가 객체를 차례로 추가해 "시퀀스"를 만들어 한 번에 실행하는 기능이 있다 ([bin_picking_tab.py:1554](../bin_picking_tab.py#L1554) `_enqueue_object_move()` 등).
+여러 객체를 한 번에 자동으로 처리하고 싶다면, 사용자가 액션을 차례로 추가해 "시퀀스"를 만들어 한 번에 실행하는 기능이 있다. 시퀀스 큐 그룹의 **추가 버튼 3개**로 액션을 쌓는다:
+
+- **➕ 객체 이동 추가** (`_enqueue_object_move`, `object_move`): 선택 대상으로 Approach→이동→Retract 만.
+- **➕ Home 추가** (`_enqueue_home_to_sequence`, `home`): 사이에 Home 복귀를 끼움.
+- **➕ 픽 추가** (`_enqueue_pick`, `object_pick`): 선택 대상의 **픽(잡기→놓기)** 전체 — Approach→하강→진공 ON→대기→상승→놓기 위치→진공 OFF+블로우. (Home 복귀는 포함하지 않으니 필요하면 "Home 추가"로 명시.)
 
 내부적으로는:
-1. 각 추가 시 **현재 프레임 기준의 Approach/Target/Retract 자세**를 계산해 user_queue 리스트에 저장 (단순 좌표 3개).
-2. "시작" 버튼을 누르면 user_queue를 순회하며 KRL 큐에 모션을 채운다.
-3. 사이사이 Home 위치 복귀를 끼워넣을 수도 있다.
+1. 각 추가 시 **현재 프레임 기준의 자세/파라미터**를 계산해 user_queue 리스트에 액션 dict로 저장.
+2. "시작" 버튼을 누르면 user_queue를 순회하며 `_expand_action_to_steps`가 각 액션을 스텝으로 펼쳐 KRL 큐에 모션을 채운다(`object_pick` 은 `_build_pick_steps` 로 픽 스텝 생성).
+3. 픽 액션이 있으면 실행 전 놓기(Place) 위치 저장 여부를 검사한다.
 
 > **주의**: 시퀀스의 자세는 **추가 시점**의 카메라 영상으로 계산된 값이다. 그 사이에 박스 안 물체가 흔들리거나 움직이면 좌표가 어긋난다. 실제 운영에서는 한 사이클마다 다시 캡처+검출을 해서 좌표를 갱신하는 게 안전하다.
 
@@ -636,7 +683,7 @@ Mixin 안에 들어간 메서드 (19개):
 - 안전: `_validate_z`, `_effective_speed`, `_is_aut_mode`, `_emergency_stop`, `_emergency_stop_release`
 - Home: `_set_home_to_current`, `_move_to_home`, `_clear_motion_queue`
 - 시퀀스 큐: `_refresh_action_list`, `_enqueue_object_move`, `_enqueue_home_to_sequence`, `_remove_selected_action`, `_clear_user_queue`, `_start_sequence`, `_send_action_to_krl_queue`
-- 진공 그리퍼 / 픽 사이클: `_build_vacuum_row` (진공+픽 버튼 2행 생성), `_set_vacuum_ui`, `_vacuum_blow_ui`, `_set_place_to_current`, `_execute_pick_cycle`, `_enqueue_pick`, 단계별 실행기 `_run_cycle`/`_cycle_tick`/`_build_pick_steps`/`_expand_action_to_steps`
+- 진공 그리퍼 / 픽 사이클: `_build_vacuum_row` (진공 ON/OFF/블로우 + 픽 실행/놓기저장/흡착대기 2행 생성), `_make_add_pick_to_seq_button` ("➕ 픽 추가" 버튼 — 탭이 시퀀스 큐 그룹에 배치), `_set_vacuum_ui`, `_vacuum_blow_ui`, `_set_place_to_current`, `_execute_pick_cycle`, `_enqueue_pick`, 단계별 실행기 `_run_cycle`/`_cycle_tick`/`_build_pick_steps`/`_expand_action_to_steps`
 - 기타: `_on_robot_connected`, `_compute_approach_position` (staticmethod)
 
 `_refresh_mode_display` 만 탭별 표시 스타일이 달라서 Mixin 밖에 남았다 (logic은 공통 `is_auto_mode` 사용).

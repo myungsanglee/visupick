@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QFileDialog,
@@ -38,6 +39,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QScrollArea,
     QLineEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
 )
 
 import pyvista as pv
@@ -204,6 +208,7 @@ class DraggableImageLabel(ZoomableImageLabel):
         for arr in self._overlay_arrows:
             start, end, color = arr[0], arr[1], arr[2]
             obj_idx = arr[3] if len(arr) > 3 else None
+            conf = arr[4] if len(arr) > 4 else None  # 여는 방향 신뢰도 (SAM3 conf 와 별개)
             if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
                 arr_color, thickness = (0, 255, 0), 3
             elif self._highlighted_idx is not None:
@@ -213,6 +218,14 @@ class DraggableImageLabel(ZoomableImageLabel):
             p0 = (int(round(start[0])), int(round(start[1])))
             p1 = (int(round(end[0])), int(round(end[1])))
             cv2.arrowedLine(canvas, p0, p1, arr_color, thickness, tipLength=0.25)
+            if conf is not None:
+                # 화살표 촉 옆에 여는 방향 신뢰도 표시 (bbox 의 검출 conf 와 구분되게 "여는:")
+                label = f"open:{conf:.2f}"
+                tx = p1[0] + 6
+                ty = p1[1] + 4
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(canvas, (tx - 2, ty - th - 3), (tx + tw + 2, ty + 3), (0, 0, 0), -1)
+                cv2.putText(canvas, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, arr_color, 2)
 
         if self._roi_rect is not None:
             rx1, ry1, rx2, ry2 = self._roi_rect
@@ -591,6 +604,191 @@ class PointCloudView3D(QWidget):
 
 
 # ============================================================
+# Grasp(파지) 설정 다이얼로그
+# ============================================================
+
+
+class GraspConfigDialog(QDialog):
+    """검출된 객체를 어떻게 잡을지(파지 전략) 설정. CAD 없이 AI 검출로 잡을 때,
+    노이즈 있는 3D 전부를 쓰지 않고 특정 자유도를 고정/규칙화한다 (4-DOF top-down 등).
+
+    cfg 딕셔너리(부모 탭의 self.grasp_config)를 편집해 accept 시 반영한다.
+    get_current_tcp: 티칭 버튼이 현재 로봇 TCP {x,y,z,a,b,c} 를 받아올 콜백(없으면 None).
+    """
+
+    def __init__(self, cfg: Dict, get_current_tcp=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Grasp 설정 — 검출 객체를 어떻게 잡을지")
+        self.cfg = dict(cfg)  # 편집용 복사본 (accept 시 원본에 반영)
+        self._get_tcp = get_current_tcp
+        self.setMinimumWidth(460)
+
+        root = QVBoxLayout(self)
+
+        # --- 위치 ---
+        pos_group = QGroupBox("① 파지 위치")
+        pos_form = QFormLayout(pos_group)
+        self.pos_mode = QComboBox()
+        self.pos_mode.addItem("고정 평면에 광선 투영 (깊이 불사용, 투명체 권장)", "plane")
+        self.pos_mode.addItem("3D 중심 (기존, 깊이 필요)", "cloud")
+        self.pos_mode.setToolTip("plane: 픽셀을 base 평면에 투영해 XY 계산 + Z 고정 → 투명체에 안정.\ncloud: 마스크 3D점 median (기존).")
+        pos_form.addRow("위치 방식", self.pos_mode)
+
+        self.xy_source = QComboBox()
+        self.xy_source.addItem("OBB 중심", "obb_center")
+        self.xy_source.addItem("마스크 중심", "mask_center")
+        self.xy_source.addItem("bbox 중심", "bbox_center")
+        self.xy_source.setToolTip("plane 방식에서 어느 픽셀을 평면에 투영할지.")
+        pos_form.addRow("XY 출처 (평면 방식)", self.xy_source)
+
+        self.z_plane = QDoubleSpinBox()
+        self.z_plane.setRange(-2000, 2000)
+        self.z_plane.setDecimals(1)
+        self.z_plane.setSuffix(" mm")
+        self.z_plane.setToolTip("광선을 투영할 base 평면 높이 Z. 보통 케이스 윗면 높이. XY·회전 방향 계산에 사용.")
+        pos_form.addRow("작업 평면 Z", self.z_plane)
+
+        self.z_pick = QDoubleSpinBox()
+        self.z_pick.setRange(-2000, 2000)
+        self.z_pick.setDecimals(1)
+        self.z_pick.setSuffix(" mm")
+        self.z_pick.setToolTip("그리퍼가 실제로 내려갈 파지 Z (base). 투명체는 깊이 대신 이 고정값을 쓴다.")
+        pos_form.addRow("파지 Z (고정)", self.z_pick)
+        root.addWidget(pos_group)
+
+        # --- 접근 ---
+        app_group = QGroupBox("② 접근 방향 (Tool +Z)")
+        app_form = QFormLayout(app_group)
+        self.approach = QComboBox()
+        self.approach.addItem("수직 top-down (B·C 고정)", "vertical")
+        self.approach.addItem("표면 법선 (기존)", "normal")
+        self.approach.setToolTip("vertical: 항상 수직으로 접근, B·C 고정 → 투명체에 안정.\nnormal: 표면 법선 방향(기존).")
+        app_form.addRow("접근 방식", self.approach)
+
+        self.b_fixed = QDoubleSpinBox()
+        self.b_fixed.setRange(-180, 180)
+        self.b_fixed.setDecimals(2)
+        self.b_fixed.setSuffix(" °")
+        app_form.addRow("고정 B", self.b_fixed)
+        self.c_fixed = QDoubleSpinBox()
+        self.c_fixed.setRange(-180, 180)
+        self.c_fixed.setDecimals(2)
+        self.c_fixed.setSuffix(" °")
+        app_form.addRow("고정 C", self.c_fixed)
+        root.addWidget(app_group)
+
+        # --- 회전 ---
+        yaw_group = QGroupBox("③ 회전 (수직축 A / 그리퍼 X축 방향)")
+        yaw_form = QFormLayout(yaw_group)
+        self.yaw_source = QComboBox()
+        self.yaw_source.addItem("열림 방향 정렬 (그리퍼 X = 여는 쪽)", "opening")
+        self.yaw_source.addItem("OBB 장축 정렬", "obb_long")
+        self.yaw_source.addItem("고정", "fixed")
+        self.yaw_source.setToolTip("vertical 접근일 때 수직축 회전 A 를 무엇에 맞출지.")
+        yaw_form.addRow("회전 기준", self.yaw_source)
+
+        self.a_fixed = QDoubleSpinBox()
+        self.a_fixed.setRange(-180, 180)
+        self.a_fixed.setDecimals(2)
+        self.a_fixed.setSuffix(" °")
+        yaw_form.addRow("고정 A (회전=고정)", self.a_fixed)
+
+        self.a_offset = QDoubleSpinBox()
+        self.a_offset.setRange(-180, 180)
+        self.a_offset.setDecimals(2)
+        self.a_offset.setSuffix(" °")
+        self.a_offset.setToolTip(
+            "이미지에서 잰 방향 각도를 base yaw(A)로 바꿀 때 더하는 보정 상수.\n카메라 장착 방향에 따른 고정 오프셋 — 한 번 맞춰두면 됨."
+        )
+        yaw_form.addRow("A 보정 오프셋", self.a_offset)
+        root.addWidget(yaw_group)
+
+        # --- 티칭 ---
+        teach_row = QHBoxLayout()
+        self.btn_teach = QPushButton("📍 현재 로봇 자세로 Z·B·C 고정")
+        self.btn_teach.setToolTip("로봇을 원하는 top-down 파지 자세로 jog 한 뒤 누르면,\n현재 TCP 의 Z→작업평면 Z·파지 Z, B·C→고정 B·C 로 채운다.")
+        self.btn_teach.clicked.connect(self._teach_from_current)
+        teach_row.addWidget(self.btn_teach)
+        teach_row.addStretch()
+        root.addLayout(teach_row)
+
+        # --- OK/Cancel ---
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._load(self.cfg)
+        # 방식에 따라 관련 없는 필드 흐리게
+        self.pos_mode.currentIndexChanged.connect(self._update_enabled)
+        self.approach.currentIndexChanged.connect(self._update_enabled)
+        self.yaw_source.currentIndexChanged.connect(self._update_enabled)
+        self._update_enabled()
+
+    @staticmethod
+    def _set_combo(combo: QComboBox, data):
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _load(self, cfg: Dict):
+        self._set_combo(self.pos_mode, cfg.get("pos_mode", "cloud"))
+        self._set_combo(self.xy_source, cfg.get("xy_source", "obb_center"))
+        self.z_plane.setValue(cfg.get("z_plane", 250.0))
+        self.z_pick.setValue(cfg.get("z_pick", 250.0))
+        self._set_combo(self.approach, cfg.get("approach", "normal"))
+        self.b_fixed.setValue(cfg.get("b_fixed", 0.0))
+        self.c_fixed.setValue(cfg.get("c_fixed", 180.0))
+        self._set_combo(self.yaw_source, cfg.get("yaw_source", "opening"))
+        self.a_fixed.setValue(cfg.get("a_fixed", 0.0))
+        self.a_offset.setValue(cfg.get("a_offset", 0.0))
+
+    def _update_enabled(self):
+        is_plane = self.pos_mode.currentData() == "plane"
+        is_vert = self.approach.currentData() == "vertical"
+        self.xy_source.setEnabled(is_plane)
+        self.z_plane.setEnabled(is_plane or is_vert)  # 회전 방향 투영에도 평면 필요
+        self.z_pick.setEnabled(is_plane)
+        self.b_fixed.setEnabled(is_vert)
+        self.c_fixed.setEnabled(is_vert)
+        self.yaw_source.setEnabled(is_vert)
+        self.a_fixed.setEnabled(is_vert and self.yaw_source.currentData() == "fixed")
+        self.a_offset.setEnabled(is_vert and self.yaw_source.currentData() != "fixed")
+
+    def _teach_from_current(self):
+        if self._get_tcp is None:
+            QMessageBox.warning(self, "오류", "로봇이 연결되어 있지 않습니다")
+            return
+        tcp = self._get_tcp()
+        if not tcp:
+            QMessageBox.warning(self, "오류", "현재 로봇 자세를 읽지 못했습니다")
+            return
+        self.z_plane.setValue(float(tcp["z"]))
+        self.z_pick.setValue(float(tcp["z"]))
+        self.b_fixed.setValue(float(tcp["b"]))
+        self.c_fixed.setValue(float(tcp["c"]))
+        QMessageBox.information(
+            self,
+            "티칭 완료",
+            f"현재 TCP 로 채웠습니다.\nZ={tcp['z']:.1f}mm  B={tcp['b']:.2f}°  C={tcp['c']:.2f}°",
+        )
+
+    def result_config(self) -> Dict:
+        return {
+            "pos_mode": self.pos_mode.currentData(),
+            "xy_source": self.xy_source.currentData(),
+            "z_plane": self.z_plane.value(),
+            "z_pick": self.z_pick.value(),
+            "approach": self.approach.currentData(),
+            "b_fixed": self.b_fixed.value(),
+            "c_fixed": self.c_fixed.value(),
+            "yaw_source": self.yaw_source.currentData(),
+            "a_fixed": self.a_fixed.value(),
+            "a_offset": self.a_offset.value(),
+        }
+
+
+# ============================================================
 # Bin Picking 탭
 # ============================================================
 
@@ -637,6 +835,23 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
         self.T_calib = None
         self.calib_mode = None
+
+        # Grasp(파지) 설정 — 검출된 객체를 어떻게 잡을지 규칙. 기본값은 기존 동작
+        # (3D 중심 + 표면 법선). 투명/평면 객체는 다이얼로그에서 아래로 바꾼다:
+        #   위치 plane(고정 평면에 광선 투영) + 접근 vertical(수직) + 회전 opening(열림 방향).
+        # 자세한 의미는 _compute_grasp_tcp / GraspConfigDialog 참고.
+        self.grasp_config = {
+            "pos_mode": "cloud",  # cloud=3D 중심(기존) | plane=고정 평면 광선 투영(깊이 불사용)
+            "xy_source": "obb_center",  # plane 모드에서 투영할 픽셀: obb_center | mask_center | bbox_center
+            "z_plane": 250.0,  # 광선 투영용 base 평면 Z(mm) — 보통 케이스 윗면 높이
+            "z_pick": 250.0,  # 실제 파지 Z(mm)
+            "approach": "normal",  # normal=표면 법선(기존) | vertical=수직 top-down
+            "b_fixed": 0.0,  # vertical 일 때 고정 B(deg)
+            "c_fixed": 180.0,  # vertical 일 때 고정 C(deg)
+            "yaw_source": "opening",  # vertical 일 때 A 결정: opening | obb_long | fixed
+            "a_fixed": 0.0,  # yaw_source=fixed 일 때 A(deg)
+            "a_offset": 0.0,  # 이미지 각도 → base yaw 보정 상수(deg)
+        }
 
         # 시퀀스 큐 (Python에서 만드는 액션 시나리오)
         # 각 액션: {"type": "object_move"|"home", "label": str, "target": dict, ...}
@@ -761,7 +976,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         op_row.addWidget(QLabel("침식%:"))
         self.opening_erode_spin = QSpinBox()
         self.opening_erode_spin.setRange(0, 25)
-        self.opening_erode_spin.setValue(10)
+        self.opening_erode_spin.setValue(8)
         self.opening_erode_spin.setFixedWidth(60)
         self.opening_erode_spin.setToolTip(
             "마스크를 단축의 이 %만큼 침식해 외곽 실루엣 에지를 제외한다.\n" "실루엣이 새어들면 키우고, 내부 이음선까지 깎이면 줄인다. (두 방식 공통)"
@@ -772,7 +987,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         op_row.addWidget(QLabel("에지 임계%:"))
         self.opening_thr_spin = QSpinBox()
         self.opening_thr_spin.setRange(0, 95)
-        self.opening_thr_spin.setValue(0)
+        self.opening_thr_spin.setValue(85)
         self.opening_thr_spin.setFixedWidth(60)
         self.opening_thr_spin.setToolTip(
             "이음선 방식 전용: 지지영역 에지 크기의 이 백분위 미만은 0으로 버려\n"
@@ -792,6 +1007,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.btn_detect_opening.clicked.connect(self._detect_opening)
         self.btn_detect_opening.setStyleSheet("background-color: #EF6C00; color: white; font-weight: bold;")
         op_row.addWidget(self.btn_detect_opening)
+
+        self.btn_grasp_config = QPushButton("⚙ Grasp 설정")
+        self.btn_grasp_config.setToolTip(
+            "검출된 객체를 어떻게 잡을지(파지점·접근 방향·회전) 규칙을 설정한다.\n"
+            "투명/평면 객체는 여기서 '고정 평면 + 수직 접근 + 열림 방향 정렬'로 바꾼다."
+        )
+        self.btn_grasp_config.clicked.connect(self._open_grasp_config)
+        self.btn_grasp_config.setStyleSheet("background-color: #455A64; color: white; font-weight: bold;")
+        op_row.addWidget(self.btn_grasp_config)
 
         op_widget = QWidget()
         op_widget.setLayout(op_row)
@@ -827,21 +1051,24 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.det_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.det_table.itemSelectionChanged.connect(self._on_table_selection)
         det_layout.addWidget(self.det_table)
-        info_layout.addWidget(det_group)
+        # 축 표시가 세로→가로(2×3)로 줄어든 만큼 검출 테이블을 세로로 늘림
+        info_layout.addWidget(det_group, stretch=1)
 
-        # 선택된 객체 정보
+        # 선택된 객체 정보 — X Y Z / A B C 를 2행×3열 그리드로 가로 배치 (공간 축소)
         sel_group = QGroupBox("선택된 피킹 포즈 (로봇 base 좌표)")
-        sel_layout = QVBoxLayout(sel_group)
+        sel_layout = QGridLayout(sel_group)
+        sel_layout.setHorizontalSpacing(12)
         self.robot_labels = {}
-        for axis in ["X", "Y", "Z", "A", "B", "C"]:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"{axis}:"))
+        for i, axis in enumerate(["X", "Y", "Z", "A", "B", "C"]):
+            r, c = divmod(i, 3)  # 0~2 → 0행, 3~5 → 1행
+            cell = QHBoxLayout()
+            cell.addWidget(QLabel(f"{axis}:"))
             lab = QLabel("---")
             lab.setStyleSheet("font-family: monospace; font-size: 15px; font-weight: bold; color: #0066cc;")
             self.robot_labels[axis] = lab
-            row.addWidget(lab)
-            row.addStretch()
-            sel_layout.addLayout(row)
+            cell.addWidget(lab)
+            cell.addStretch()
+            sel_layout.addLayout(cell, r, c)
         info_layout.addWidget(sel_group)
 
         # 로봇 이동 제어
@@ -975,6 +1202,8 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.btn_add_home_to_seq.clicked.connect(self._enqueue_home_to_sequence)
         self.btn_add_home_to_seq.setEnabled(False)
         add_row.addWidget(self.btn_add_home_to_seq)
+
+        add_row.addWidget(self._make_add_pick_to_seq_button())
         seq_layout.addLayout(add_row)
 
         # 제거 버튼들
@@ -1538,7 +1767,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             cx, cy = obb["center"]
             dx, dy = res["dir"]
             end = (cx + dx * res["half_len"], cy + dy * res["half_len"])
-            arrows.append(((cx, cy), end, color, i))
+            arrows.append(((cx, cy), end, color, i, res["confidence"]))
             if res["confidence"] < 0.02:
                 low_conf += 1
             n_ok += 1
@@ -1790,59 +2019,208 @@ class BinPickingTab(RobotControlMixin, QWidget):
                 self.robot_labels[axis].setText("---")
             return
 
-        center_cam = np.array(obj["center"])
-        normal_cam = np.array(obj["normal"])
-
-        # 카메라 좌표계 → 로봇 base 좌표계
-        if self.calib_mode == "eye_to_hand":
-            p_h = np.array([center_cam[0], center_cam[1], center_cam[2], 1.0])
-            center_base = (self.T_calib @ p_h)[:3]
-            normal_base = self.T_calib[:3, :3] @ normal_cam
-        elif self.calib_mode == "eye_in_hand":
-            if not self.main.robot:
-                QMessageBox.warning(self, "오류", "Eye-in-Hand 모드는 로봇 연결 필요")
-                return
-            cur_tcp = self.main.robot.get_tcp_position()
-            T_g2b = tcp_to_homogeneous(cur_tcp)
-            p_h = np.array([center_cam[0], center_cam[1], center_cam[2], 1.0])
-            center_base = (T_g2b @ self.T_calib @ p_h)[:3]
-            normal_base = T_g2b[:3, :3] @ self.T_calib[:3, :3] @ normal_cam
-        else:
-            QMessageBox.critical(self, "오류", f"알 수 없는 모드: {self.calib_mode}")
-            return
-
-        # 법선 방향으로 TCP 자세 계산: Tool +Z가 법선 반대 방향 (표면을 향해)
-        # 현재 TCP X축을 참고 자세로 사용 (없으면 월드 X축)
+        # 참고 자세(법선 접근의 ref) / eye-in-hand / 회전변화 계산용 현재 TCP
         if self.main.robot:
             cur_tcp = self.main.robot.get_tcp_position()
         else:
             cur_tcp = {"x": 0, "y": 0, "z": 0, "a": 0, "b": 0, "c": 180}
 
-        from calibration import compute_approach_pose
-
-        approach = compute_approach_pose(center_base, normal_base, cur_tcp)
+        det = self.detections[idx] if idx < len(self.detections) else {}
+        tcp, err = self._compute_grasp_tcp(obj, det, cur_tcp)
+        if tcp is None:
+            self.main.statusBar().showMessage(f"파지 자세 계산 실패: {err}")
+            for axis in ["X", "Y", "Z", "A", "B", "C"]:
+                self.robot_labels[axis].setText("---")
+            self.target_pose = None
+            self.btn_move_robot.setEnabled(False)
+            return
 
         for axis in ["X", "Y", "Z", "A", "B", "C"]:
-            self.robot_labels[axis].setText(f"{approach[axis.lower()]:.2f}")
+            self.robot_labels[axis].setText(f"{tcp[axis.lower()]:.2f}")
 
         # 이동 버튼 활성화용으로 타겟 자세 저장
-        self.target_pose = approach
+        self.target_pose = tcp
 
         # 이동 / 시퀀스 추가 버튼은 로봇 연결이 되어 있고 타겟이 유효할 때만 활성화
         connected = self.main.robot is not None
         self.btn_move_robot.setEnabled(connected)
         self.btn_add_obj_to_seq.setEnabled(connected)
+        self.btn_add_pick_to_seq.setEnabled(connected)
 
         # 3D 뷰에 Tool 자세 시각화 (Tool 좌표축 + approach 지점 + 경로선)
         self._render_tcp_visualization()
 
         # 회전 변화량 계산 (현재 TCP와 비교) → 사용자에게 큰 관절 회전 예상 시 경고
-        rot_change = self._compute_rotation_change_deg(cur_tcp, approach)
+        rot_change = self._compute_rotation_change_deg(cur_tcp, tcp)
         rot_part = f", 회전변화 {rot_change:.0f}°" if rot_change is not None else ""
         warn = "  ⚠ 큰 회전 — PTP 권장" if rot_change is not None and rot_change > 60 else ""
-        self.main.statusBar().showMessage(
-            f"객체 #{idx + 1} 선택: X={approach['x']:.1f}, Y={approach['y']:.1f}, Z={approach['z']:.1f}{rot_part}{warn}"
-        )
+        cfg = self.grasp_config
+        tag = f"{'평면' if cfg['pos_mode']=='plane' else '3D'}/{'수직' if cfg['approach']=='vertical' else '법선'}"
+        self.main.statusBar().showMessage(f"객체 #{idx + 1} 선택 [{tag}]: X={tcp['x']:.1f}, Y={tcp['y']:.1f}, Z={tcp['z']:.1f}{rot_part}{warn}")
+
+    # ============================================================
+    # Grasp(파지) 설정 & 계산
+    # ============================================================
+
+    def _open_grasp_config(self):
+        get_tcp = (lambda: self.main.robot.get_tcp_position()) if self.main.robot else None
+        dlg = GraspConfigDialog(self.grasp_config, get_current_tcp=get_tcp, parent=self)
+        if dlg.exec():
+            self.grasp_config = dlg.result_config()
+            self.main.statusBar().showMessage("Grasp 설정 적용됨")
+            if self.selected_idx is not None:  # 선택 중이면 새 설정으로 즉시 재계산
+                self._select_object(self.selected_idx)
+
+    def _cam_to_base(self, center_cam, normal_cam):
+        """카메라 좌표계 점/법선 → 로봇 base. (center_base, normal_base) 또는 (None,None)."""
+        if self.T_calib is None:
+            return None, None
+        p_h = np.array([center_cam[0], center_cam[1], center_cam[2], 1.0])
+        if self.calib_mode == "eye_to_hand":
+            cb = (self.T_calib @ p_h)[:3]
+            nb = self.T_calib[:3, :3] @ normal_cam
+        elif self.calib_mode == "eye_in_hand":
+            if not self.main.robot:
+                return None, None
+            T = tcp_to_homogeneous(self.main.robot.get_tcp_position())
+            cb = (T @ self.T_calib @ p_h)[:3]
+            nb = T[:3, :3] @ self.T_calib[:3, :3] @ normal_cam
+        else:
+            return None, None
+        return cb, nb
+
+    def _pixel_to_base_on_plane(self, u, v, z_plane):
+        """이미지 픽셀 (u,v) → 카메라 광선 → base 평면 Z=z_plane 과의 교점(base XYZ). 깊이 불사용.
+
+        투명 객체는 픽셀 깊이가 불안정하므로, 알려진 작업 평면(z_plane)에 광선을 쏴
+        XY(와 회전 방향)를 구한다. 실패 시 None."""
+        intr = self.current_intrinsics
+        if intr is None or self.T_calib is None:
+            return None
+        fx, fy = float(intr[0, 0]), float(intr[1, 1])
+        cx_i, cy_i = float(intr[0, 2]), float(intr[1, 2])
+        ray_cam = np.array([(u - cx_i) / fx, (v - cy_i) / fy, 1.0])
+        if self.calib_mode == "eye_to_hand":
+            T = self.T_calib
+        elif self.calib_mode == "eye_in_hand":
+            if not self.main.robot:
+                return None
+            T = tcp_to_homogeneous(self.main.robot.get_tcp_position()) @ self.T_calib
+        else:
+            return None
+        O = T[:3, 3]
+        d = T[:3, :3] @ ray_cam
+        if abs(d[2]) < 1e-9:
+            return None
+        t = (z_plane - O[2]) / d[2]
+        if t <= 0:
+            return None
+        return O + t * d
+
+    def _grasp_pixel(self, obj, det, source):
+        """파지 XY 로 쓸 이미지 픽셀 (u,v). obb_center/mask_center/bbox_center."""
+        if source == "obb_center":
+            mask = det.get("mask")
+            obb = det.get("obb") or (self._obb_from_mask(mask) if mask is not None else None)
+            if obb is not None:
+                det["obb"] = obb
+                return tuple(obb["center"])
+            # OBB 실패 시 마스크/ bbox 로 폴백
+        if source != "bbox_center":
+            mask = det.get("mask")
+            if mask is not None:
+                ys, xs = np.nonzero(np.asarray(mask))
+                if len(xs):
+                    return (float(xs.mean()), float(ys.mean()))
+        bx = det.get("bbox")
+        if bx is None:
+            return None
+        return ((bx[0] + bx[2]) / 2.0, (bx[1] + bx[3]) / 2.0)
+
+    def _opening_dir_px(self, det, want):
+        """이미지 좌표 단위벡터 (dx,dy). want='opening'(열림)|'obb_long'(장축). 실패 시 None."""
+        mask = det.get("mask")
+        obb = det.get("obb") or (self._obb_from_mask(mask) if mask is not None else None)
+        if obb is None:
+            return None
+        det["obb"] = obb
+        if want == "obb_long":
+            pts = np.asarray(obb["box_pts"], float)
+            e1, e2 = pts[1] - pts[0], pts[2] - pts[1]
+            long_e = e1 if np.linalg.norm(e1) >= np.linalg.norm(e2) else e2
+            n = np.linalg.norm(long_e)
+            return (long_e / n) if n > 1e-6 else None
+        # opening: det 에 있으면 재사용, 없으면 현재 UI 설정으로 계산
+        op = det.get("opening")
+        if op is None:
+            if mask is None or self.current_rgb is None:
+                return None
+            gray = cv2.cvtColor(self.current_rgb, cv2.COLOR_RGB2GRAY) if self.current_rgb.ndim == 3 else self.current_rgb
+            weight = self._opening_weight_map(gray, self.opening_method_combo.currentData(), self.opening_thr_spin.value())
+            op = self._opening_from_weight(mask, weight, obb, self.opening_erode_spin.value() / 100.0)
+            if op is None:
+                return None
+            if self.opening_invert_chk.isChecked():
+                op = dict(op)
+                op["dir"] = (-op["dir"][0], -op["dir"][1])
+            det["opening"] = op
+        return tuple(op["dir"])
+
+    def _yaw_from_direction(self, det, cfg):
+        """이미지 방향(열림/OBB장축)을 작업 평면에 투영해 base yaw A(deg) 계산. 실패 시 None."""
+        d_px = self._opening_dir_px(det, cfg["yaw_source"])
+        obb = det.get("obb")
+        if d_px is None or obb is None:
+            return None
+        cx, cy = obb["center"]
+        L = 20.0
+        p0 = self._pixel_to_base_on_plane(cx, cy, cfg["z_plane"])
+        p1 = self._pixel_to_base_on_plane(cx + d_px[0] * L, cy + d_px[1] * L, cfg["z_plane"])
+        if p0 is None or p1 is None:
+            return None
+        dxy = p1 - p0
+        return float(np.degrees(np.arctan2(dxy[1], dxy[0])) + cfg["a_offset"])
+
+    def _compute_grasp_tcp(self, obj, det, cur_tcp):
+        """grasp_config 에 따라 검출 객체의 로봇 base TCP 계산. (tcp dict, None) 또는 (None, 에러문구)."""
+        cfg = self.grasp_config
+
+        # ---- 위치 (x, y, z base) ----
+        if cfg["pos_mode"] == "plane":
+            px = self._grasp_pixel(obj, det, cfg["xy_source"])
+            if px is None:
+                return None, "위치 픽셀을 정할 수 없음 (마스크/bbox 필요)"
+            base = self._pixel_to_base_on_plane(px[0], px[1], cfg["z_plane"])
+            if base is None:
+                return None, "평면 투영 실패 (intrinsics/캘리브레이션 확인)"
+            x, y, z = float(base[0]), float(base[1]), float(cfg["z_pick"])
+        else:  # cloud (기존)
+            cb, _ = self._cam_to_base(np.array(obj["center"]), np.array(obj["normal"]))
+            if cb is None:
+                return None, "카메라→base 변환 실패"
+            x, y, z = float(cb[0]), float(cb[1]), float(cb[2])
+
+        # ---- 자세 (a, b, c) ----
+        if cfg["approach"] == "normal":
+            cb, nb = self._cam_to_base(np.array(obj["center"]), np.array(obj["normal"]))
+            if nb is None:
+                return None, "카메라→base 변환 실패"
+            from calibration import compute_approach_pose
+
+            ap = compute_approach_pose(cb, nb, cur_tcp)
+            a, b, c = ap["a"], ap["b"], ap["c"]
+            if cfg["pos_mode"] == "cloud":  # 법선+3D = 완전 기존 동작
+                x, y, z = ap["x"], ap["y"], ap["z"]
+        else:  # vertical (수직 top-down)
+            b, c = float(cfg["b_fixed"]), float(cfg["c_fixed"])
+            if cfg["yaw_source"] == "fixed":
+                a = float(cfg["a_fixed"])
+            else:
+                a = self._yaw_from_direction(det, cfg)
+                if a is None:
+                    return None, "회전(yaw) 방향을 정할 수 없음 (마스크/OBB/열림 방향 필요)"
+
+        return {"x": x, "y": y, "z": z, "a": a, "b": b, "c": c}, None
 
     def _compute_rotation_change_deg(self, current_tcp, target_tcp):
         """현재 TCP ↔ target TCP 사이의 회전 변화량(axis-angle, °)."""
