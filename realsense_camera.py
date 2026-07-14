@@ -55,8 +55,8 @@ class RealSenseCamera(BaseCamera):
 
     # 기본 해상도. D415 의 depth + color 동시 스트림이 안정적으로 동작하는 조합.
     # 640x480@30 이 가장 안정적 (1280x720 은 환경에 따라 'Couldn't resolve requests' 발생).
-    DEFAULT_WIDTH = 640
-    DEFAULT_HEIGHT = 480
+    DEFAULT_WIDTH = 1280
+    DEFAULT_HEIGHT = 720
     DEFAULT_FPS = 30
     WAIT_TIMEOUT_MS = 5000  # wait_for_frames 타임아웃 (5초)
 
@@ -129,14 +129,13 @@ class RealSenseCamera(BaseCamera):
 
             except Exception as e:
                 self._connected = False
-                logger.warning(
-                    f"RealSense 연결 시도 {attempt + 1}/{max_retries} 실패: {e}"
-                )
+                logger.warning(f"RealSense 연결 시도 {attempt + 1}/{max_retries} 실패: {e}")
                 if attempt == max_retries - 1:
                     logger.error(f"RealSense 연결 최종 실패 ({max_retries}회 시도 후)")
                     return False
                 # 다음 시도 전 대기
                 import time
+
                 time.sleep(1)
 
     def disconnect(self) -> None:
