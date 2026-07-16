@@ -30,6 +30,10 @@ python main.py                 # 유일한 진입점 — GUI 실행
 
 **카메라 추상화 (GUI를 안 건드리고 카메라 추가):** [base_camera.py](base_camera.py)의 `BaseCamera(ABC)`가 인터페이스이고, [camera_factory.py](camera_factory.py)의 `_REGISTRY`(이름 → 모듈 경로 → 클래스명)가 `create_camera()` 호출 시점에만 해당 SDK를 지연 임포트한다 (SDK가 없어도 앱 시작이 깨지지 않음). 카메라 추가 방법: `BaseCamera` 구현 → `_REGISTRY`에 등록 → GUI 콤보에 자동 노출. 구현체: [zivid_camera.py](zivid_camera.py), [realsense_camera.py](realsense_camera.py), [percipio_camera.py](percipio_camera.py).
 
+**공유 뷰 위젯은 중립 모듈에 있다 (탭이 탭을 import 하지 않게):** 2D 이미지 라벨은 [image_view.py](image_view.py)(`ZoomableImageLabel` 베이스 + `DraggableImageLabel` 드래그-ROI), 3D 포인트클라우드 뷰는 [pointcloud_view.py](pointcloud_view.py)(`PointCloudView3D`). 세 탭이 모두 여기서 import 한다 (CAD 탭은 `PointCloudView3D`를 scene/CAD/cluster 3개 인스턴스로 씀). 뷰를 고칠 땐 탭이 아니라 이 모듈을 고친다. (표면 추적 탭 전용 `ClickPointImageLabel`은 아직 그 탭에 로컬.)
+
+**여는 방향/OBB 분석은 순수 CV 모듈** ([opening_analysis.py](opening_analysis.py)) — Qt 독립이라 앱 없이 단독 테스트/튜닝 가능. `obb_from_mask`, `opening_weight_map`, `opening_from_weight`(seam/brightness 공통), `opening_from_grid`(투명 케이스 내부 격자 비대칭, 권장), `debug_show_*`(개발용 cv2.imshow). 탭의 `_detect_obb`/`_detect_opening`은 위젯 값을 읽어 이 함수들을 호출하는 UI 래퍼. 알고리즘 상세는 [docs/bin_picking.md](docs/bin_picking.md) §3.3/§3.4.
+
 **KUKA 통신은 2계층** ([kuka_robot.py](kuka_robot.py)):
 - `C3BridgeClient` — **TCP 포트 7000** 위의 저수준 C3Bridge / KukaVarProxy 프로토콜 (`read_variable` / `write_variable` / `send_motion`).
 - `KUKARobot` — 그 위의 고수준 API: `get_tcp_position()`, **20슬롯 모션 큐**(`add_move_ptp` / `add_move_lin` / `..._rel`은 슬롯 번호 반환, `move_ptp` / `move_lin`은 블로킹 편의 래퍼), `emergency_stop`, `safety_pause/resume`, `set_speed`, `clear_queue`, 그리고 **진공 그리퍼 제어**(`set_vacuum` / `vacuum_blow` / `vacuum_release` — C3Bridge가 `$OUT` 직접 쓰기를 거부하므로 `robo_vac_*` 변수 + 트리거로 KRL이 대신 적용).
@@ -37,7 +41,7 @@ python main.py                 # 유일한 진입점 — GUI 실행
 
 **캘리브레이션은 순수/Qt 독립** ([calibration.py](calibration.py)) — 단독으로 분석해도 안전하다. 핵심 함수: `tcp_to_homogeneous` / `homogeneous_to_tcp`(KUKA ABC 오일러 ↔ 4×4), `compute_hand_eye`(OpenCV 5개 방법 실행 → 비선형 정밀화 → greedy outlier 제거, 가장 일관성 좋은 결과 선택), `estimate_pose_from_pointcloud`(Zivid 경로) + `solvePnP` fallback(RealSense 경로), `compute_approach_pose`(그리퍼가 **Tool +Z** 방향으로 접근한다고 가정), `save/load_calibration_result`.
 
-**선택적 RF-DETR 검출기** (빈 픽킹 전용) — [bin_picking_tab.py](bin_picking_tab.py)가 버튼 클릭 시점에 `from detector import Detector`를 지연 임포트한다. 환경변수 `RFDETR_DETECTOR_DIR`(`sys.path`에 추가)과 `RFDETR_MODEL_PATH`(`.engine`/`.onnx`)로 설정. 없어도 앱은 정상 시작하고 다른 탭은 모두 동작한다 — "객체 검출"만 안내 에러와 함께 실패. 클래스 매핑은 그 파일의 `RFDETR_CLASSES`이고, seg 모델의 마스크는 있으면 자동 활용된다.
+**객체 검출기도 카메라처럼 추상화** ([object_detector.py](object_detector.py)) — 카메라(`base_camera`)와 같은 발상으로, 검출 로직을 Qt 독립 모듈로 분리했다. 인터페이스 `ObjectDetector` 아래 `RFDetrDetector`(외부 `detector.py` RF-DETR 래퍼)와 `Sam3Detector`(Meta 공식 SAM 3 텍스트 프롬프트)가 있고, 둘 다 `detect(image_bgr, conf, ...) → (detections, infer_ms)` 를 구현한다(표준 포맷 `[{bbox, confidence, class_id, class_name, (mask)}]`). 무거운 모델은 첫 `detect()` 때 1회 로드·캐싱, 실패는 `DetectorUnavailable`/`DetectorError` 예외. [bin_picking_tab.py](bin_picking_tab.py)의 `_detect`/`_detect_sam3`는 얇은 UI 래퍼(위젯 값 읽기·상태표시·에러 다이얼로그)일 뿐이다. 환경변수 `RFDETR_DETECTOR_DIR`(detector.py 경로)·`RFDETR_MODEL_PATH`(`.engine`/`.onnx`)·`SAM3_MODEL_DIR`(SAM3 repo)로 설정. 없어도 앱은 정상 시작하고 해당 검출 버튼만 안내 에러. 클래스 매핑은 탭의 `RFDETR_CLASSES`, seg 마스크는 있으면 자동 활용.
 
 ## 규칙 & 함정
 

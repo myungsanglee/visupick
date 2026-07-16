@@ -51,7 +51,7 @@ import pyvista as pv
 from calibration import tcp_to_homogeneous, compute_approach_pose, estimate_normal_at_pixel
 from kuka_robot import normalize_robot_mode, is_auto_mode
 from robot_control_mixin import RobotControlMixin
-from bin_picking_tab import PointCloudView3D  # 3D 뷰 재사용
+from pointcloud_view import PointCloudView3D  # 공유 3D 뷰 모듈
 from image_view import ZoomableImageLabel
 
 logger = logging.getLogger(__name__)

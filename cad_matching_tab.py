@@ -48,7 +48,8 @@ from scipy.spatial.transform import Rotation
 
 from calibration import tcp_to_homogeneous, homogeneous_to_tcp
 from kuka_robot import normalize_robot_mode, is_auto_mode
-from bin_picking_tab import DraggableImageLabel, PointCloudView3D
+from image_view import DraggableImageLabel
+from pointcloud_view import PointCloudView3D
 from robot_control_mixin import RobotControlMixin
 
 # PPF 모듈은 opencv-contrib-python에만 있음. 없으면 PPF 옵션 자동 비활성.
