@@ -42,23 +42,26 @@
 
 ---
 
-## 3. 객체 검출 (RF-DETR)
+## 3. 객체 검출 (RF-DETR / SAM3)
 
-본 프로그램은 RF-DETR 추론 래퍼 `detector.py`(별도 리포, 환경변수로 경로 지정)를 사용한다 ([bin_picking_tab.py:1030](../bin_picking_tab.py#L1030) `_detect()`). 엔진 로드는 비싸므로 `Detector` 인스턴스는 1회만 생성해 캐싱하고, 신뢰도 임계값만 매 추론마다 갱신한다.
+검출기는 카메라(`base_camera`)처럼 **`object_detector.py` 모듈로 분리**돼 있다 — Qt/UI 의존 없는 순수 추론 계층이다. 공통 인터페이스 `ObjectDetector` 아래 두 구현이 있다:
+
+- **`RFDetrDetector`** — 외부 RF-DETR 래퍼 `detector.py`(별도 리포)를 감싼다. 학습된 클래스만 검출.
+- **`Sam3Detector`** — Meta 공식 SAM 3. 텍스트 프롬프트 개념 분할 (§3.2).
+
+둘 다 `detect(image_bgr, conf_thresh, ...) → (detections, infer_ms)` 를 구현한다. `detections` 는 표준 포맷 `[{"bbox"[xyxy], "confidence", "class_id", "class_name", ("mask" HxW bool)}, ...]`, `infer_ms` 는 이미지 입력→결과 수신까지의 순수 추론 시간(모델 로드 제외, 상태바에 표시). 무거운 모델은 첫 `detect()` 때 한 번만 로드해 재사용한다. 실패는 `DetectorUnavailable`(미설치·경로 오류) / `DetectorError`(추론 오류) 예외로 올리고, 탭이 잡아 다이얼로그로 표시한다.
+
+탭([bin_picking_tab.py](../bin_picking_tab.py) `_detect()`)은 이제 **얇다** — 검출기 인스턴스를 캐싱(`self._rfdetr`)하고 위젯 값을 넘겨 `detect()` 를 호출한 뒤, 결과를 공통 `_apply_detections()` 로 보낸다:
 
 ```python
-from detector import Detector
-
-self._detector = Detector(
-    model_path=self.RFDETR_MODEL_PATH,     # .engine(TensorRT) 또는 .onnx
-    model_name="rf-detr",
-    class_names=self.RFDETR_CLASSES,       # {0: ladybug, 1: heart, 2: wings}
-    conf_thresh=self.conf_spin.value(),    # 신뢰도 임계값
-)
-_, result = self._detector.predict(self.current_image)
+from object_detector import RFDetrDetector, DetectorUnavailable, DetectorError
+if not hasattr(self, "_rfdetr"):
+    self._rfdetr = RFDetrDetector(self.RFDETR_MODEL_PATH, self.RFDETR_CLASSES, RFDETR_DETECTOR_DIR)
+detections, infer_ms = self._rfdetr.detect(self.current_image, self.conf_spin.value())
+self._apply_detections(detections, "검출", infer_ms=infer_ms)
 ```
 
-출력 `result`는 병렬 배열을 담은 dict: `xyxy` (N, 4), `confidence` (N,), `class_id` (N,), `class_name`, 그리고 seg 모델이면 `mask` (N, H, W) bool (det 모델이면 `None`). 이를 downstream 호환을 위해 `[{"bbox", "confidence", "class_id", "class_name", ("mask")}, ...]` list-of-dict 로 변환한다. seg 모델의 mask 는 이후 크롭/표시에 자동으로 사용된다.
+RF-DETR 래퍼의 원본 출력(`xyxy`/`confidence`/`class_id`/`class_name`/선택적 `mask`)은 `RFDetrDetector.detect()` 안에서 위 표준 포맷으로 변환된다. seg 모델의 mask 는 이후 크롭/표시에 자동으로 사용된다.
 
 ### 3.1 ROI 필터링
 
@@ -87,7 +90,7 @@ if self.roi_3d is not None:
 
 RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 찾으려면 탭 2행의 **"SAM3 텍스트" 입력 + "SAM3 검출" 버튼**을 쓴다 — Meta 공식 SAM 3(facebookresearch/sam3)의 개념 분할(Promptable Concept Segmentation)로, 명사구(예: `cosmetic case`) 하나만으로 **Grounding DINO 같은 별도 검출기 없이** 모든 인스턴스의 마스크를 만든다.
 
-- 구현: [bin_picking_tab.py](../bin_picking_tab.py) `_detect_sam3()`. `sam3.model_builder.build_sam3_image_model` + `Sam3Processor` 로 로드(1회 캐싱), `set_image()` → `set_text_prompt()` → `(masks, boxes, scores)`.
+- 구현: `object_detector.Sam3Detector` — `sam3.model_builder.build_sam3_image_model` + `Sam3Processor` 로 로드(1회 캐싱), `set_image()` → `set_text_prompt()` → `(masks, boxes, scores)`. 탭 `_detect_sam3()` 는 텍스트/상태표시만 하고 이 검출기를 호출. bf16 텐서를 numpy 로 안전 변환하는 `_to_numpy` 도 이 모듈에 있다.
 - 선택적 의존성: SAM 3 미설치면 버튼만 안내 에러, 앱·다른 기능은 정상. repo 경로는 환경변수 `SAM3_MODEL_DIR`.
 - 라이선스: SAM 3 는 Meta 커스텀 "SAM License"(상업 사용 가능, 군사/핵 등 금지 분야만 제외). SAM 1/2 는 Apache 2.0. Ultralytics 경유(AGPL) 대신 **공식 repo 직접 사용**.
 - `Conf` 스핀 값이 점수 임계값으로 함께 적용됨. RF-DETR 과 SAM3 결과는 동일한 `detections` 포맷으로 변환되어 공통 다운스트림 `_apply_detections()`(ROI 필터 → 3D 포즈 → 2D/3D/테이블)를 탄다.
@@ -100,7 +103,7 @@ RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 
 
 탭 1행의 **"OBB 검출" 버튼**([bin_picking_tab.py](../bin_picking_tab.py) `_detect_obb`)은 검출된 각 객체의 **마스크**에 고전 CV 를 적용한다. bbox 만으로는 회전각을 알 수 없으므로 **반드시 마스크가 있는 검출**(seg 모델 또는 SAM3)에만 동작한다.
 
-- 파이프라인 (`_obb_from_mask`): 마스크 → `cv2.findContours`(외곽 윤곽선) → 가장 큰 윤곽선 → `cv2.minAreaRect`. `minAreaRect` 는 그 점들을 감싸는 **최소 넓이 회전 사각형** `((cx,cy),(w,h),angle)` 을 반환한다.
+- 파이프라인 (`opening_analysis.obb_from_mask`): 마스크 → `cv2.findContours`(외곽 윤곽선) → 가장 큰 윤곽선 → `cv2.minAreaRect`. `minAreaRect` 는 그 점들을 감싸는 **최소 넓이 회전 사각형** `((cx,cy),(w,h),angle)` 을 반환한다.
 - 결과는 `det["obb"] = {center, size, angle, box_pts(4개 꼭짓점)}` 로 저장하고, 2D 뷰에 회전 사각형 + 각도를 bbox 와 **같은 색**으로 그린다(색은 `_object_color_map()` 한 곳에서 관리).
 
 > `minAreaRect` 의 `angle` 은 **180° 모호성**이 있다 — 사각형은 180° 돌려도 똑같이 겹치므로, 축(장/단축)만 알 뿐 "어느 쪽이 앞인가"는 모른다. 이 방향(앞/뒤)을 정하는 것이 다음 3.4 단계다.
@@ -113,14 +116,17 @@ RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 
 
 **핵심 통찰 (왜 이음선인가):** 클램셸은 뚜껑과 바닥이 만나는 **이음선(seam, parting line)** 이 있는데, 이 선은 **여는 쪽 립 + 양 옆 2면, 즉 3면에 U자로** 나타나고 **힌지 쪽엔 없다**(그쪽은 뚜껑이 이어져 있으므로). 따라서 케이스 **내부의 에지 에너지(밝기 변화)가 여는 쪽으로 치우친다**. 투명 케이스는 인쇄가 적어 이 물리 이음선이 에지의 대부분을 차지하므로 특히 잘 맞는다.
 
-**두 가지 방식(탭 3행 "여는 방향 방식" 콤보에서 선택):**
+**세 가지 방식(탭 3행 "여는 방향 방식" 콤보에서 선택):**
 
-| 방식 (`method`) | 가중치 맵 `w(px)` | 원리 | 부호 의미 |
-|---|---|---|---|
-| **이음선 에지** (`"seam"`) | Sobel 에지 크기 `√(gx²+gy²)` | 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지가 여는 쪽에 몰림 | 에지 많은 쪽 = 립(여는 쪽) |
-| **내부 밝기 비대칭** (`"brightness"`) | 밝기 `gray − min(gray)` | 투명 케이스 내부(팬/거울/힌지)의 밝기가 앞뒤로 비대칭 | 밝은 쪽 = 무게중심이 향하는 쪽(제품마다 다름 → 필요시 반전) |
+| 방식 (`method`) | 원리 | 부호 의미 |
+|---|---|---|
+| **이음선 에지** (`"seam"`) | Sobel 에지 크기 `√(gx²+gy²)` 무게중심. 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지가 여는 쪽에 몰림 | 에지 많은 쪽 = 립 |
+| **내부 밝기 비대칭** (`"brightness"`) | 밝기 `gray − min(gray)` 무게중심. 투명 내부(팬/거울/힌지)의 밝기가 앞뒤로 비대칭 | 밝은 쪽(제품마다 다름 → 반전) |
+| **내부 격자 비대칭** (`"grid"`) ✅권장 | 투명 케이스 내부 **칸 배열(2×N)이 한쪽으로 치우쳐** 반대쪽에 빈 여백 띠가 생기는 걸 이용. 실측에서 가장 강건 | 넓은 여백 쪽(제품마다 다름 → 반전) |
 
-두 방식은 **공통 뼈대**([bin_picking_tab.py](../bin_picking_tab.py) `_detect_opening` → `_opening_from_weight`)를 쓰고, **가중치 맵만 다르다**(`_opening_weight_map`):
+앞의 두 방식(`seam`/`brightness`)은 **공통 뼈대**(`opening_analysis.opening_from_weight`)를 쓰고 가중치 맵만 다르다. **`grid`는 별도 경로**(`opening_analysis.opening_from_grid`)다 — 아래 "격자 방식" 절 참고. 셋 다 여는 축은 **OBB 단축 고정**, 부호만 정한다.
+
+`seam`/`brightness` 공통 절차(탭 `_detect_opening`(UI) → `opening_analysis.opening_from_weight`(계산)):
 
 1. 방식별 **가중치 맵**을 만든다(위 표).
 2. 마스크를 **침식(erode)** 해 외곽 실루엣(케이스 vs 배경)을 제외 — 내부 특징만 남긴다(실루엣은 앞/뒤 대칭이라 단서가 안 됨).
@@ -148,6 +154,22 @@ RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 
 > **신뢰도(confidence):** 단축 방향 오프셋을 단축 반길이로 나눈 비(0~1). **0.02 미만**(코드 고정 상수, 사용자 조정 아님)이면 비대칭이 뚜렷하지 않다는 뜻 → 상태바에 "신뢰도 낮음 N개" 경고. 인쇄 그래픽이 이음선보다 강하거나 힌지 금속이 크면 부호가 흔들릴 수 있다. **방식·침식%·에지 임계%·반전을 실제 케이스로 바꿔가며 가장 잘 맞는 조합을 찾는다** — 이음선이 안 맞으면 내부 밝기 비대칭을, 부호가 반대면 반전을 쓴다.
 
 > **왜 밝기에서 최솟값을 빼나:** 무게중심은 가중치의 **상대적 분포**로 정해진다. 밝기를 원본(예 배경 ~128) 그대로 쓰면 큰 상수 baseline이 무게중심을 지지영역 기하중심 쪽으로 끌어당겨 **비대칭 신호를 눌러버린다**. `gray − min(gray)` 로 baseline을 없애면 어두운 배경부의 가중치가 0에 가까워져 밝은 특징의 치우침이 그대로 살아 **민감도가 올라간다**.
+
+#### 격자 방식 (`grid`) — 투명 케이스에 가장 강건
+
+`seam`/`brightness` 는 "얇은 선"이나 "은은한 밝기차" 같은 **약한 신호**라 케이스 위치·조명이 바뀌면 무게중심이 흔들린다(실측에서 오프셋 −0.03~−0.10 수준으로 노이즈에 취약). 반면 투명 케이스 **내부 칸 배열(2×N)은 크고 규칙적인 강한 구조**이고, 그 배열이 한쪽으로 치우쳐 반대쪽에 **빈 여백 띠**가 생긴다 — 이 큰 구조의 비대칭이 훨씬 안정적이다.
+
+`opening_analysis.opening_from_grid` 절차:
+
+1. **OBB로 warp** — 케이스를 똑바로(장축=가로) 세운다. 위치·회전이 어떻든 항상 같은 정규 좌표계가 되므로 **방향 불안정의 근본 원인이 제거**된다.
+2. **좌우 15% + 상하 4% 크롭** — 케이스의 **투명 옆벽은 세로 에지를 만들어 모든 행을 오염**시키므로 좌우를 크게 잘라 없앤다. 상하는 최소로 잘라 **여백 띠를 보존**(대칭으로 크게 자르면 핵심 신호인 여백이 깎임 — 주의).
+3. **세로벽 밀도 프로파일** — 행마다 `|∂I/∂x|`(세로 격자벽 = 칸 열 구분선) 합. 격자 구간은 높고, 빈 여백은 낮다.
+4. **격자 밴드 검출** — 프로파일이 최댓값의 40% 이상인 **최장 연속 구간**을 격자 밴드로 잡는다.
+5. **여백 비교 → 방향** — 밴드 위/아래(단축 양끝) 여백 중 **넓은 쪽으로** 단축 방향 벡터를 만든다. `confidence` = 밴드 중심이 케이스 중심에서 벗어난 정도(단축 반길이 대비).
+
+> 방향을 warp 좌표에서 정한 뒤, 두 점을 **역투영(perspectiveTransform)** 해 원본 이미지 좌표계의 단축 단위벡터로 되돌린다 — 그래야 이후 3D 변환·grasp 계산과 좌표계가 맞는다. 부호(넓은 여백이 힌지냐 여는쪽이냐)는 제품마다 다르므로 **방향 반전** 토글로 맞춘다. 실측 검증(144×82px 케이스)에서 단축과 완벽히 평행하고 confidence ≈ 0.20 으로, 무게중심 방식(≈0.10)보다 뚜렷했다.
+
+> 개발 시 `OPENING_DEBUG=True`(또는 `VISUPICK_OPENING_DEBUG=1`)면 `grid` 방식은 **warp + 격자 밴드 + 프로파일**을 별도 cv2.imshow 창(`opening_analysis.debug_show_grid`)으로 띄워 밴드가 격자를 제대로 감쌌는지 확인할 수 있다.
 
 OBB·여는 방향은 새 검출/캡처 시 자동으로 지워진다(이전 결과가 새 화면에 남지 않도록).
 
