@@ -367,16 +367,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.btn_detect.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         top_row.addWidget(self.btn_detect)
 
-        top_row.addSpacing(15)
-        top_row.addWidget(QLabel("Conf:"))
-        self.conf_spin = QDoubleSpinBox()
-        self.conf_spin.setRange(0.1, 1.0)
-        self.conf_spin.setSingleStep(0.05)
-        self.conf_spin.setValue(0.5)
-        self.conf_spin.setFixedWidth(70)
-        top_row.addWidget(self.conf_spin)
-
-        top_row.addSpacing(15)
         self.btn_detect_obb = QPushButton("OBB 검출")
         self.btn_detect_obb.setToolTip(
             "검출된 각 객체의 마스크에 cv2.minAreaRect 를 적용해\n"
@@ -386,6 +376,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.btn_detect_obb.clicked.connect(self._detect_obb)
         self.btn_detect_obb.setStyleSheet("background-color: #00838F; color: white; font-weight: bold;")
         top_row.addWidget(self.btn_detect_obb)
+
+        top_row.addSpacing(15)
+        top_row.addWidget(QLabel("Conf:"))
+        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin.setRange(0.1, 1.0)
+        self.conf_spin.setSingleStep(0.05)
+        self.conf_spin.setValue(0.5)
+        self.conf_spin.setFixedWidth(70)
+        top_row.addWidget(self.conf_spin)
 
         top_row.addStretch()
 
@@ -422,12 +421,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
             "Conf 값이 점수 임계값으로 함께 적용됨."
         )
         self.sam3_prompt_input.returnPressed.connect(self._detect_sam3)
-        sam3_row.addWidget(self.sam3_prompt_input, stretch=1)
+        self.sam3_prompt_input.setFixedWidth(400)  # stretch 대신 고정 너비
+        sam3_row.addWidget(self.sam3_prompt_input)
 
         self.btn_detect_sam3 = QPushButton("SAM3 검출")
         self.btn_detect_sam3.clicked.connect(self._detect_sam3)
         self.btn_detect_sam3.setStyleSheet("background-color: #6A1B9A; color: white; font-weight: bold;")
         sam3_row.addWidget(self.btn_detect_sam3)
+
+        sam3_row.addStretch()  # 남는 공간은 오른쪽으로 (입력창 늘어나지 않게)
 
         sam3_widget = QWidget()
         sam3_widget.setLayout(sam3_row)
@@ -438,32 +440,35 @@ class BinPickingTab(RobotControlMixin, QWidget):
         op_row = QHBoxLayout()
         op_row.addWidget(QLabel("여는 방향 방식:"))
         self.opening_method_combo = QComboBox()
-        # userData = 내부 식별자
+        # userData = 내부 식별자. 내부 격자 비대칭이 가장 강건해서 맨 위 = 기본값.
+        self.opening_method_combo.addItem("내부 격자 비대칭", "grid")
         self.opening_method_combo.addItem("이음선 에지", "seam")
         self.opening_method_combo.addItem("내부 밝기 비대칭", "brightness")
-        self.opening_method_combo.addItem("내부 격자 비대칭", "grid")
         self.opening_method_combo.setToolTip(
-            "이음선 에지: 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지 무게중심으로 판별.\n"
-            "내부 밝기 비대칭: 투명 케이스 내부(팬/거울/힌지)의 밝기 무게중심으로 판별.\n"
             "내부 격자 비대칭: 투명 케이스 내부 칸 배열이 한쪽으로 치우친 걸 이용 — OBB로\n"
             "  똑바로 세워 격자 밴드를 찾고 위/아래 여백 크기로 방향 (가장 강건, 권장).\n"
+            "이음선 에지: 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지 무게중심으로 판별.\n"
+            "내부 밝기 비대칭: 투명 케이스 내부(팬/거울/힌지)의 밝기 무게중심으로 판별.\n"
             "모든 방식 여는 축은 OBB 단축으로 고정, 부호(어느 긴 변이 립인지)만 정함."
         )
+        self.opening_method_combo.currentIndexChanged.connect(self._update_opening_settings_visibility)
         op_row.addWidget(self.opening_method_combo)
 
+        # 침식% (이음선/밝기 방식 전용) — 라벨+스핀을 한 위젯으로 묶어 통째로 show/hide
         op_row.addSpacing(10)
-        op_row.addWidget(QLabel("침식%:"))
         self.opening_erode_spin = QSpinBox()
         self.opening_erode_spin.setRange(0, 25)
         self.opening_erode_spin.setValue(0)
         self.opening_erode_spin.setFixedWidth(60)
         self.opening_erode_spin.setToolTip(
-            "마스크를 단축의 이 %만큼 침식해 외곽 실루엣 에지를 제외한다.\n" "실루엣이 새어들면 키우고, 내부 이음선까지 깎이면 줄인다. (두 방식 공통)"
+            "마스크를 단축의 이 %만큼 침식해 외곽 실루엣 에지를 제외한다.\n"
+            "실루엣이 새어들면 키우고, 내부 이음선까지 깎이면 줄인다. (이음선/밝기 방식)"
         )
-        op_row.addWidget(self.opening_erode_spin)
+        self.opening_erode_widget = self._labeled_widget("침식%:", self.opening_erode_spin)
+        op_row.addWidget(self.opening_erode_widget)
 
+        # 에지 임계% (이음선 방식 전용)
         op_row.addSpacing(10)
-        op_row.addWidget(QLabel("에지 임계%:"))
         self.opening_thr_spin = QSpinBox()
         self.opening_thr_spin.setRange(0, 95)
         self.opening_thr_spin.setValue(0)
@@ -472,20 +477,48 @@ class BinPickingTab(RobotControlMixin, QWidget):
             "이음선 방식 전용: 지지영역 에지 크기의 이 백분위 미만은 0으로 버려\n"
             "약한 텍스처 노이즈를 억제한다. 0 = 사용 안 함. (예: 70 → 상위 30% 에지만)"
         )
-        op_row.addWidget(self.opening_thr_spin)
+        self.opening_thr_widget = self._labeled_widget("에지 임계%:", self.opening_thr_spin)
+        op_row.addWidget(self.opening_thr_widget)
+
+        # 격자 임계% (격자 방식 전용) — 세로벽 프로파일에서 격자 밴드로 인정할 기준
+        op_row.addSpacing(10)
+        self.opening_grid_thr_spin = QSpinBox()
+        self.opening_grid_thr_spin.setRange(10, 90)
+        self.opening_grid_thr_spin.setValue(40)
+        self.opening_grid_thr_spin.setFixedWidth(60)
+        self.opening_grid_thr_spin.setToolTip(
+            "격자 방식 전용: 세로벽 밀도 프로파일 최댓값의 이 % 이상인 구간을 '격자 밴드'로\n"
+            "잡는다. 밴드가 빈 여백까지 삼키면 올리고, 격자 일부만 잡으면 내린다. (기본 40)"
+        )
+        self.opening_grid_thr_widget = self._labeled_widget("격자 임계%:", self.opening_grid_thr_spin)
+        op_row.addWidget(self.opening_grid_thr_widget)
+
+        # 옆벽 크롭% (격자 방식 전용) — 케이스 투명 옆벽(세로 에지 오염) 좌우 제거
+        op_row.addSpacing(10)
+        self.opening_grid_crop_spin = QSpinBox()
+        self.opening_grid_crop_spin.setRange(0, 40)
+        self.opening_grid_crop_spin.setValue(15)
+        self.opening_grid_crop_spin.setFixedWidth(60)
+        self.opening_grid_crop_spin.setToolTip(
+            "격자 방식 전용: 케이스 좌우(투명 옆벽)를 이 %만큼 잘라낸다. 옆벽 세로 에지가\n"
+            "모든 행을 오염시키므로 제거. 프레임이 두꺼우면 키운다. (기본 15, 상하는 4% 고정)"
+        )
+        self.opening_grid_crop_widget = self._labeled_widget("옆벽 크롭%:", self.opening_grid_crop_spin)
+        op_row.addWidget(self.opening_grid_crop_widget)
 
         op_row.addSpacing(10)
-        self.opening_invert_chk = QCheckBox("방향 반전")
+        self.opening_invert_chk = QCheckBox("방향 반전")  # 모든 방식 공통
         self.opening_invert_chk.setToolTip("추정된 여는 방향 벡터를 180° 뒤집는다 (부호 규칙이 제품과 반대일 때).")
         op_row.addWidget(self.opening_invert_chk)
-
-        op_row.addStretch()
 
         self.btn_detect_opening = QPushButton("여는 방향")
         self.btn_detect_opening.setToolTip("위 방식·조정값으로 각 객체의 여는 쪽을 추정해 화살표로 표시. 마스크 필요.")
         self.btn_detect_opening.clicked.connect(self._detect_opening)
         self.btn_detect_opening.setStyleSheet("background-color: #EF6C00; color: white; font-weight: bold;")
         op_row.addWidget(self.btn_detect_opening)
+
+        op_row.addStretch()
+        self._update_opening_settings_visibility()  # 기본(격자) 방식에 맞춰 초기 표시
 
         self.btn_grasp_config = QPushButton("⚙ Grasp 설정")
         self.btn_grasp_config.setToolTip(
@@ -729,6 +762,25 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self._mode_timer = QTimer(self)
         self._mode_timer.timeout.connect(self._refresh_mode_display)
         self._mode_timer.start(2000)
+
+    @staticmethod
+    def _labeled_widget(label_text: str, widget) -> QWidget:
+        """라벨 + 위젯을 한 컨테이너로 묶어 통째로 show/hide 할 수 있게 한다."""
+        cont = QWidget()
+        lay = QHBoxLayout(cont)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(QLabel(label_text))
+        lay.addWidget(widget)
+        return cont
+
+    def _update_opening_settings_visibility(self):
+        """여는 방향 방식에 따라 관련 있는 조정값만 표시.
+        침식%=이음선/밝기, 에지 임계%=이음선, 격자 임계%·옆벽 크롭%=격자 (반전은 공통)."""
+        method = self.opening_method_combo.currentData()
+        self.opening_erode_widget.setVisible(method in ("seam", "brightness"))
+        self.opening_thr_widget.setVisible(method == "seam")
+        self.opening_grid_thr_widget.setVisible(method == "grid")
+        self.opening_grid_crop_widget.setVisible(method == "grid")
 
     def _switch_view(self, idx: int):
         self.view_stack.setCurrentIndex(idx)
@@ -1032,7 +1084,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
             skip = f", 마스크 없음 {n_no_mask}개 건너뜀" if n_no_mask else ""
             self.main.statusBar().showMessage(f"OBB 검출 완료: {n_ok}개{skip}")
 
-
     def _detect_opening(self):
         """검출된 각 객체의 여는 방향(힌지 반대편)을 선택한 방식으로 추정.
 
@@ -1074,7 +1125,14 @@ class BinPickingTab(RobotControlMixin, QWidget):
                 continue
             det["obb"] = obb
             if method == "grid":
-                res = oa.opening_from_grid(mask, gray, obb, debug=OPENING_DEBUG)
+                res = oa.opening_from_grid(
+                    mask,
+                    gray,
+                    obb,
+                    debug=OPENING_DEBUG,
+                    band_thr=self.opening_grid_thr_spin.value() / 100.0,
+                    side_crop=self.opening_grid_crop_spin.value() / 100.0,
+                )
             else:
                 res = oa.opening_from_weight(mask, weight, obb, erode_ratio, debug=OPENING_DEBUG)
             if res is None:

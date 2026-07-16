@@ -214,7 +214,8 @@ def opening_weight_map(gray: np.ndarray, method: str, thr_pct: int) -> np.ndarra
         grad = np.where(grad >= t, grad, 0.0).astype(np.float32)
     return grad
 
-def opening_from_grid(mask, gray, obb, debug: bool = False) -> Optional[Dict]:
+def opening_from_grid(mask, gray, obb, debug: bool = False,
+                      band_thr: float = 0.4, side_crop: float = 0.15) -> Optional[Dict]:
     """내부 격자(칸 배열) 비대칭으로 여는 방향 추정 — 투명 케이스 전용, 가장 강건.
 
     투명 케이스 내부의 2×N 칸 배열이 한쪽으로 치우쳐(빈 여백 띠가 반대쪽에) 있는 걸
@@ -224,7 +225,11 @@ def opening_from_grid(mask, gray, obb, debug: bool = False) -> Optional[Dict]:
          모든 행을 오염시키므로 제거하는 게 핵심.
       3) 세로벽 밀도(|gx|) 행별 프로파일 → 임계 이상 최장 연속구간 = '격자 밴드'.
       4) 격자 밴드의 위/아래(단축 양끝) 여백 중 넓은 쪽으로 방향을 잡는다.
-    여는 축은 단축 고정. 반환 형식은 _opening_from_weight 와 동일(부호는 반전 토글로 보정).
+    여는 축은 단축 고정. 반환 형식은 opening_from_weight 와 동일(부호는 반전 토글로 보정).
+
+    조정 파라미터(케이스가 바뀌면 튜닝):
+      band_thr  : 격자 밴드 임계(프로파일 최댓값 대비 비, 0~1). 높이면 격자를 좁게 잡음.
+      side_crop : 좌우(옆벽) 크롭 비율(0~0.4). 프레임 두께에 맞춰. 상하 크롭은 4% 고정.
     """
     box = np.asarray(obb["box_pts"], np.float32)
     e_ab = box[1] - box[0]
@@ -241,8 +246,8 @@ def opening_from_grid(mask, gray, obb, debug: bool = False) -> Optional[Dict]:
     M = cv2.getPerspectiveTransform(src, dst)
     warp = cv2.warpPerspective(gray, M, (Wl_i, Ws_i))
 
-    bx = int(Wl_i * 0.15)  # 좌우 옆벽 제거
-    by = max(1, int(Ws_i * 0.04))  # 상하 최소 (여백 살림)
+    bx = int(Wl_i * max(0.0, side_crop))  # 좌우 옆벽 제거 (조정 가능)
+    by = max(1, int(Ws_i * 0.04))  # 상하 최소 (여백 살림, 고정)
     gi = warp[by : Ws_i - by, bx : Wl_i - bx].astype(np.float32)
     Hi, Wi = gi.shape
     if Hi < 8 or Wi < 8:
@@ -255,7 +260,7 @@ def opening_from_grid(mask, gray, obb, debug: bool = False) -> Optional[Dict]:
     prof /= mx
 
     # 격자 밴드 = 임계 이상 최장 연속구간
-    thr = 0.4
+    thr = band_thr
     above = prof >= thr
     best = (0, -1)
     i = 0

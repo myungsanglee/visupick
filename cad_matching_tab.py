@@ -1004,9 +1004,7 @@ def _aligned_tool_frame(grasp_axis: str, grasp_flip: bool) -> Optional[np.ndarra
     return _frame_from_z(base_z, ref_axis)
 
 
-def tool_frame_from_normal(
-    normal: np.ndarray, grasp_axis: str, grasp_flip: bool
-) -> Optional[np.ndarray]:
+def tool_frame_from_normal(normal: np.ndarray, grasp_axis: str, grasp_flip: bool) -> Optional[np.ndarray]:
     """표면 법선 → 제안되는 최종 Tool 좌표계 (CAD 기준, 열 = X/Y/Z축).
 
     Tool+Z 는 표면 안쪽(-normal), X축은 정렬 X를 유지하려 시도해 손목
@@ -1022,9 +1020,7 @@ def tool_frame_from_normal(
     return _frame_from_z(-n / ln, R_aligned[:, 0])
 
 
-def suggest_rotation_from_normal(
-    normal: np.ndarray, grasp_axis: str, grasp_flip: bool
-) -> Optional[Tuple[float, float, float]]:
+def suggest_rotation_from_normal(normal: np.ndarray, grasp_axis: str, grasp_flip: bool) -> Optional[Tuple[float, float, float]]:
     """CAD 표면 법선 → 그리퍼가 그 면에 수직 접근하도록 grasp 회전(A/B/C deg) 제안.
 
     compute_grasp_pose 는 먼저 Tool+Z 를 잡기 축에 정렬한 뒤 Tool 좌표계 기준
@@ -1087,15 +1083,15 @@ class GraspPointDialog(QDialog):
         if self._has_faces:
             try:
                 self._mesh = self._mesh.compute_normals(
-                    point_normals=True, cell_normals=False,
-                    auto_orient_normals=True, inplace=False,
+                    point_normals=True,
+                    cell_normals=False,
+                    auto_orient_normals=True,
+                    inplace=False,
                 )
                 self._normals_available = "Normals" in self._mesh.point_data
             except Exception:
                 try:
-                    self._mesh = self._mesh.compute_normals(
-                        point_normals=True, cell_normals=False, inplace=False
-                    )
+                    self._mesh = self._mesh.compute_normals(point_normals=True, cell_normals=False, inplace=False)
                     self._normals_available = "Normals" in self._mesh.point_data
                 except Exception as e:
                     logger.warning(f"메쉬 normal 계산 실패 (회전 자동 비활성): {e}")
@@ -1130,9 +1126,11 @@ class GraspPointDialog(QDialog):
         pos_row = QHBoxLayout()
         pos_row.addWidget(QLabel("Grasp 위치 (CAD mm):"))
         self.x_spin, self.y_spin, self.z_spin = (QDoubleSpinBox() for _ in range(3))
-        for lbl, sp, val in (("X", self.x_spin, self.result_position[0]),
-                             ("Y", self.y_spin, self.result_position[1]),
-                             ("Z", self.z_spin, self.result_position[2])):
+        for lbl, sp, val in (
+            ("X", self.x_spin, self.result_position[0]),
+            ("Y", self.y_spin, self.result_position[1]),
+            ("Z", self.z_spin, self.result_position[2]),
+        ):
             sp.setRange(-pos_lim, pos_lim)
             sp.setDecimals(1)
             sp.setSingleStep(1.0)
@@ -1161,9 +1159,7 @@ class GraspPointDialog(QDialog):
             "B": "Tool +Y 둘레 회전 (pitch, 비스듬한 접근)",
             "C": "Tool +X 둘레 회전 (roll, 옆으로 기울임)",
         }
-        for lbl, sp, val in (("A", self.a_spin, self.result_abc[0]),
-                             ("B", self.b_spin, self.result_abc[1]),
-                             ("C", self.c_spin, self.result_abc[2])):
+        for lbl, sp, val in (("A", self.a_spin, self.result_abc[0]), ("B", self.b_spin, self.result_abc[1]), ("C", self.c_spin, self.result_abc[2])):
             sp.setRange(-180.0, 180.0)
             sp.setDecimals(1)
             sp.setSingleStep(5.0)
@@ -1210,13 +1206,20 @@ class GraspPointDialog(QDialog):
         if self._mesh is not None:
             if self._has_faces:
                 self.plotter.add_mesh(
-                    self._mesh, color="#9ab0c4", smooth_shading=True,
-                    name="cad_mesh", pickable=True,
+                    self._mesh,
+                    color="#9ab0c4",
+                    smooth_shading=True,
+                    name="cad_mesh",
+                    pickable=True,
                 )
             else:
                 self.plotter.add_mesh(
-                    self._mesh, color="#9ab0c4", point_size=3,
-                    render_points_as_spheres=True, name="cad_mesh", pickable=True,
+                    self._mesh,
+                    color="#9ab0c4",
+                    point_size=3,
+                    render_points_as_spheres=True,
+                    name="cad_mesh",
+                    pickable=True,
                 )
         self.plotter.add_axes()
 
@@ -1244,13 +1247,17 @@ class GraspPointDialog(QDialog):
             if self._has_faces:
                 self.plotter.enable_surface_point_picking(
                     callback=self._on_surface_pick,
-                    show_message=False, show_point=False, left_clicking=True,
+                    show_message=False,
+                    show_point=False,
+                    left_clicking=True,
                 )
             else:
                 self.plotter.enable_point_picking(
                     callback=self._on_surface_pick,
-                    show_message=False, show_point=False,
-                    left_clicking=True, use_picker=False,
+                    show_message=False,
+                    show_point=False,
+                    left_clicking=True,
+                    use_picker=False,
                 )
         except Exception as e:
             logger.warning(f"표면 픽킹 활성화 실패 (드래그만 가능): {e}")
@@ -1343,9 +1350,7 @@ class GraspPointDialog(QDialog):
     def _on_pos_spin(self):
         if self._guard:
             return
-        self.result_position = np.array(
-            [self.x_spin.value(), self.y_spin.value(), self.z_spin.value()], dtype=float
-        )
+        self.result_position = np.array([self.x_spin.value(), self.y_spin.value(), self.z_spin.value()], dtype=float)
         self._move_sphere_widget()
         self._recompute_normal()
         if not self._maybe_autofill_abc():
@@ -1354,9 +1359,7 @@ class GraspPointDialog(QDialog):
     def _on_rot_spin(self):
         if self._guard:
             return
-        self.result_abc = np.array(
-            [self.a_spin.value(), self.b_spin.value(), self.c_spin.value()], dtype=float
-        )
+        self.result_abc = np.array([self.a_spin.value(), self.b_spin.value(), self.c_spin.value()], dtype=float)
         self._redraw()
 
     def _on_normal_check(self, _checked):
@@ -1418,20 +1421,16 @@ class GraspPointDialog(QDialog):
         L_xy = self._diag * 0.12
         # 접근(노랑, Tool+Z): 바깥에서 마커로 들어옴
         approach = pv.Arrow(start=pos - R[:, 2] * L, direction=R[:, 2], scale=L)
-        self.plotter.add_mesh(approach, color="#ffdd22", name="approach_arrow",
-                              pickable=False, reset_camera=False)
-        for name, vec, color in (("tool_x_arrow", R[:, 0], "#ff4444"),
-                                 ("tool_y_arrow", R[:, 1], "#44ff44")):
-            self.plotter.add_mesh(pv.Arrow(start=pos, direction=vec, scale=L_xy),
-                                  color=color, name=name, pickable=False, reset_camera=False)
+        self.plotter.add_mesh(approach, color="#ffdd22", name="approach_arrow", pickable=False, reset_camera=False)
+        for name, vec, color in (("tool_x_arrow", R[:, 0], "#ff4444"), ("tool_y_arrow", R[:, 1], "#44ff44")):
+            self.plotter.add_mesh(pv.Arrow(start=pos, direction=vec, scale=L_xy), color=color, name=name, pickable=False, reset_camera=False)
         self.plotter.render()
         self._refresh_info()
 
     def _refresh_info(self):
         x, y, z = self.result_position
         a, b, c = self.result_abc
-        text = (f"위치 X {x:8.1f}  Y {y:8.1f}  Z {z:8.1f} mm    |    "
-                f"회전 A {a:6.1f}  B {b:6.1f}  C {c:6.1f} °")
+        text = f"위치 X {x:8.1f}  Y {y:8.1f}  Z {z:8.1f} mm    |    " f"회전 A {a:6.1f}  B {b:6.1f}  C {c:6.1f} °"
         if self.normal_check.isChecked() and self._normal is not None:
             text += "    (법선 자동)"
         elif self._normals_available and self._normal is None:
@@ -2260,7 +2259,10 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         splitter.setStretchFactor(0, 0)  # 좌: PPF 고정 너비
         splitter.setStretchFactor(1, 3)  # 중: 카메라 확대
         splitter.setStretchFactor(2, 1)  # 우: 정보
-        layout.addWidget(splitter)
+        # splitter(이미지/3D 뷰)가 남는 세로 공간을 전부 흡수하도록 stretch=1.
+        # 이게 없으면 전체화면 시 여분 세로 공간이 상단 행들(top1~4)로 분산돼
+        # 이미지 영역이 작아진다.
+        layout.addWidget(splitter, stretch=1)
 
         # 스페이스바 = 비상정지 (탭이 활성일 때만 동작)
         from PySide6.QtGui import QShortcut, QKeySequence
@@ -2280,9 +2282,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             return
         gx, gy, gz = self.grasp_position_cad
         a, b, c = self.grasp_rotation_abc_deg
-        self.grasp_summary_label.setText(
-            f"위치 ({gx:.1f}, {gy:.1f}, {gz:.1f}) mm   회전 (A{a:.1f}, B{b:.1f}, C{c:.1f})°"
-        )
+        self.grasp_summary_label.setText(f"위치 ({gx:.1f}, {gy:.1f}, {gz:.1f}) mm   회전 (A{a:.1f}, B{b:.1f}, C{c:.1f})°")
 
     def _apply_grasp_state_change(self):
         """grasp 위치/회전 상태가 바뀐 뒤 미리보기·마커·선택 인스턴스 자세 갱신."""
@@ -2508,9 +2508,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
         x, y, z = self.grasp_position_cad
         a, b, c = self.grasp_rotation_abc_deg
-        self.main.statusBar().showMessage(
-            f"Grasp 설정: ({x:.1f}, {y:.1f}, {z:.1f})mm, 회전 A{a:.1f}° B{b:.1f}° C{c:.1f}°"
-        )
+        self.main.statusBar().showMessage(f"Grasp 설정: ({x:.1f}, {y:.1f}, {z:.1f})mm, 회전 A{a:.1f}° B{b:.1f}° C{c:.1f}°")
 
     def _load_calibration(self):
         import json
