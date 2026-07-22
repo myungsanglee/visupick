@@ -8,6 +8,7 @@ CAD 매칭 탭 (6D pose estimation by ICP)
 """
 
 import copy
+import time
 import logging
 import numpy as np
 from pathlib import Path
@@ -841,6 +842,156 @@ def ppf_match_per_cluster(
     return instances, debug_log
 
 
+def ppf_match_whole_scene(
+    scene_pcd: o3d.geometry.PointCloud,
+    detector,
+    model_data: np.ndarray,
+    model_o3d: o3d.geometry.PointCloud,
+    min_votes: int = 100,
+    relative_scene_sample_step: float = 1.0 / 40.0,
+    relative_scene_distance: float = 0.03,
+    n_candidates: int = 60,
+    max_instances: int = 10,
+    fitness_threshold: float = 0.15,
+    nms_dist_frac: float = 0.5,
+    scene_voxel: float = 0.0,
+    progress_cb=None,
+) -> Tuple[List[Dict], List[str]]:
+    """DBSCAN 없이 **전체 장면에 PPF voting 1회** → 다중 인스턴스 6D 자세 (상용 방식).
+
+    per-cluster 와 달리 장면을 미리 나누지 않아, 쌓여 붙은/부분 가림 객체에 강건하다.
+    절차:
+      1. (선택) 장면 voxel 다운샘플 → normal 추정(카메라 향해 정렬) → Nx6 변환.
+      2. detector.match(전체 장면) → voting 후보 다수 (같은 인스턴스에 여러 후보 나옴).
+      3. **pre-ICP NMS**: raw voting 자세로 먼저 중복 제거 → 서로 다른 인스턴스 후보만 남김
+         (ICP 횟수를 확 줄여 속도↑, 놓침 위험은 낮음).
+      4. 남은 후보를 Open3D point-to-plane ICP 로 정밀화 → votes/fitness 임계 통과분을
+         fitness 순 post-NMS → 최대 max_instances 개.
+
+    속도 튜닝:
+      scene_voxel(>0): 매칭 전 장면을 이 해상도로 다운샘플 (voting 비용의 최대 지렛대).
+      relative_scene_sample_step: voting 기준점 샘플링 (키우면 빠름).
+    각 단계 소요 시간(ms)을 debug_log 에 남겨 병목(voting vs ICP)을 확인한다.
+    """
+    if not HAS_PPF:
+        return [], ["PPF 모듈 미사용 (opencv-contrib-python 설치 필요)"]
+
+    instances: List[Dict] = []
+    debug_log: List[str] = []
+
+    model_pts = model_data[:, :3]
+    model_diag = float(np.linalg.norm(model_pts.max(axis=0) - model_pts.min(axis=0)))
+    model_centroid = model_pts.mean(axis=0)
+    scene_normal_radius = max(0.5, model_diag * 0.05)
+    voxel_for_icp = max(0.5, model_diag * 0.025)
+    nms_dist = model_diag * nms_dist_frac
+
+    # --- 준비: (선택)다운샘플 + normal + 변환 ---
+    t0 = time.perf_counter()
+    scene = copy.deepcopy(scene_pcd)
+    n_before = len(scene.points)
+    if scene_voxel and scene_voxel > 0:
+        scene = scene.voxel_down_sample(scene_voxel)
+    scene.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=scene_normal_radius, max_nn=30))
+    scene.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
+    scene_data = pcd_to_ppf_format(scene)
+    prep_ms = (time.perf_counter() - t0) * 1000.0
+    ds_msg = f"{n_before}→{len(scene.points)}점(voxel={scene_voxel:.2f}mm)" if scene_voxel > 0 else f"{len(scene.points)}점(다운샘플 없음)"
+    debug_log.append(
+        f"전체장면 PPF: scene {ds_msg}, model diag={model_diag:.1f}mm, "
+        f"ICP voxel={voxel_for_icp:.2f}mm, NMS 거리={nms_dist:.1f}mm"
+    )
+    if len(scene_data) < 100:
+        debug_log.append("장면 점이 너무 적음 → 종료")
+        return instances, debug_log
+
+    # --- voting ---
+    if progress_cb:
+        progress_cb(0, 3, "전체장면 PPF voting...")
+    t0 = time.perf_counter()
+    try:
+        results = detector.match(scene_data, relative_scene_sample_step, relative_scene_distance)
+    except Exception as e:
+        debug_log.append(f"PPF 매칭 오류: {e}")
+        return instances, debug_log
+    vote_ms = (time.perf_counter() - t0) * 1000.0
+    if not results:
+        debug_log.append(f"PPF voting 결과 없음 (voting {vote_ms:.0f}ms)")
+        return instances, debug_log
+
+    # --- pre-ICP NMS: raw voting 자세로 중복 제거 (ICP 횟수 절감) ---
+    n_use = min(n_candidates, len(results))
+    raw = []
+    for cand in results[:n_use]:
+        votes = int(getattr(cand, "numVotes", 0))
+        if votes < min_votes:
+            continue
+        T0 = np.asarray(cand.pose, dtype=np.float64)
+        raw.append({"T0": T0, "votes": votes, "center0": (T0 @ np.append(model_centroid, 1.0))[:3]})
+    raw.sort(key=lambda r: -r["votes"])
+    kept_raw = []
+    for r in raw:
+        if any(np.linalg.norm(r["center0"] - k["center0"]) < nms_dist for k in kept_raw):
+            continue
+        kept_raw.append(r)
+        if len(kept_raw) >= max_instances * 2:  # ICP 검증에서 일부 탈락 대비 여유
+            break
+    debug_log.append(
+        f"PPF 후보 {len(results)}개 → votes≥{min_votes} {len(raw)}개 → pre-ICP NMS 후 {len(kept_raw)}개 ICP"
+    )
+
+    # --- ICP 정밀화 (pre-NMS로 걸러진 후보만) ---
+    t0 = time.perf_counter()
+    refined: List[Dict] = []
+    for idx, r in enumerate(kept_raw):
+        if progress_cb:
+            progress_cb(1, 3, f"ICP 정밀화 {idx + 1}/{len(kept_raw)}")
+        try:
+            icp = refine_icp(model_o3d, scene, r["T0"], voxel_for_icp)
+        except Exception:
+            continue
+        T = np.asarray(icp.transformation, dtype=np.float64)
+        if float(icp.fitness) < fitness_threshold:
+            continue
+        refined.append({
+            "transformation": T.copy(),
+            "fitness": float(icp.fitness),
+            "rmse": float(icp.inlier_rmse),
+            "votes": r["votes"],
+            "center": (T @ np.append(model_centroid, 1.0))[:3],
+        })
+    icp_ms = (time.perf_counter() - t0) * 1000.0
+
+    if not refined:
+        debug_log.append(
+            f"fitness≥{fitness_threshold} 통과 후보 없음 | ⏱ 준비 {prep_ms:.0f} / voting {vote_ms:.0f} / ICP {icp_ms:.0f}ms"
+        )
+        return instances, debug_log
+
+    # --- post-ICP NMS: ICP 로 중심이 이동했을 수 있어 다시 한 번 (fitness 우선) ---
+    t0 = time.perf_counter()
+    refined.sort(key=lambda r: -r["fitness"])
+    if progress_cb:
+        progress_cb(2, 3, "중복 제거(NMS)...")
+    for cand in refined:
+        if len(instances) >= max_instances:
+            break
+        if any(np.linalg.norm(cand["center"] - acc["center"]) < nms_dist for acc in instances):
+            continue
+        instances.append(cand)
+        debug_log.append(
+            f"인스턴스 #{len(instances)}: votes={cand['votes']}, fitness={cand['fitness']:.3f}, "
+            f"RMSE={cand['rmse']:.3f}mm, 중심=({cand['center'][0]:.0f},{cand['center'][1]:.0f},{cand['center'][2]:.0f})"
+        )
+    nms_ms = (time.perf_counter() - t0) * 1000.0
+
+    debug_log.append(
+        f"→ 최종 {len(instances)}개 인스턴스 | ⏱ 준비 {prep_ms:.0f} / voting {vote_ms:.0f} / "
+        f"ICP {icp_ms:.0f}({len(kept_raw)}회) / NMS {nms_ms:.0f}ms"
+    )
+    return instances, debug_log
+
+
 def crop_pointcloud_by_2d_roi(
     xyz: np.ndarray,
     rgb: Optional[np.ndarray],
@@ -1579,10 +1730,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.algo_combo.addItem("FPFH+ICP (FGR)")
         if HAS_PPF:
             self.algo_combo.addItem("PPF (OpenCV)")
+            self.algo_combo.addItem("PPF 전체장면 (DBSCAN 없음)")
         self.algo_combo.setToolTip(
             "FPFH+ICP (RANSAC): 무작위 샘플링 기반. 비결정적 (N회 시도해 best 채택).\n"
             "FPFH+ICP (FGR): Fast Global Registration. 결정적, RANSAC보다 빠름. 같은 입력 → 항상 같은 결과.\n"
-            "PPF: 무작위 자세에 강건. DBSCAN과 함께 쓰면 빈 픽킹 표준 구성. 첫 매칭은 학습 시간 포함."
+            "PPF: 무작위 자세에 강건. DBSCAN으로 클러스터 나눈 뒤 클러스터별 매칭.\n"
+            "PPF 전체장면: DBSCAN 없이 전체 장면에 1회 voting → 다중 인스턴스 직접 검출.\n"
+            "  쌓여 붙거나 부분만 보이는(가림) 객체에 강건 — 상용 방식. 클러스터 튜닝 불필요."
         )
         self.algo_combo.currentTextChanged.connect(self._on_algo_changed)
         top1.addWidget(self.algo_combo)
@@ -2378,29 +2532,42 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         """
         prev_was_ppf = self._prev_algo.startswith("PPF")
         is_ppf = text.startswith("PPF")
+        is_whole_ppf = "전체장면" in text  # PPF 전체장면 = DBSCAN 미사용
         self._prev_algo = text
 
         # PPF 파라미터 패널 표시/숨김
         self.ppf_params_widget.setVisible(is_ppf)
         self.ppf_scroll.setVisible(is_ppf)  # 왼쪽 스크롤 패널
 
-        if is_ppf and not prev_was_ppf:
-            # FPFH → PPF 경계: cull 선호 저장 후 OFF + DBSCAN ON
-            if self.cull_visible_check.isEnabled():
+        if is_ppf:
+            # FPFH → PPF 경계에서만 cull 선호 저장 (PPF↔PPF 는 유지)
+            if not prev_was_ppf and self.cull_visible_check.isEnabled():
                 self._last_cull_state = self.cull_visible_check.isChecked()
-            self.cull_visible_check.setChecked(False)
-            self.use_dbscan.setChecked(True)
-            self.main.statusBar().showMessage(
-                "PPF 모드: cull OFF + DBSCAN 자동 활성화. 잡기 축은 유지 (TCP 자세 계산용). "
-                "첫 매칭은 학습 시간(수~수십초) 포함. 👇 아래 PPF 파라미터 조정 가능."
-            )
-        elif not is_ppf and prev_was_ppf:
-            # PPF → FPFH 경계: cull 상태 복원
-            if self.cull_visible_check.isEnabled():
-                self.cull_visible_check.setChecked(self._last_cull_state)
-            self.main.statusBar().showMessage(f"FPFH+ICP 모드: cull '{self._last_cull_state}' 복원.")
+            self.cull_visible_check.setChecked(False)  # PPF 는 cull 불필요
+            if is_whole_ppf:
+                # 전체장면 PPF: DBSCAN 안 씀 → 자동 해제 + 비활성
+                self.use_dbscan.setChecked(False)
+                self.use_dbscan.setEnabled(False)
+                self.main.statusBar().showMessage(
+                    "PPF 전체장면 모드: DBSCAN 미사용(자동 해제). 전체 장면 1회 voting + NMS 로 다중 인스턴스. "
+                    "첫 매칭은 학습 시간(수~수십초) 포함."
+                )
+            else:
+                # PPF per-cluster: DBSCAN 자동 활성
+                self.use_dbscan.setEnabled(True)
+                self.use_dbscan.setChecked(True)
+                self.main.statusBar().showMessage(
+                    "PPF 모드: cull OFF + DBSCAN 자동 활성화. 잡기 축은 유지 (TCP 자세 계산용). "
+                    "첫 매칭은 학습 시간(수~수십초) 포함. 👇 아래 PPF 파라미터 조정 가능."
+                )
         else:
-            self.main.statusBar().showMessage(f"{text} 모드.")
+            # FPFH: DBSCAN 은 사용자 선택 (비활성됐으면 다시 켬)
+            self.use_dbscan.setEnabled(True)
+            if prev_was_ppf and self.cull_visible_check.isEnabled():
+                self.cull_visible_check.setChecked(self._last_cull_state)  # cull 복원
+                self.main.statusBar().showMessage(f"FPFH+ICP 모드: cull '{self._last_cull_state}' 복원.")
+            else:
+                self.main.statusBar().showMessage(f"{text} 모드.")
 
     def _on_grasp_axis_changed(self, text: str):
         """잡기 축이 'Off'면 cull 체크박스 비활성+해제. 사용자 수동 변경만 _last 추적."""
@@ -2913,6 +3080,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             self.main.statusBar().showMessage(msg)
             QApplication.processEvents()
 
+        t_match0 = time.perf_counter()  # 매칭 소요 시간 측정 시작
         try:
             algo = self.algo_combo.currentText()
             use_fgr = "(FGR)" in algo
@@ -2938,23 +3106,39 @@ class CADMatchingTab(RobotControlMixin, QWidget):
                         f"angles={int(self.ppf_angle_bins.value())})"
                     )
 
-                # PPF는 DBSCAN 클러스터링 사용 (꺼져 있으면 단일 클러스터로 처리되도록 강제)
-                eps = float(self.dbscan_eps.value()) if self.use_dbscan.isChecked() else 1e6
-                min_pts = int(self.dbscan_min_pts.value()) if self.use_dbscan.isChecked() else 10
-
-                instances, debug_log = ppf_match_per_cluster(
-                    scene,
-                    self._ppf_detector,
-                    self._ppf_model_data,
-                    self._ppf_model_o3d,
-                    eps=eps,
-                    min_points=min_pts,
-                    relative_scene_sample_step=float(self.ppf_scene_sample.value()),
-                    relative_scene_distance=float(self.ppf_scene_distance.value()),
-                    min_votes=int(self.ppf_min_votes.value()),
-                    n_top_candidates=int(self.ppf_top_candidates.value()),
-                    progress_cb=progress_cb,
-                )
+                if "전체장면" in algo:
+                    # 전체 장면 PPF: DBSCAN 없이 1회 voting → NMS 로 다중 인스턴스
+                    instances, debug_log = ppf_match_whole_scene(
+                        scene,
+                        self._ppf_detector,
+                        self._ppf_model_data,
+                        self._ppf_model_o3d,
+                        relative_scene_sample_step=float(self.ppf_scene_sample.value()),
+                        relative_scene_distance=float(self.ppf_scene_distance.value()),
+                        min_votes=int(self.ppf_min_votes.value()),
+                        n_candidates=max(20, int(self.ppf_top_candidates.value()) * max_inst),
+                        max_instances=max_inst,
+                        fitness_threshold=fit_thr,
+                        scene_voxel=voxel,  # 매칭 전 장면 다운샘플 (voting 속도 지렛대)
+                        progress_cb=progress_cb,
+                    )
+                else:
+                    # PPF per-cluster: DBSCAN 클러스터링 사용 (꺼져 있으면 단일 클러스터로 강제)
+                    eps = float(self.dbscan_eps.value()) if self.use_dbscan.isChecked() else 1e6
+                    min_pts = int(self.dbscan_min_pts.value()) if self.use_dbscan.isChecked() else 10
+                    instances, debug_log = ppf_match_per_cluster(
+                        scene,
+                        self._ppf_detector,
+                        self._ppf_model_data,
+                        self._ppf_model_o3d,
+                        eps=eps,
+                        min_points=min_pts,
+                        relative_scene_sample_step=float(self.ppf_scene_sample.value()),
+                        relative_scene_distance=float(self.ppf_scene_distance.value()),
+                        min_votes=int(self.ppf_min_votes.value()),
+                        n_top_candidates=int(self.ppf_top_candidates.value()),
+                        progress_cb=progress_cb,
+                    )
             elif self.use_dbscan.isChecked():
                 instances, debug_log = cad_match_per_cluster(
                     scene,
@@ -2985,11 +3169,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
             logger.exception("매칭 실패")
             return
 
+        match_ms = (time.perf_counter() - t_match0) * 1000.0  # 매칭 소요 시간(ms)
+
         self.progress.setVisible(False)
         self.btn_match.setEnabled(True)
 
         self.instances = instances
-        logger.info(f"매칭 완료: {len(instances)}개 인스턴스 발견")
+        logger.info(f"매칭 완료: {len(instances)}개 인스턴스 발견 ({match_ms:.0f}ms)")
 
         # UI 업데이트
         self._update_instance_table()
@@ -3011,10 +3197,11 @@ class CADMatchingTab(RobotControlMixin, QWidget):
                 "• '잡기 축'이 CAD에서 위쪽 방향과 일치하는지 확인 (CAD를 별도 뷰어로 열어 확인)."
             )
             QMessageBox.information(self, "결과 (매칭 실패)", full_msg)
+            self.main.statusBar().showMessage(f"매칭 완료: 0개 발견 (voxel={voxel}mm, 매칭 {match_ms:.0f}ms)")
         else:
             full_msg = f"매칭 성공: {len(instances)}개 인스턴스\n\n=== 진단 로그 ===\n{log_text}"
             QMessageBox.information(self, f"결과: {len(instances)}개 매칭", full_msg)
-            self.main.statusBar().showMessage(f"매칭 완료: {len(instances)}개 발견 (voxel={voxel}mm)")
+            self.main.statusBar().showMessage(f"매칭 완료: {len(instances)}개 발견 (voxel={voxel}mm, 매칭 {match_ms:.0f}ms)")
 
     def _update_instance_table(self):
         self.inst_table.setRowCount(0)

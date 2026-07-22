@@ -95,13 +95,14 @@ ICP(Iterative Closest Point)는 이름 그대로를 반복한다:
 
 ---
 
-## 3. 매칭 알고리즘 3종 — 시나리오별 강약
+## 3. 매칭 알고리즘 4종 — 시나리오별 강약
 
-| 알고리즘 | 비결정적? | 무작위 자세 | 부분 가시성 | 본 시스템 사용 시점 |
+| 알고리즘 | 사전 분할 | 무작위 자세 | 부분 가시성 | 본 시스템 사용 시점 |
 |---|:-:|:-:|:-:|---|
-| **FPFH + ICP (RANSAC)** | O | 약 (cull 필요) | 약 | 정자세 환경, 빠른 결과 필요 |
-| **FPFH + ICP (FGR)** | X | 약 (cull 필요) | 약 | RANSAC 변동성을 피하고 싶을 때 |
-| **PPF (OpenCV)** | O | **강** | **강** | 진짜 빈 픽킹 (무작위 자세, 가림) |
+| **FPFH + ICP (RANSAC)** | 반복 제거 or DBSCAN | 약 (cull 필요) | 약 | 정자세 환경, 빠른 결과 |
+| **FPFH + ICP (FGR)** | 반복 제거 or DBSCAN | 약 (cull 필요) | 약 | RANSAC 변동성 피할 때 |
+| **PPF per-cluster** | **DBSCAN 필요** | **강** | 중 | 객체가 잘 떨어져 있을 때 |
+| **PPF 전체장면** | **불필요** | **강** | **강** | 쌓임·부분 가림 (상용 방식, 권장) |
 
 ### 3.1 FPFH + ICP
 
@@ -137,9 +138,35 @@ Drost et al. 2010 "Model Globally, Match Locally" 알고리즘. 본 시스템은
 
 자세한 PPF 원리: 본 시스템에 통합된 [`train_ppf_detector`](../cad_matching_tab.py), [`ppf_match_per_cluster`](../cad_matching_tab.py) 참고.
 
+### 3.3 PPF 전체장면 (DBSCAN 없음) — 상용 방식, 권장
+
+PPF voting 은 원래 **전체 장면에 한 번** 돌려 다중 인스턴스를 직접 찾도록 설계된 알고리즘이다(Drost). 그런데 §3.2 의 `ppf_match_per_cluster` 는 먼저 DBSCAN 으로 장면을 나눈 뒤 **클러스터마다** PPF 를 돌린다. 이 "선(先)분할"이 두 가지 약점을 만든다:
+
+- DBSCAN eps/min_points **튜닝 의존**.
+- 객체가 **쌓여 붙으면** 한 클러스터에 여러 개가 뭉쳐 매칭 실패, **부분 가림**이면 클러스터가 조각남.
+
+상용 프로그램(Photoneo, Pickit, MVTec HALCON `find_surface_model` 등)은 분할 없이 **CAD 로드 → 전체 장면에서 곧바로 다중 인스턴스**를 찾는다 — 이게 표면 기반 PPF 의 본래 강점이다. 국소 점쌍 voting 이라 물체가 부분만 보여도 그 조각의 점쌍이 자세에 투표하기 때문.
+
+본 시스템의 [`ppf_match_whole_scene`](../cad_matching_tab.py)(UI 알고리즘 = "PPF 전체장면"):
+
+1. (선택) 장면 **voxel 다운샘플**(`scene_voxel`, UI voxel 값) → normal 추정·정렬 → `detector.match()` **1회** → voting 후보 다수.
+2. **pre-ICP NMS**: raw voting 자세로 **먼저** 중복 제거 → 서로 다른 인스턴스 후보만 ICP (ICP 횟수 급감 = 속도↑, 놓침 위험 낮음).
+3. 남은 후보를 **Open3D point-to-plane ICP** 로 정밀화(fitness/RMSE) → fitness 임계 통과분만.
+4. **post-ICP NMS**: ICP 로 중심이 이동했을 수 있어 fitness 높은 순으로 다시 중복 제거(중심 거리 < model 대각×0.5) → 최대 `max_instances` 개.
+
+**속도 — 계측과 지렛대**: `ppf_match_whole_scene` 은 각 단계(준비/voting/ICP/NMS) 소요 시간을 debug_log(결과 다이얼로그)에 `⏱ 준비 N / voting N / ICP N / NMS N ms` 로 남긴다. 실측(합성 2박스, 6800점): **voting 이 지배적**(1153ms) 이고 다운샘플(→1467점)하면 voting 243ms 로 ~5배 단축. 즉 **속도 최대 지렛대는 "장면 점 수 줄이기"**:
+- **voxel**(장면 다운샘플) — 가장 큼. 단 너무 크게 하면 디테일이 뭉개져 **인스턴스를 놓침**(속도↔정확도 트레이드오프).
+- **`relativeSceneSampleStep`**(장면 기준점 샘플링) 키우기.
+- **pre-ICP NMS** 로 ICP 횟수는 이미 (후보 60 → 서로 다른 인스턴스 수) 로 절감됨.
+
+> 검증(2 박스 합성 장면, 다운샘플 없음)에서 두 인스턴스를 fitness 1.0 으로 정확히 찾음. 약한 오검출(fitness ~0.14)은 fitness 임계(기본 0.15)로 걸러진다. OpenCV PPF 구현 특성상 HALCON 급 sub-1초는 어렵고, 위 지렛대로 입력 규모를 줄여 시간을 단축한다. 평면·대칭 모호성은 Open3D ICP + fitness 검증으로 억제.
+
 ---
 
 ## 4. 전처리: 작업대 평면 제거 + DBSCAN 클러스터링
+
+> DBSCAN 은 FPFH per-cluster / PPF per-cluster 경로에만 쓰인다. **PPF 전체장면(§3.3)과 FPFH 반복 제거(`cad_match_multi_instance`)는 DBSCAN 을 쓰지 않는다.** 작업대 평면 제거는 네 경로 모두 공통.
+> UI 에서 알고리즘을 **"PPF 전체장면"** 으로 고르면 DBSCAN 체크박스가 **자동 해제 + 비활성**(회색)된다 — 안 쓰는 옵션임을 드러내기 위함. 매칭 완료 시 상태바에 총 소요 시간(`매칭 NNms`)이 함께 표시된다.
 
 매칭 전 scene을 정제한다.
 
