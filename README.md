@@ -3,7 +3,7 @@
 > **3D vision-guided bin picking workbench for KUKA robots + Zivid 3D camera**
 > Hand-eye calibration · 6D pose estimation · Bin picking · 통합 GUI
 
-`VisuPick`은 산업용 로봇(KUKA KRC5 + KSS 8.7) 환경에서 Zivid 3D 카메라로 객체를 인식하고, hand-eye calibration을 거쳐 로봇이 정확히 picking 하도록 돕는 통합 데스크탑 워크벤치입니다. **데이터 수집 → 캘리브레이션 → 검증 → bin picking / CAD 매칭** 까지 4단계 워크플로우를 하나의 PySide6 GUI에서 처리합니다.
+`VisuPick`은 산업용 로봇(KUKA KRC5 + KSS 8.7) 환경에서 3D 카메라(Zivid / RealSense / Percipio)로 객체를 인식하고, hand-eye calibration을 거쳐 로봇이 정확히 picking 하도록 돕는 통합 데스크탑 워크벤치입니다. **데이터 수집 → 캘리브레이션 → 검증 → Bin Picking / CAD 매칭 / Surface Tracking** 을 하나의 PySide6 GUI(탭 5개)에서 처리합니다. 검출은 RF-DETR + SAM 3 텍스트 프롬프트, 파지는 진공 그리퍼(SMC ZK2)를 씁니다.
 
 이 프로젝트는 학습 및 연구 용도로 작성되었고, 알고리즘이 어떻게 동작하는지 [docs/](docs/) 폴더에 상세 설명서가 포함되어 있습니다.
 
@@ -18,21 +18,34 @@
 - 비선형 정밀화 + greedy outlier 제거 → **일관성 0.2 mm 이하 달성**
 - 자세한 원리: [docs/hand_eye_calibration.md](docs/hand_eye_calibration.md)
 
-### 2. Bin Picking (RF-DETR + 3D 포인트클라우드)
-- `RF-DETR` 객체 검출 (ONNX/TensorRT) → 객체별 3D 중심 + 표면 법선 추정
-- 2D 이미지 ROI 드래그 + 3D 시점 자동 매칭
-- 객체 중심에 **Tool 좌표축 시각화** (그리퍼 접근 자세를 실시간 미리보기)
-- 시퀀스 큐: 여러 객체 픽업 순서 + Home 이동을 묶어 자동 실행
+### 2. Bin Picking (AI 검출 + 3D 포인트클라우드)
+- **객체 검출 2경로** — `RF-DETR`(ONNX/TensorRT, 학습된 클래스) + **SAM 3 텍스트 프롬프트**(명사구 하나로 학습 없이 임의 객체 분할, Grounding DINO 불필요). 추론 시간(ms) 표시.
+- 검출 → 객체별 **3D 중심 + 표면 법선** 추정. 2D ROI 드래그로 박스 영역만 필터.
+- **마스크 → OBB(회전 사각형) → 여는 방향 추정** — 투명 화장품 케이스처럼 CAD 없이 방향을 잡아야 할 때. 방식 3종(이음선 에지 / 내부 밝기 / **내부 격자 비대칭**).
+- **Grasp 설정(파지 전략)** — CAD 없이 잡을 때 노이즈 심한 3D 대신 자유도를 고정. "고정 평면 광선 투영 + 수직 접근 + 열림 방향 정렬"의 **4-DOF top-down 파지**(투명·평면 객체용).
+- **진공 그리퍼 픽 사이클** — Approach→하강→진공 ON→상승→놓기→진공 OFF(+블로우)→Home 복귀 원버튼 실행. 시퀀스 큐로 다중 픽 배치 실행.
+- 객체 중심에 **Tool 좌표축 시각화**(접근 자세 실시간 미리보기).
 - 자세한 원리: [docs/bin_picking.md](docs/bin_picking.md)
 
 ### 3. CAD 기반 6D Pose Matching
 - **FPFH + ICP (RANSAC / FGR)** — 정자세 환경에 빠르고 정확
 - **PPF (OpenCV Surface Matching) + Open3D ICP 정밀화** — 무작위 자세 + 부분 가시성에 강건
-- **DBSCAN 클러스터 분리** + **작업대 평면 자동 제거**로 빈 픽킹 시나리오 지원
-- Grasp 위치(X/Y/Z) + 회전(ABC) 설정 → 사용자가 객체별 잡는 자세 정밀 조정
+- **PPF 전체장면(DBSCAN 없이)** — 분할 없이 전체 장면에 voting 1회로 다중 인스턴스 직접 검출(상용/Drost 방식). 쌓임·부분 가림에 강건. 장면 다운샘플·pre-ICP NMS·단계별 시간 계측으로 속도 튜닝.
+- (대안) **DBSCAN 클러스터 분리** + **작업대 평면 자동 제거**
+- Grasp 위치(X/Y/Z) + 회전(ABC) 3D 설정 → 사용자가 객체별 잡는 자세 정밀 조정
 - 인스턴스 클릭 시 3D 뷰에 Tool 좌표축 + Approach 경로 시각화
+- 자세한 원리: [docs/cad_matching.md](docs/cad_matching.md)
 
-### 4. 통신 / KRL
+### 4. Surface Tracking (표면 추적)
+- 굴곡진 표면(예: 자동차 외관)에 매직펜으로 그린 **검은 선을 인식** → 그 경로를 로봇 툴이 **표면 법선에 수직 정렬한 채** 따라 이동.
+- 검은 선 검출(adaptive threshold + thinning) → 시작/끝점 클릭 → skeleton BFS path → **3D 거리 기준 mm 간격 샘플** → 각 점 법선(국소 평면 피팅)으로 자세 계산 → **offset mm 만큼 표면 바깥으로 띄움**.
+- 자세한 원리: [docs/surface_tracking.md](docs/surface_tracking.md)
+
+### 5. 진공 그리퍼 + 공통 로봇 제어
+- **SMC ZK2 진공 이젝터 그리퍼** 제어(진공 ON/OFF/블로우) — C3Bridge가 `$OUT` 직접 쓰기를 거부하므로 KRL 인터럽트로 대신 적용(`robo_vac_*` 계약).
+- Bin Picking / CAD 매칭 / Surface Tracking 세 탭이 **공통 로봇 제어 Mixin**(단일 이동·시퀀스 큐·Z 안전·AUT 속도 상한·Space 비상정지·픽 사이클) 공유.
+
+### 6. 통신 / KRL
 - KUKA `C3Bridge` 프로토콜 (포트 7000, KukaVarProxy 호환)
 - 20슬롯 모션 큐 KRL 프로그램 (`krl/ext_move.src`) — PTP / LIN / 비상정지 (`RESUME`) / 안전 일시정지
 - AUT 모드 자동 50 % 속도 상한, Z 안전 한계, Space 비상정지 단축키
@@ -46,8 +59,10 @@
 |---|---|
 | 로봇 | **KUKA KR 10 R1100-2** (KR AGILUS) |
 | 컨트롤러 | **KRC5 micro**, KSS 8.7.7 HF1 |
+| 그리퍼 | **SMC ZK2 진공 이젝터 + ZSE 압력 스위치** (흡착식). EtherCAT(EK1100+EL2889) 채널로 24V 밸브 제어 → `$OUT[7]` 진공 / `$OUT[8]` 블로우 |
 | 카메라 ① | **Zivid 2 M70** (구조광 3D, ~0.1 mm 정밀) |
 | 카메라 ② | **Intel RealSense D415** (Active Stereo, ~2 mm 정밀) |
+| 카메라 ③ | **Percipio FM815-IX-E1** (GigE 구조광, 선택적) |
 | OS (PC) | Ubuntu 24.04 LTS |
 | Python | 3.10 이상 |
 
@@ -101,27 +116,23 @@ GUI 상단의 **"카메라"** 콤보로 Zivid/RealSense 중 선택 후 "카메�
 
 자세한 통신 메시지 포맷과 KRL 큐 동작은 [docs/kuka_communication.md](docs/kuka_communication.md) 를 참고하세요.
 
-### RF-DETR detector (옵션, Bin Picking 탭 사용 시)
+### 객체 검출기 (옵션, Bin Picking 탭 사용 시)
 
-ONNX / TensorRT 통합 추론 래퍼 `detector.py` 를 사용해 RF-DETR 모델로 객체를 검출.
-환경변수로 경로 설정:
+검출기는 [object_detector.py](object_detector.py) 로 카메라처럼 추상화돼 있고, 둘 다 선택적입니다 (없어도 앱은 정상 시작, 해당 버튼만 안내 에러):
 
+**① RF-DETR** — ONNX / TensorRT 래퍼 `detector.py` (별도 리포). 학습된 클래스만 검출.
 ```bash
-# ~/.bashrc 또는 venv 활성화 스크립트에 추가
-export RFDETR_DETECTOR_DIR=/path/to/rf-detr/tmp                 # detector.py 가 있는 디렉터리
-export RFDETR_MODEL_PATH=/path/to/rfdetr-nano.engine            # TensorRT 엔진 (.engine/.onnx 도 가능)
+export RFDETR_DETECTOR_DIR=/path/to/rf-detr/tmp      # detector.py 가 있는 디렉터리
+export RFDETR_MODEL_PATH=/path/to/rfdetr-nano.engine # TensorRT 엔진(.engine/.onnx)
 ```
+필요 패키지: `supervision`, `tensorrt`, `pycuda`(TensorRT) 또는 `onnxruntime-gpu`(ONNX).
+클래스 매핑은 `bin_picking_tab.py` 의 `RFDETR_CLASSES`.
 
-필요 패키지: `supervision`, `tensorrt`, `pycuda` (TensorRT 엔진 사용 시). ONNX(`.onnx`) 모델만
-쓸 경우 `tensorrt`/`pycuda` 대신 `onnxruntime-gpu` 면 충분.
-
-설정 안 하면 default(`/home/robotegra/michael/rf-detr/tmp/...`)가 사용되는데, 본인 환경엔 그
-경로가 없을 수 있으니 위 환경변수를 설정. detector 모듈/엔진이 없거나 사용 안 하면 본 프로그램은
-정상 시작하고 **Bin Picking 탭에서 "객체 검출" 버튼만 동작 실패** (에러 안내). CAD 매칭 탭 /
-캘리브레이션은 detector 없이 동작.
-
-> 클래스 매핑은 `bin_picking_tab.py` 의 `RFDETR_CLASSES` 에 정의됨 (`0:ladybug, 1:heart, 2:wings`).
-> 다른 모델을 쓰면 이 매핑을 수정.
+**② SAM 3 (텍스트 프롬프트)** — Meta 공식 repo(facebookresearch/sam3). 명사구 하나(예: `cosmetic case`)로 **학습 없이** 임의 객체를 분할. 무거움(수억 파라미터, GPU 권장). gated repo라 `hf auth login` + 접근 승인 필요.
+```bash
+export SAM3_MODEL_DIR=/path/to/sam3   # repo 가 pip 경로에 없을 때
+```
+> ⚠️ RF-DETR(TensorRT/pycuda)과 SAM3(PyTorch)를 한 프로세스에서 번갈아 쓰면 CUDA 컨텍스트 충돌이 날 수 있어, `detector.py` 는 pycuda 가 PyTorch 의 primary CUDA 컨텍스트를 공유하도록 처리했다. (자세히는 커밋 히스토리 참고)
 
 ---
 
@@ -135,11 +146,12 @@ GUI가 열리면 다음 순서로 진행:
 
 1. **카메라 연결** + **카메라 설정 (YML)** 로드
 2. **로봇 연결** (IP, Tool 번호 입력)
-3. 작업 시나리오 선택:
-   - **데이터 수집** 탭 → 캘리브레이션
+3. 작업 시나리오 선택 (탭 5개):
+   - **데이터 수집** 탭 → 캘리브레이션용 포즈 수집
    - **검증** 탭 → 캘리브레이션 정확도 확인
-   - **Bin Picking** 탭 → RF-DETR + 픽킹
-   - **CAD 매칭** 탭 → CAD 6D pose + 픽킹
+   - **Bin Picking** 탭 → RF-DETR/SAM3 검출 + 3D 포즈 + 진공 픽킹
+   - **CAD 매칭** 탭 → CAD 6D pose(PPF 전체장면 등) + 픽킹
+   - **Surface Tracking** 탭 → 표면 위 검은 선 따라 법선 정렬 이동
 
 ### 단축키 (탭에 따라 다름)
 | 키 | 동작 |
@@ -155,28 +167,33 @@ GUI가 열리면 다음 순서로 진행:
 ```
 visupick/
 ├── main.py                      # 진입점 + 메인 윈도우 + 데이터 수집/검증 탭
-├── bin_picking_tab.py           # Bin Picking 탭 (RF-DETR + 3D)
-├── cad_matching_tab.py          # CAD 6D 매칭 탭 (FPFH/PPF/FGR)
-├── robot_control_mixin.py       # 두 탭 공통: 로봇 이동·시퀀스 큐·안전·E-stop
+├── bin_picking_tab.py           # Bin Picking 탭 (RF-DETR/SAM3 + 3D + Grasp 설정)
+├── cad_matching_tab.py          # CAD 6D 매칭 탭 (FPFH/PPF/전체장면 PPF)
+├── surface_tracking_tab.py      # Surface Tracking 탭 (검은 선 따라 법선 정렬 이동)
+├── robot_control_mixin.py       # 세 탭 공통: 로봇 이동·시퀀스 큐·안전·진공·픽 사이클·E-stop
+├── object_detector.py           # 검출기 추상화: RFDetrDetector / Sam3Detector
+├── opening_analysis.py          # 순수 CV: OBB + 여는 방향(이음선/밝기/격자)
+├── image_view.py                # 2D 이미지 라벨 (Zoomable/Draggable/ClickPoint)
+├── pointcloud_view.py           # 3D 포인트클라우드 뷰 (PyVista, 세 탭 공유)
 ├── calibration.py               # Hand-eye 알고리즘 + 객체 자세 계산
-├── kuka_robot.py                # C3Bridge 통신 + 큐 기반 로봇 제어
+├── kuka_robot.py                # C3Bridge 통신 + 큐 기반 로봇 제어 + 진공
 ├── base_camera.py               # 카메라 추상 인터페이스 (BaseCamera)
 ├── camera_factory.py            # 카메라 종류 → 인스턴스 생성 (지연 import)
 ├── zivid_camera.py              # Zivid SDK 래퍼
 ├── realsense_camera.py          # Intel RealSense SDK 래퍼 (D415 검증)
+├── percipio_camera.py           # Percipio GigE SDK 래퍼 (선택적)
 ├── krl/
-│   ├── ext_move.src             # KRL 모션 큐 프로그램 (KRC에 업로드)
+│   ├── ext_move.src             # KRL 모션 큐 프로그램 (모션 + 진공 인터럽트)
 │   └── ext_move.dat             # DEFDAT
 ├── config/                      # Zivid 카메라 설정 (YML, Zivid Studio에서 export)
-│   ├── zivid_settings_manufacturing_specular.yml
-│   └── zivid_settings_parcels_reflective.yml
 ├── cad_models/                  # 매칭에 사용할 CAD 파일 (STL/OBJ/PLY)
-│   └── MCCB_Metasol_125af-3p.stl
 ├── docs/
 │   ├── hand_eye_calibration.md  # 캘리브레이션 알고리즘 학습 문서
-│   ├── bin_picking.md           # 빈 픽킹 파이프라인 학습 문서
-│   ├── cad_matching.md          # CAD 기반 6D pose 매칭 학습 문서
-│   └── kuka_communication.md    # KUKA 통신 + KRL 설계 학습 문서
+│   ├── bin_picking.md           # 빈 픽킹(검출·OBB·여는방향·Grasp·픽사이클) 학습 문서
+│   ├── cad_matching.md          # CAD 6D pose 매칭(PPF 전체장면 등) 학습 문서
+│   ├── surface_tracking.md      # 표면 추적(검은 선 → 법선 정렬 이동) 학습 문서
+│   ├── kuka_communication.md    # KUKA 통신 + KRL(진공 포함) 설계 학습 문서
+│   └── research_transparent_case_binpicking.md  # 투명 케이스 비전 조사 보고서
 ├── data/                        # (gitignore) 사용자 캡처/세션 데이터
 ├── requirements.txt
 ├── .gitignore
@@ -205,9 +222,11 @@ visupick/
 
 ## 알려진 한계
 
-- **객체끼리 맞닿거나 겹친 빈 픽킹**: DBSCAN으로 분리 불가 → SAM 같은 segmentation 또는 학습 기반 6D pose 필요
+- **맞닿거나 겹친 객체**: 빈 픽킹 탭의 DBSCAN 3D ROI로는 분리 곤란 → CAD 매칭은 **전체장면 PPF**로 대응, 비-CAD는 **SAM3 분할**로 완화(완전 해결은 아님)
+- **투명 객체 깊이**: 투명체는 깊이가 NaN → ROI 3D 필터·CAD 깊이 매칭이 약함. Grasp 설정의 "고정 평면 투영"으로 우회
+- **속도**: OpenCV PPF 전체장면은 HALCON급 sub-1초까진 어려움(구현 최적화 격차) → 장면 다운샘플·샘플스텝으로 단축
 - **윗면이 좌우 대칭인 객체**의 180° 모호성: 자동 결정 불가 → 수동 180° flip 토글 제공 (CAD 매칭 탭)
-- **충돌 회피 없음**: Approach → Target 직선 경로에 다른 객체 있으면 충돌
+- **충돌 회피 없음**: Approach → Target 직선 경로에 다른 객체 있으면 충돌. ROI 박스·그리퍼 충돌 검사 미구현
 - **`compute_approach_pose` 의 Tool +Z 가정**: KUKA `TOOL_DATA` 가 그리퍼 끝과 정렬되어야 함
 
 ---
@@ -217,9 +236,11 @@ visupick/
 이 프로젝트가 어떻게 동작하는지 학습 목적으로 정리한 한국어 문서들입니다.
 
 - **[docs/hand_eye_calibration.md](docs/hand_eye_calibration.md)** — Hand-eye calibration 이란 / Eye-in-Hand vs Eye-to-Hand / 데이터 수집 / 5종 알고리즘 / 비선형 정밀화 / 3D 카메라가 mm 절대 측정이 가능한 이유
-- **[docs/bin_picking.md](docs/bin_picking.md)** — Bin picking 4단계 / RF-DETR 검출 / 3D 포즈 추정 / 좌표 변환 / 수직 접근 자세 계산 / Tool 자세 시각화 / 안전장치
-- **[docs/cad_matching.md](docs/cad_matching.md)** — CAD 기반 6D pose / FPFH+ICP vs PPF / DBSCAN 클러스터링 / 작업대 평면 제거 / Grasp 위치·회전 / 멀티 인스턴스
-- **[docs/kuka_communication.md](docs/kuka_communication.md)** — C3Bridge 프로토콜 / 메시지 포맷 (Type 0/1/11) / KRL 20슬롯 모션 큐 / Python ↔ KRL 흐름 / 비상정지 인터럽트 + RESUME / RobotControlMixin
+- **[docs/bin_picking.md](docs/bin_picking.md)** — RF-DETR/SAM3 검출 / ROI 필터 / OBB·여는 방향(이음선·밝기·격자) / 3D 포즈 추정 / 좌표 변환 / 수직 접근 / Grasp 설정(4-DOF) / 진공 픽 사이클 / 안전장치
+- **[docs/cad_matching.md](docs/cad_matching.md)** — CAD 기반 6D pose / 매칭 알고리즘 4종(FPFH·PPF·전체장면 PPF) / DBSCAN·평면 제거 / Grasp 3D 설정 / 멀티 인스턴스·속도 튜닝
+- **[docs/surface_tracking.md](docs/surface_tracking.md)** — 검은 선 검출(threshold·thinning) / skeleton path tracing / 3D 거리 샘플링 / 법선 자세 + offset / KRL 큐 동적 채움
+- **[docs/kuka_communication.md](docs/kuka_communication.md)** — C3Bridge 프로토콜 / 메시지 포맷 / KRL 20슬롯 모션 큐 / 진공 인터럽트 계약 / Python ↔ KRL 흐름 / 비상정지 + RESUME / RobotControlMixin
+- **[docs/research_transparent_case_binpicking.md](docs/research_transparent_case_binpicking.md)** — 투명 화장품 케이스 빈피킹 비전 기술 조사 보고서
 
 ---
 
