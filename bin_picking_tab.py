@@ -73,6 +73,152 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# Bin Box (작업 볼륨) 설정 다이얼로그
+# ============================================================
+
+
+class BinBoxDialog(QDialog):
+    """빈(bin) 상자를 **로봇 base 좌표계**로 정의 — 충돌 방지의 기준.
+
+    ROI 와 Bin Box 는 같은 것이다 — **XY·크기는 2D 뷰 드래그로** 정하고, 이 창은 **수정 전용**:
+      · 회전(yaw) — 2D 드래그로는 만들 수 없어 여기서만 조정
+      · 높이(z_rim/z_floor) — **로봇 티칭** 권장. 측정 깊이는 빈 안 물체·투명체에 좌우되므로
+        그리퍼 끝을 바닥/림에 대고 현재 TCP Z 를 읽는 게 가장 정확하다.
+      · 그리퍼 반경·여유 — 충돌 검사(파지 허용 영역)용
+    """
+
+    def __init__(self, cfg: Dict, get_current_tcp=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Bin Box 설정 — 작업 볼륨 (로봇 base 좌표계)")
+        self.cfg = dict(cfg)
+        self._get_tcp = get_current_tcp
+        self.setMinimumWidth(480)
+
+        root = QVBoxLayout(self)
+
+        hint_top = QLabel("XY·크기는 2D 뷰에서 <b>드래그</b>로 설정합니다. 여기서는 값을 미세 조정하세요 — "
+                          "특히 <b>회전(yaw)</b>은 드래그로 만들 수 없어 여기서만 조정합니다.")
+        hint_top.setWordWrap(True)
+        hint_top.setStyleSheet("color:#555; padding:4px;")
+        root.addWidget(hint_top)
+
+        # --- 위치/크기 ---
+        g1 = QGroupBox("① 빈 위치·크기 (base XY)")
+        f1 = QFormLayout(g1)
+        self.cx = self._mk_spin(-3000, 3000, " mm")
+        self.cy = self._mk_spin(-3000, 3000, " mm")
+        self.sx = self._mk_spin(1, 3000, " mm")
+        self.sy = self._mk_spin(1, 3000, " mm")
+        self.yaw = self._mk_spin(-180, 180, " °")
+        f1.addRow("중심 X", self.cx)
+        f1.addRow("중심 Y", self.cy)
+        f1.addRow("가로 (X방향)", self.sx)
+        f1.addRow("세로 (Y방향)", self.sy)
+        self.yaw.setToolTip("빈이 base 축과 나란하지 않을 때의 회전각 (base Z 축 기준)")
+        f1.addRow("회전 yaw", self.yaw)
+        root.addWidget(g1)
+
+        # --- 높이 (티칭) ---
+        g2 = QGroupBox("② 빈 높이 (base Z) — 로봇 티칭 권장")
+        f2 = QFormLayout(g2)
+        self.z_rim = self._mk_spin(-2000, 3000, " mm")
+        self.z_floor = self._mk_spin(-2000, 3000, " mm")
+        self.z_rim.setToolTip("빈 상단(림) 높이 — 이 위로 '진입 안전고'만큼 띄워서 빈을 드나든다")
+        self.z_floor.setToolTip("빈 바닥 높이 — 하강 하한 (바닥 여유를 더해 사용)")
+
+        rim_row = QHBoxLayout()
+        rim_row.addWidget(self.z_rim)
+        self.btn_teach_rim = QPushButton("📍 현재 TCP Z 로")
+        self.btn_teach_rim.setToolTip("그리퍼 끝을 빈 상단(림)에 댄 상태에서 누르면 현재 TCP Z 를 넣는다")
+        self.btn_teach_rim.clicked.connect(lambda: self._teach(self.z_rim, "림"))
+        rim_row.addWidget(self.btn_teach_rim)
+        f2.addRow("림(상단) Z", self._wrap(rim_row))
+
+        floor_row = QHBoxLayout()
+        floor_row.addWidget(self.z_floor)
+        self.btn_teach_floor = QPushButton("📍 현재 TCP Z 로")
+        self.btn_teach_floor.setToolTip("그리퍼 끝을 빈 바닥에 댄 상태에서 누르면 현재 TCP Z 를 넣는다")
+        self.btn_teach_floor.clicked.connect(lambda: self._teach(self.z_floor, "바닥"))
+        floor_row.addWidget(self.btn_teach_floor)
+        f2.addRow("바닥 Z", self._wrap(floor_row))
+        root.addWidget(g2)
+
+        # --- 충돌 파라미터 ---
+        g3 = QGroupBox("③ 그리퍼·여유 (충돌 검사용)")
+        f3 = QFormLayout(g3)
+        self.gripper_r = self._mk_spin(0, 300, " mm")
+        self.gripper_r.setToolTip("그리퍼를 원기둥으로 근사했을 때의 반경 (흡착패드+하우징 최대 반경).\n파지점이 벽에서 이만큼 떨어져 있어야 안 부딪힌다.")
+        self.wall_margin = self._mk_spin(0, 200, " mm")
+        self.wall_margin.setToolTip("벽 추가 안전 여유")
+        self.floor_margin = self._mk_spin(0, 200, " mm")
+        self.floor_margin.setToolTip("바닥 추가 안전 여유 (하강 하한 = 바닥 Z + 이 값)")
+        self.safe_height = self._mk_spin(0, 500, " mm")
+        self.safe_height.setToolTip("빈에 드나들 때 림 위로 띄우는 높이 — 이 높이에서만 횡이동한다")
+        f3.addRow("그리퍼 반경", self.gripper_r)
+        f3.addRow("벽 여유", self.wall_margin)
+        f3.addRow("바닥 여유", self.floor_margin)
+        f3.addRow("진입 안전고", self.safe_height)
+        root.addWidget(g3)
+
+        hint = QLabel("3D 뷰: 노란 상자 = 빈 외곽, 초록 상자 = 파지 허용 영역(벽에서 그리퍼 반경+여유 안쪽)")
+        hint.setStyleSheet("color: #666;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        self._load(self.cfg)
+
+    @staticmethod
+    def _mk_spin(lo, hi, suffix):
+        sp = QDoubleSpinBox()
+        sp.setRange(lo, hi)
+        sp.setDecimals(1)
+        sp.setSuffix(suffix)
+        sp.setFixedWidth(120)
+        return sp
+
+    @staticmethod
+    def _wrap(layout) -> QWidget:
+        w = QWidget()
+        layout.setContentsMargins(0, 0, 0, 0)
+        w.setLayout(layout)
+        return w
+
+    def _load(self, c: Dict):
+        self.cx.setValue(c["cx"]); self.cy.setValue(c["cy"])
+        self.sx.setValue(c["sx"]); self.sy.setValue(c["sy"])
+        self.yaw.setValue(c["yaw"])
+        self.z_rim.setValue(c["z_rim"]); self.z_floor.setValue(c["z_floor"])
+        self.gripper_r.setValue(c["gripper_r"]); self.wall_margin.setValue(c["wall_margin"])
+        self.floor_margin.setValue(c["floor_margin"]); self.safe_height.setValue(c["safe_height"])
+
+    def _teach(self, spin: QDoubleSpinBox, label: str):
+        if self._get_tcp is None:
+            QMessageBox.warning(self, "오류", "로봇이 연결되어 있지 않습니다")
+            return
+        tcp = self._get_tcp()
+        if not tcp:
+            QMessageBox.warning(self, "오류", "현재 로봇 자세를 읽지 못했습니다")
+            return
+        spin.setValue(float(tcp["z"]))
+        QMessageBox.information(self, "티칭 완료", f"{label} Z = {tcp['z']:.1f} mm 로 설정했습니다.")
+
+    def result_config(self) -> Dict:
+        return {
+            "cx": self.cx.value(), "cy": self.cy.value(),
+            "sx": self.sx.value(), "sy": self.sy.value(),
+            "yaw": self.yaw.value(),
+            "z_rim": self.z_rim.value(), "z_floor": self.z_floor.value(),
+            "gripper_r": self.gripper_r.value(), "wall_margin": self.wall_margin.value(),
+            "floor_margin": self.floor_margin.value(), "safe_height": self.safe_height.value(),
+        }
+
+
+# ============================================================
 # Grasp(파지) 설정 다이얼로그
 # ============================================================
 
@@ -305,6 +451,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.T_calib = None
         self.calib_mode = None
 
+        # Bin Box (작업 볼륨) — 충돌 방지용. **로봇 base 좌표계**에 정의한다.
+        #   빈의 벽은 중력(base Z)에 평행하고 그리퍼 자세도 base 이므로 base 가 자연스럽다.
+        #   (카메라 AABB 는 카메라가 기울면 실제 상자와 어긋남 → docs/bin_picking.md 참고)
+        #   3D 뷰는 카메라 좌표계라, 표시할 땐 8 코너를 base→cam 으로 역변환해 그린다.
+        # None = 미설정. dict 구조는 _default_bin_box() 참고.
+        self.bin_box = None
+        self._bin_box_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin_box.json")
+        self._load_bin_box()
+
         # Grasp(파지) 설정 — 검출된 객체를 어떻게 잡을지 규칙. 기본값은 기존 동작
         # (3D 중심 + 표면 법선). 투명/평면 객체는 다이얼로그에서 아래로 바꾼다:
         #   위치 plane(고정 평면에 광선 투영) + 접근 vertical(수직) + 회전 opening(열림 방향).
@@ -528,6 +683,16 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.btn_grasp_config.clicked.connect(self._open_grasp_config)
         self.btn_grasp_config.setStyleSheet("background-color: #455A64; color: white; font-weight: bold;")
         op_row.addWidget(self.btn_grasp_config)
+
+        self.btn_bin_box = QPushButton("📦 Bin Box")
+        self.btn_bin_box.setToolTip(
+            "빈(bin) 상자를 로봇 base 좌표계로 정의 — 충돌 방지의 기준.\n"
+            "ROI 에서 자동 산출 / 수치 입력 / 로봇 티칭(높이)으로 설정.\n"
+            "3D 뷰에 노란 상자(외곽)와 초록 상자(파지 허용 영역)로 표시된다."
+        )
+        self.btn_bin_box.clicked.connect(self._open_bin_box_config)
+        self.btn_bin_box.setStyleSheet("background-color: #5D4037; color: white; font-weight: bold;")
+        op_row.addWidget(self.btn_bin_box)
 
         op_widget = QWidget()
         op_widget.setLayout(op_row)
@@ -810,6 +975,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             self.calib_mode = result.get("mode", "eye_to_hand")
             self.calib_label.setText(f"{Path(path).name} [{self.calib_mode}]")
             self.main.statusBar().showMessage(f"캘리브레이션 로드: {self.calib_mode}")
+            self._refresh_bin_box_views()  # base→cam 변환 가능해짐 → 2D/3D 표시
         except Exception as e:
             QMessageBox.critical(self, "오류", f"로드 실패:\n{e}")
 
@@ -874,6 +1040,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         )
         if self.roi_3d is not None:
             self._apply_roi_to_3d()
+        self._refresh_bin_box_views()  # 3D 는 clear 됐고 2D 도 새 이미지라 Bin Box 재표시
         self.view_3d.reset_view()
 
         self.main.statusBar().showMessage("캡처 완료")
@@ -918,9 +1085,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
         )
 
     def _on_roi_dragged(self, x1: int, y1: int, x2: int, y2: int):
+        """2D 드래그 = **Bin Box(작업 볼륨) 설정**.
+
+        실제 빈피킹 프로그램처럼 ROI 와 빈 상자를 하나로 본다. 드래그한 영역의 3D 점을
+        base 로 옮겨 XY·yaw 를 산출하고, 그 결과를 곧바로 Bin Box 로 저장·표시한다.
+        캘리브레이션이 없으면 base 변환을 못 하므로 기존 ROI 상자 동작으로 폴백.
+        """
         self.roi_2d = (x1, y1, x2, y2)
 
-        # 2D bbox 안의 3D 포인트들의 범위 → 3D ROI
+        # 2D bbox 안의 3D 포인트들의 범위 → 3D ROI (깊이 밴드 2차 필터용, 유지)
         if self.current_xyz is not None:
             h, w = self.current_xyz.shape[:2]
             x1 = max(0, min(x1, w - 1))
@@ -939,14 +1112,31 @@ class BinPickingTab(RobotControlMixin, QWidget):
                     "z_max": float(valid[:, 2].max()),
                 }
                 self._apply_roi_to_3d()
-                self.main.statusBar().showMessage(
-                    f"ROI 설정: X[{self.roi_3d['x_min']:.0f},{self.roi_3d['x_max']:.0f}] "
-                    f"Y[{self.roi_3d['y_min']:.0f},{self.roi_3d['y_max']:.0f}] "
-                    f"Z[{self.roi_3d['z_min']:.0f},{self.roi_3d['z_max']:.0f}] mm"
-                )
+
+        # 드래그 결과로 Bin Box 갱신 (ROI == Bin Box)
+        bb = self._bin_box_from_drag()
+        if bb is not None:
+            self.bin_box = bb
+            self._save_bin_box()
+            self._refresh_bin_box_views()
+            self.main.statusBar().showMessage(
+                f"Bin Box 설정: 중심({bb['cx']:.0f},{bb['cy']:.0f}) 크기({bb['sx']:.0f}×{bb['sy']:.0f}) "
+                f"yaw {bb['yaw']:.1f}° Z[{bb['z_floor']:.0f}~{bb['z_rim']:.0f}]mm  — 높이는 📦 Bin Box 에서 티칭 권장"
+            )
+        elif self.roi_3d is not None:
+            self.main.statusBar().showMessage(
+                f"ROI 설정 (캘리브레이션 없어 Bin Box 미생성): "
+                f"Z[{self.roi_3d['z_min']:.0f},{self.roi_3d['z_max']:.0f}] mm"
+            )
 
     def _apply_roi_to_3d(self):
         if self.roi_3d is None:
+            return
+        # Bin Box 가 설정돼 있으면 그게 작업 볼륨의 기준이다. ROI 자동 상자(카메라 AABB)와
+        # 겹쳐 노란 박스가 두 개로 보이므로 ROI 쪽은 그리지 않는다.
+        # (ROI 영역 자체는 2D 뷰의 노란 사각형으로 계속 확인 가능)
+        if self.bin_box:
+            self.view_3d.remove_named("roi_box")
             return
         bounds = (
             self.roi_3d["x_min"],
@@ -959,14 +1149,28 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.view_3d.show_roi_box(bounds)
 
     def _clear_roi(self):
+        """ROI 해제 = **Bin Box 완전 삭제** (ROI 와 Bin Box 는 같은 것이므로).
+
+        2D 표시·3D 상자·메모리 값·저장 파일까지 모두 지운다.
+        """
         self.roi_2d = None
         self.roi_3d = None
+        self.bin_box = None
         self.view_2d.set_roi(None)
+        self.view_2d.set_roi_polygon(None)
+        for name in ("roi_box", "bin_box", "bin_safe"):
+            self.view_3d.remove_named(name)
         try:
-            self.view_3d.plotter.remove_actor("roi_box")
+            self.view_3d.plotter.render()
         except Exception:
             pass
-        self.main.statusBar().showMessage("ROI 해제")
+        # 저장 파일도 삭제 → 재시작해도 안 살아남음
+        try:
+            if os.path.exists(self._bin_box_path):
+                os.remove(self._bin_box_path)
+        except Exception as e:
+            logger.warning(f"Bin Box 파일 삭제 실패: {e}")
+        self.main.statusBar().showMessage("ROI/Bin Box 해제 — 저장값도 삭제됨")
 
     def _detect(self):
         """RF-DETR 객체 검출. 실제 추론은 object_detector.RFDetrDetector 가 담당하고,
@@ -1447,6 +1651,207 @@ class BinPickingTab(RobotControlMixin, QWidget):
     # ============================================================
     # Grasp(파지) 설정 & 계산
     # ============================================================
+
+    # ============================================================
+    # Bin Box (작업 볼륨) — 충돌 방지 기반
+    # ============================================================
+
+    @staticmethod
+    def _default_bin_box() -> Dict:
+        """Bin Box 기본값 (base 좌표계, mm/deg)."""
+        return {
+            "cx": 0.0, "cy": 500.0,     # base XY 중심
+            "sx": 300.0, "sy": 200.0,   # 가로·세로 크기
+            "yaw": 0.0,                 # base Z 축 회전(deg) — 빈이 축과 안 맞을 때
+            "z_rim": 150.0,             # 빈 상단(림) 높이 — 진입 안전고 기준
+            "z_floor": 0.0,             # 빈 바닥 높이 — 하강 하한
+            "gripper_r": 30.0,          # 그리퍼 원기둥 근사 반경
+            "wall_margin": 5.0,         # 벽 여유
+            "floor_margin": 5.0,        # 바닥 여유
+            "safe_height": 50.0,        # 림 위로 띄울 진입/이탈 안전고
+        }
+
+    @staticmethod
+    def _bin_box_corners(bb: Dict, shrink_xy: float = 0.0) -> np.ndarray:
+        """Bin Box → base 좌표 8 코너 (0~3 아랫면, 4~7 윗면, 같은 순서로 대응).
+
+        shrink_xy > 0 이면 XY 를 그만큼 안쪽으로 축소 → **파지 허용 영역**
+        (벽에서 그리퍼 반경+여유 만큼 들어온 상자).
+        """
+        hx = max(1e-3, bb["sx"] / 2.0 - shrink_xy)
+        hy = max(1e-3, bb["sy"] / 2.0 - shrink_xy)
+        th = np.radians(bb.get("yaw", 0.0))
+        c, s = np.cos(th), np.sin(th)
+        local = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+        out = []
+        for z in (bb["z_floor"], bb["z_rim"]):
+            for lx, ly in local:
+                out.append([bb["cx"] + c * lx - s * ly, bb["cy"] + s * lx + c * ly, z])
+        return np.asarray(out, dtype=float)
+
+    def _base_to_cam_points(self, pts_base) -> Optional[np.ndarray]:
+        """base 좌표 점들 (N,3) → 카메라 좌표계. 3D 뷰가 카메라 좌표계라 표시용."""
+        if self.T_calib is None:
+            return None
+        if self.calib_mode == "eye_to_hand":
+            T = self.T_calib  # cam → base
+        elif self.calib_mode == "eye_in_hand":
+            if not self.main.robot:
+                return None
+            T = tcp_to_homogeneous(self.main.robot.get_tcp_position()) @ self.T_calib
+        else:
+            return None
+        try:
+            T_inv = np.linalg.inv(T)  # base → cam
+        except np.linalg.LinAlgError:
+            return None
+        pts = np.asarray(pts_base, dtype=float).reshape(-1, 3)
+        h = np.hstack([pts, np.ones((len(pts), 1))])
+        return (T_inv @ h.T).T[:, :3]
+
+    def _render_bin_box(self):
+        """3D 뷰에 Bin Box(노랑) + 파지 허용 영역(초록) 표시. 미설정이면 지움."""
+        self.view_3d.remove_named("bin_box")
+        self.view_3d.remove_named("bin_safe")
+        if not self.bin_box:
+            self.view_3d.plotter.render()
+            return
+        outer = self._base_to_cam_points(self._bin_box_corners(self.bin_box))
+        if outer is None:
+            self.main.statusBar().showMessage("Bin Box 표시 불가 — 캘리브레이션 로드 필요")
+            return
+        self.view_3d.remove_named("roi_box")  # ROI 자동 상자와 겹치지 않게 (Bin Box 가 기준)
+        self.view_3d.show_wire_box(outer, "bin_box", "yellow", 4)
+        shrink = self.bin_box["gripper_r"] + self.bin_box["wall_margin"]
+        inner = self._base_to_cam_points(self._bin_box_corners(self.bin_box, shrink))
+        if inner is not None:
+            self.view_3d.show_wire_box(inner, "bin_safe", "lime", 3)
+        self.view_3d.plotter.render()
+
+    def _bin_box_from_drag(self) -> Optional[Dict]:
+        """드래그한 ROI 영역 → Bin Box(base 좌표계). 불가하면 조용히 None.
+
+        ROI 안 유효 3D 점을 base 로 변환한 뒤 **XY 평면 투영에 cv2.minAreaRect** 를 적용해
+        중심·크기·yaw 를 얻는다 (빈이 비스듬해도 실제 방향을 잡아냄).
+
+        **기존 Bin Box 가 있으면 z_rim/z_floor 와 그리퍼 파라미터는 유지**한다 —
+        로봇으로 티칭한 높이가 XY 재조정 때문에 측정값으로 덮어써지면 안 되기 때문.
+        처음 만들 때만 측정 점 분포(2%/98% 백분위)로 높이를 초기화한다.
+        """
+        if self.roi_2d is None or self.current_xyz is None or self.T_calib is None:
+            return None
+        h, w = self.current_xyz.shape[:2]
+        x1, y1, x2, y2 = self.roi_2d
+        x1, x2 = sorted((max(0, int(x1)), min(w, int(x2))))
+        y1, y2 = sorted((max(0, int(y1)), min(h, int(y2))))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return None
+        region = self.current_xyz[y1:y2, x1:x2].reshape(-1, 3)
+        valid = region[~np.any(np.isnan(region), axis=1)]
+        if len(valid) < 50:
+            return None
+        # 카메라 → base
+        if self.calib_mode == "eye_to_hand":
+            T = self.T_calib
+        elif self.calib_mode == "eye_in_hand":
+            if not self.main.robot:
+                return None
+            T = tcp_to_homogeneous(self.main.robot.get_tcp_position()) @ self.T_calib
+        else:
+            return None
+        base_pts = (T @ np.hstack([valid, np.ones((len(valid), 1))]).T).T[:, :3]
+        xy = base_pts[:, :2].astype(np.float32)
+        (cx, cy), (sx, sy), ang = cv2.minAreaRect(xy.reshape(-1, 1, 2))
+        if sx < 1 or sy < 1:
+            return None
+
+        if self.bin_box:  # 기존 값이 있으면 높이·그리퍼 설정은 그대로 둔다
+            bb = dict(self.bin_box)
+        else:             # 처음 생성 — 측정값으로 높이 초기화
+            bb = self._default_bin_box()
+            bb["z_floor"] = float(np.percentile(base_pts[:, 2], 2))
+            bb["z_rim"] = float(np.percentile(base_pts[:, 2], 98))
+        bb.update({"cx": float(cx), "cy": float(cy),
+                   "sx": float(sx), "sy": float(sy), "yaw": float(ang)})
+        return bb
+
+    def _bin_box_image_polygon(self) -> Optional[np.ndarray]:
+        """Bin Box 림(상단) 4 코너 → 이미지 픽셀 폴리곤 (2D 표시 + roi_2d 산출용).
+
+        base → 카메라 → intrinsics 핀홀 투영. 회전(yaw)이 그대로 반영된 사각형이 나온다.
+        """
+        if not self.bin_box or self.current_intrinsics is None:
+            return None
+        cam = self._base_to_cam_points(self._bin_box_corners(self.bin_box)[4:])  # 윗면 4점
+        if cam is None:
+            return None
+        intr = np.asarray(self.current_intrinsics, dtype=float)
+        fx, fy, cx_i, cy_i = intr[0, 0], intr[1, 1], intr[0, 2], intr[1, 2]
+        pts = []
+        for X, Y, Z in cam:
+            if Z <= 1e-6:  # 카메라 뒤 → 투영 불가
+                return None
+            pts.append((fx * X / Z + cx_i, fy * Y / Z + cy_i))
+        return np.asarray(pts, dtype=float)
+
+    def _refresh_bin_box_views(self):
+        """Bin Box 를 2D(투영 폴리곤) + 3D(와이어 상자) 양쪽에 표시하고 roi_2d 를 동기화.
+
+        roi_2d 는 검출 ROI 필터(§3.1)의 1차 게이트라, 화면에 보이는 Bin Box 와
+        필터 영역이 어긋나지 않도록 폴리곤의 바운딩 박스로 갱신한다.
+        """
+        if not self.bin_box:
+            self.view_2d.set_roi_polygon(None)
+            self._render_bin_box()
+            return
+        poly = self._bin_box_image_polygon()
+        if poly is not None:
+            self.view_2d.set_roi(None)  # 축 정렬 사각형 대신 폴리곤 표시
+            self.view_2d.set_roi_polygon(poly)
+            if self.current_image is not None:
+                h, w = self.current_image.shape[:2]
+                self.roi_2d = (
+                    float(np.clip(poly[:, 0].min(), 0, w)), float(np.clip(poly[:, 1].min(), 0, h)),
+                    float(np.clip(poly[:, 0].max(), 0, w)), float(np.clip(poly[:, 1].max(), 0, h)),
+                )
+        self._render_bin_box()
+
+    def _save_bin_box(self):
+        try:
+            with open(self._bin_box_path, "w") as f:
+                json.dump(self.bin_box, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Bin Box 저장 실패: {e}")
+
+    def _load_bin_box(self):
+        """앱 시작 시 자동 호출. 카메라가 고정이라 저장값이 계속 유효하다."""
+        try:
+            if os.path.exists(self._bin_box_path):
+                with open(self._bin_box_path) as f:
+                    loaded = json.load(f)
+                bb = self._default_bin_box()
+                bb.update(loaded)  # 새 필드가 늘어나도 안전
+                self.bin_box = bb
+                logger.info(f"Bin Box 로드: {self._bin_box_path}")
+        except Exception as e:
+            logger.warning(f"Bin Box 로드 실패: {e}")
+
+    def _open_bin_box_config(self):
+        get_tcp = (lambda: self.main.robot.get_tcp_position()) if self.main.robot else None
+        dlg = BinBoxDialog(
+            self.bin_box or self._default_bin_box(),
+            get_current_tcp=get_tcp,
+            parent=self,
+        )
+        if dlg.exec():
+            self.bin_box = dlg.result_config()
+            self._save_bin_box()
+            self._refresh_bin_box_views()   # 2D 폴리곤 + 3D 상자 동시 갱신
+            bb = self.bin_box
+            self.main.statusBar().showMessage(
+                f"Bin Box 설정: 중심({bb['cx']:.0f},{bb['cy']:.0f}) 크기({bb['sx']:.0f}×{bb['sy']:.0f}) "
+                f"yaw {bb['yaw']:.1f}° Z[{bb['z_floor']:.0f}~{bb['z_rim']:.0f}]mm"
+            )
 
     def _open_grasp_config(self):
         get_tcp = (lambda: self.main.robot.get_tcp_position()) if self.main.robot else None

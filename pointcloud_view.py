@@ -161,6 +161,39 @@ class PointCloudView3D(QWidget):
         edges = box.extract_feature_edges(feature_angle=30)
         self.plotter.add_mesh(edges, color="yellow", line_width=4, name="roi_box", pickable=False, render_lines_as_tubes=True, reset_camera=False)
 
+    # 8 코너 → 12 모서리 인덱스 (0~3 아랫면, 4~7 윗면, 같은 순서로 대응)
+    _BOX_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0),
+                  (4, 5), (5, 6), (6, 7), (7, 4),
+                  (0, 4), (1, 5), (2, 6), (3, 7)]
+
+    def show_wire_box(self, corners, name: str, color: str = "yellow", line_width: int = 4):
+        """임의 방향(회전 포함) 상자를 8 코너로 받아 12 모서리 와이어프레임으로 표시.
+
+        `show_roi_box` 는 축 정렬(AABB)만 그릴 수 있는데, Bin Box 는 base 좌표계에서
+        정의되고 yaw 회전이 있어 카메라 좌표계로 옮기면 비스듬한 상자가 된다.
+        그래서 코너를 직접 받아 선분으로 그린다.
+
+        corners: (8, 3) — 0~3 아랫면, 4~7 윗면 (같은 순서로 위아래 대응)
+        """
+        pts = np.asarray(corners, dtype=np.float32)
+        if pts.shape != (8, 3):
+            logger.warning(f"show_wire_box: 코너 8개 필요 (받은 shape={pts.shape})")
+            return
+        lines = []
+        for a, b in self._BOX_EDGES:
+            lines.extend([2, a, b])  # VTK 선분 포맷: [점 개수, idx0, idx1]
+        poly = pv.PolyData(pts)
+        poly.lines = np.asarray(lines)
+        self.plotter.add_mesh(poly, color=color, line_width=line_width, name=name,
+                              pickable=False, render_lines_as_tubes=True, reset_camera=False)
+
+    def remove_named(self, name: str):
+        """이름으로 액터 제거 (없으면 무시)."""
+        try:
+            self.plotter.remove_actor(name)
+        except Exception:
+            pass
+
     def show_pick_objects(self, objects: List[Dict]):
         """
         피킹 객체들 표시 (배치 렌더링)

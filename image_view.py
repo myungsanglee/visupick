@@ -292,6 +292,8 @@ class DraggableImageLabel(ZoomableImageLabel):
         # [(start(x,y), end(x,y), color(BGR), obj_index), ...] — 여는 방향 화살표
         self._overlay_arrows: List[tuple] = []
         self._roi_rect: Optional[tuple] = None  # (x1, y1, x2, y2) 원본 이미지 좌표
+        # Bin Box 를 이미지에 투영한 4점 폴리곤 (회전 포함). 있으면 _roi_rect 대신 이걸 그림.
+        self._roi_poly: Optional[np.ndarray] = None
         self._highlighted_idx: Optional[int] = None
 
         # 좌클릭 드래그 상태 (위젯 좌표)
@@ -327,12 +329,23 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._roi_rect = rect
         self._refresh()
 
+    def set_roi_polygon(self, pts):
+        """회전된 ROI(=Bin Box 투영) 표시용 4점 폴리곤. None 이면 해제.
+
+        2D 드래그는 축 정렬 사각형만 만들지만, Bin Box 는 base 좌표계에서 yaw 를 가질 수
+        있어 이미지에 투영하면 기울어진 사각형이 된다. 그걸 그대로 보여줘야 실제 작업
+        볼륨과 화면이 일치한다.
+        """
+        self._roi_poly = None if pts is None else np.asarray(pts, dtype=np.float32).reshape(-1, 2)
+        self._refresh()
+
     def clear_all(self):
         self._overlay_boxes = []
         self._overlay_masks = []
         self._overlay_obbs = []
         self._overlay_arrows = []
         self._roi_rect = None
+        self._roi_poly = None
         self._highlighted_idx = None
         self.clear_image()
 
@@ -426,7 +439,13 @@ class DraggableImageLabel(ZoomableImageLabel):
                 cv2.rectangle(canvas, (tx - 2, ty - th - 3), (tx + tw + 2, ty + 3), (0, 0, 0), -1)
                 cv2.putText(canvas, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, arr_color, 2)
 
-        if self._roi_rect is not None:
+        if self._roi_poly is not None and len(self._roi_poly) >= 3:
+            # Bin Box 투영 폴리곤 (회전 반영) — 축 정렬 사각형보다 우선
+            ip = np.asarray(self._roi_poly, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(canvas, [ip], isClosed=True, color=(0, 255, 255), thickness=2)
+            tx, ty = int(self._roi_poly[:, 0].min()), int(self._roi_poly[:, 1].min())
+            cv2.putText(canvas, "BIN", (tx, max(ty - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        elif self._roi_rect is not None:
             rx1, ry1, rx2, ry2 = self._roi_rect
             cv2.rectangle(canvas, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (0, 255, 255), 2)
             cv2.putText(canvas, "ROI", (int(rx1), max(int(ry1) - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
