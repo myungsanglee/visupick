@@ -564,24 +564,63 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
             )
             self._show_compare_result(res_pc, res_pnp, mode, mode_text)
         else:
-            T = compute_hand_eye(
+            res = compute_hand_eye(
                 str(self.session_dir), board_size=board_size, square_size=square_size,
-                mode=mode, pose_method=method_key,
+                mode=mode, pose_method=method_key, return_metric=True,
             )
+            T = res["T"] if res else None
             if T is not None:
                 result_path = self.session_dir / "calibration_result.json"
                 save_calibration_result(T, str(result_path), mode=mode)
                 msg = "캘리브레이션 성공!\n\n"
                 msg += f"모드: {mode_text}\n"
-                msg += f"포즈 추정: {method_key}\n"
-                msg += f"사용 포즈: {self.pose_count}\n\n"
-                msg += f"변환 행렬:\n{np.array2string(T, precision=4, suppress_small=True)}\n\n"
+                msg += f"포즈 추정: {self._fmt_pose_method(method_key, res)}\n"
+                msg += f"사용 포즈: {res['n_used']} / {res['n_total']}"
+                if res.get("n_removed"):
+                    rp = res.get("removed_poses") or []
+                    shown = ", ".join(rp[:5]) + (f" 외 {len(rp) - 5}개" if len(rp) > 5 else "")
+                    msg += f"   (outlier 제외 {res['n_removed']}개{': ' + shown if shown else ''})"
+                msg += "\n\n"
+                msg += self._fmt_metrics(res)
+                msg += f"\n변환 행렬:\n{np.array2string(T, precision=4, suppress_small=True)}\n\n"
                 msg += f"결과 저장: {result_path}"
                 QMessageBox.information(self, "캘리브레이션 결과", msg)
                 self.main.statusBar().showMessage("캘리브레이션 완료")
             else:
                 QMessageBox.critical(self, "오류", "캘리브레이션 실패. 로그를 확인하세요.")
                 self.main.statusBar().showMessage("캘리브레이션 실패")
+
+    @staticmethod
+    def _fmt_pose_method(method_key: str, res: dict) -> str:
+        """체커보드 자세 추정 방식 표시. auto 면 **실제로 무엇을 썼는지**까지 보여준다."""
+        counts = res.get("pose_method_counts") or {}
+        label = {"pointcloud": "3D 직접 매칭(SVD)", "pnp": "solvePnP"}
+        detail = ", ".join(f"{label.get(k, k)} {v}개" for k, v in sorted(counts.items()))
+        if method_key == "auto":
+            return f"auto → {detail}" if detail else "auto (사용 내역 없음)"
+        return f"{method_key} ({detail})" if detail else method_key
+
+    @staticmethod
+    def _fmt_metrics(res: dict) -> str:
+        """일관성 오차: 1차(OpenCV) → 비선형 정밀화 → outlier 제거 후 최종."""
+        final = res.get("metric_mean")
+        raw = res.get("metric_initial_raw")
+        nlo = res.get("metric_initial")
+        alg = res.get("algorithm") or "?"
+        alg0 = res.get("algorithm_initial")
+        out = f"Hand-eye 알고리즘: {alg}"
+        if alg0 and alg0 not in alg:
+            out += f"  (1차 선택: {alg0})"
+        out += "\n\n일관성 오차 — 체커보드 위치가 포즈마다 얼마나 흩어지는가 (작을수록 좋음)\n"
+        if raw is not None:
+            out += f"  ① 1차 (OpenCV {alg0 or ''} 결과)     : {raw:.3f} mm\n"
+        if nlo is not None:
+            out += f"  ② 비선형 정밀화(NLO) 후        : {nlo:.3f} mm\n"
+        if final is not None:
+            out += f"  ③ 최종 (outlier 제거 후)       : {final:.3f} mm\n"
+        if raw and final and raw > 1e-9:
+            out += f"  → 개선: {raw:.3f} → {final:.3f} mm ({(1 - final / raw) * 100:.0f}% 감소)\n"
+        return out
 
     def _show_compare_result(self, res_pc, res_pnp, mode, mode_text):
         """두 방법(3D direct, solvePnP) 결과 비교 다이얼로그 + 더 일관성 좋은 쪽 자동 저장."""

@@ -237,6 +237,8 @@ def compute_hand_eye(
 
     successful_poses = 0
 
+    method_counts = {}  # 실제 사용한 자세추정 방식 집계 (auto 리포트용)
+
     for pose_dir in pose_dirs:
         tcp_file = pose_dir / "tcp.json"
         image_file = pose_dir / "image.png"
@@ -270,6 +272,7 @@ def compute_hand_eye(
 
         # 체커보드 자세 추정 — pose_method 에 따라 분기
         R_target2cam, t_target2cam = None, None
+        used_method = None  # 이 포즈에서 실제로 쓴 방식 ("pointcloud"/"pnp") — auto 리포트용
 
         use_pointcloud = pose_method in ("auto", "pointcloud") and xyz_file.exists()
         use_pnp_only = pose_method == "pnp"
@@ -286,6 +289,7 @@ def compute_hand_eye(
                 pnp_fallback = True
             else:
                 R_target2cam, t_target2cam, _rmse = result
+                used_method = "pointcloud"
 
         if use_pnp_only or pnp_fallback:
             objp = np.zeros((board_size[0] * board_size[1], 3), np.float32)
@@ -307,6 +311,7 @@ def compute_hand_eye(
                 continue
             R_target2cam, _ = cv2.Rodrigues(rvec)
             t_target2cam = tvec.reshape(3, 1)
+            used_method = "pnp"
 
         if R_target2cam is None:
             logger.warning(f"포즈 추정 결과 없음, 스킵: {pose_dir.name}")
@@ -318,7 +323,9 @@ def compute_hand_eye(
         t_target2cam_list.append(t_target2cam)
 
         successful_poses += 1
-        logger.info(f"포즈 로드 성공: {pose_dir.name}")
+        if used_method:
+            method_counts[used_method] = method_counts.get(used_method, 0) + 1
+        logger.info(f"포즈 로드 성공: {pose_dir.name} (자세추정: {used_method})")
 
     logger.info(f"유효 포즈: {successful_poses}/{len(pose_dirs)}")
 
@@ -351,6 +358,11 @@ def compute_hand_eye(
     best_metric = float("inf")
     best_name = None
     best_keep = list(keep_idx)
+    # 개선 전/후 비교용 (1차 = 전체 포즈, outlier 제거 전)
+    initial_raw_metric = None    # OpenCV 알고리즘 결과 그대로 (비선형 정밀화 전)
+    initial_metric = None        # 비선형 정밀화(NLO) 후
+    initial_alg = None           # 1차에서 선택된 OpenCV 알고리즘 이름
+    removed_names = []           # greedy 로 제외된 포즈 이름
 
     iteration = 0
     while True:
@@ -361,7 +373,7 @@ def compute_hand_eye(
         t_tc_sub = [t_target2cam_list[i] for i in keep_idx]
 
         logger.info(f"=== Iteration {iteration} (포즈 {len(keep_idx)}개) ===")
-        cand_T, cand_name, _ = _try_all_methods(
+        cand_T, cand_name, cand_metric = _try_all_methods(
             R_in_sub, t_in_sub, R_tc_sub, t_tc_sub, mode,
         )
         if cand_T is None:
@@ -376,6 +388,11 @@ def compute_hand_eye(
             f"[{cand_name}+NLO] 일관성 오차: mean={refined_metric:.3f}mm, "
             f"max={max(refined_per_pose):.3f}mm"
         )
+
+        if iteration == 1:  # 전체 포즈 기준 초기 오차 (개선 효과 비교용)
+            initial_raw_metric = float(cand_metric)
+            initial_metric = float(refined_metric)
+            initial_alg = cand_name
 
         if refined_metric < best_metric:
             best_T = refined_T
@@ -396,6 +413,7 @@ def compute_hand_eye(
         max_idx = int(np.argmax(per_arr))
         removed_name = pose_names[keep_idx[max_idx]]
         logger.info(f"다음 시도: {removed_name} 제거 (잔차 {per_arr[max_idx]:.3f}mm)")
+        removed_names.append(removed_name)
         keep_idx.pop(max_idx)
 
     keep_idx = best_keep
@@ -414,14 +432,26 @@ def compute_hand_eye(
 
     logger.info(f"=> 최종 ({best_name}): mean={best_metric:.3f}mm, 사용 포즈: {len(keep_idx)}/{len(R_in_list)}")
     logger.info(f"변환 행렬:\n{best_T}")
+    # 실제로 채택된 포즈만 반영해 방식 집계를 다시 계산하긴 어렵지만(제외 이력만 이름 기준),
+    # 전체 로드 단계의 집계를 그대로 리포트한다 — 어떤 방식으로 자세를 풀었는지 보여주는 용도.
+    n_removed = len(R_in_list) - len(keep_idx)
+    report = {
+        "T": best_T,
+        "metric_mean": float(best_metric),          # 최종 오차 (개선 후)
+        "metric_initial": initial_metric,           # 1차 오차 (전체 포즈, NLO 후)
+        "metric_initial_raw": initial_raw_metric,   # 1차 오차 (NLO 전, OpenCV 결과 그대로)
+        "algorithm": best_name,                     # 최종 채택 (예: "TSAI+NLO")
+        "algorithm_initial": initial_alg,           # 1차 선택된 OpenCV 알고리즘
+        "n_used": len(keep_idx),
+        "n_total": len(R_in_list),
+        "n_removed": n_removed,
+        "removed_poses": removed_names[:n_removed],
+        "pose_method_counts": dict(method_counts),  # {"pointcloud": n, "pnp": m}
+    }
+    logger.info(f"리포트: {report['algorithm_initial']} 1차 {initial_raw_metric:.3f}→NLO {initial_metric:.3f}"
+                f"→최종 {best_metric:.3f}mm, 포즈 {len(keep_idx)}/{len(R_in_list)}, 방식 {method_counts}")
     if return_metric:
-        return {
-            "T": best_T,
-            "metric_mean": float(best_metric),
-            "n_used": len(keep_idx),
-            "n_total": len(R_in_list),
-            "algorithm": best_name,
-        }
+        return report
     return best_T
 
 
