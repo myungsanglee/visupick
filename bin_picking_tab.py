@@ -510,13 +510,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.btn_clear_roi.clicked.connect(self._clear_roi)
         top_row.addWidget(self.btn_clear_roi)
 
-        # [개발용] 캡처된 원본(풀 해상도) 저장 — 격자 검출 등 오프라인 튜닝용
-        self.btn_save_raw = QPushButton("💾 원본 저장")
-        self.btn_save_raw.setToolTip("현재 캡처된 원본 컬러 이미지(무손실 PNG)를 파일로 저장한다.\n검출 마스크가 있으면 함께 저장. (개발/튜닝용)")
-        self.btn_save_raw.clicked.connect(self._save_raw_capture)
-        self.btn_save_raw.setStyleSheet("background-color: #607D8B; color: white;")
-        top_row.addWidget(self.btn_save_raw)
-
         self.btn_detect = QPushButton("객체 검출")
         self.btn_detect.clicked.connect(self._detect)
         self.btn_detect.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
@@ -1044,45 +1037,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.view_3d.reset_view()
 
         self.main.statusBar().showMessage("캡처 완료")
-
-    def _save_raw_capture(self):
-        """[개발용] 캡처된 원본 컬러 이미지(풀 해상도)를 무손실 PNG 로 저장.
-
-        격자 검출 등 오프라인 튜닝에 쓸 원본 확보용. 검출 마스크가 있으면
-        케이스 영역 참고용으로 union 마스크도 함께 저장한다. data/debug_captures/ 에 쌓인다.
-        """
-        if self.current_image is None:
-            QMessageBox.warning(self, "오류", "먼저 캡처를 하세요")
-            return
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "debug_captures")
-        os.makedirs(out_dir, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        base = os.path.join(out_dir, f"capture_{stamp}")
-
-        saved = []
-        color_path = f"{base}_color.png"
-        cv2.imwrite(color_path, self.current_image)  # BGR 원본, 무손실
-        h, w = self.current_image.shape[:2]
-        saved.append(color_path)
-
-        # 검출 마스크(있으면) → union 저장 (케이스 영역 참고)
-        if self.detections:
-            union = np.zeros((h, w), np.uint8)
-            for det in self.detections:
-                m = det.get("mask")
-                if m is not None and np.asarray(m).shape[:2] == (h, w):
-                    union[np.asarray(m) > 0] = 255
-            if union.any():
-                mask_path = f"{base}_mask.png"
-                cv2.imwrite(mask_path, union)
-                saved.append(mask_path)
-
-        self.main.statusBar().showMessage(f"💾 원본 저장: {color_path} ({w}×{h})")
-        QMessageBox.information(
-            self,
-            "원본 저장 (개발용)",
-            f"해상도: {w}×{h}\n\n저장됨:\n" + "\n".join(saved),
-        )
 
     def _on_roi_dragged(self, x1: int, y1: int, x2: int, y2: int):
         """2D 드래그 = **Bin Box(작업 볼륨) 설정**.

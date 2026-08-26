@@ -1095,6 +1095,29 @@ class VisuPickApp(QMainWindow):
         self.settings_label = QLabel("미로드")
         conn_layout.addWidget(self.settings_label)
 
+        conn_layout.addSpacing(15)
+
+        self.btn_save_capture = QPushButton("💾 원본 저장")
+        self.btn_save_capture.setToolTip(
+            "현재 활성 탭에 캡처된 원본 이미지를 무손실 PNG 로 저장한다 (개발/튜닝용).\n"
+            "탭 종류와 무관하게 동작하며, 저장 시 파일 이름을 지정할 수 있다.\n"
+            "저장 위치: data/debug_captures/"
+        )
+        self.btn_save_capture.setStyleSheet("background-color: #607D8B; color: white;")
+        self.btn_save_capture.clicked.connect(self._save_current_capture)
+        conn_layout.addWidget(self.btn_save_capture)
+
+        self.btn_save_render = QPushButton("🖼 렌더링 저장")
+        self.btn_save_render.setToolTip(
+            "현재 활성 탭에서 **보이는 뷰를 그대로** 무손실 PNG 로 저장한다.\n"
+            "· 2D 뷰: 검출 bbox·마스크·OBB·여는 방향 화살표·ROI 등 오버레이 포함\n"
+            "· 3D 뷰: 포인트클라우드·Bin Box·Tool 좌표축 등 현재 시점 스크린샷\n"
+            "저장 위치: data/debug_captures/"
+        )
+        self.btn_save_render.setStyleSheet("background-color: #455A64; color: white;")
+        self.btn_save_render.clicked.connect(self._save_rendered_capture)
+        conn_layout.addWidget(self.btn_save_render)
+
         conn_layout.addStretch()
 
         conn_widget = QWidget()
@@ -1117,6 +1140,125 @@ class VisuPickApp(QMainWindow):
         main_layout.addWidget(self.tabs)
 
         self.statusBar().showMessage("프로그램 시작됨")
+
+    def _current_visible_view(self):
+        """현재 활성 탭에서 **화면에 보이는** 뷰 위젯.
+
+        2D/3D 를 QStackedWidget 으로 전환하는 탭은 그 중 보이는 것을 돌려준다
+        (CAD 매칭의 CAD 뷰·클러스터 뷰도 자동 포함). 스택이 없는 탭은 2D 라벨.
+        """
+        tab = self.tabs.currentWidget()
+        stack = getattr(tab, "view_stack", None)
+        if stack is not None:
+            return stack.currentWidget()
+        for attr in ("view_2d", "image_label"):
+            view = getattr(tab, attr, None)
+            if view is not None:
+                return view
+        return None
+
+    def _save_image_to_debug(self, img, kind: str, prefix: str):
+        """[개발용] 이미지를 data/debug_captures/ 에 PNG 로 저장 (파일 이름 사용자 지정).
+
+        '원본 저장'과 '렌더링 저장'이 공유하는 저장 절차:
+        이름 입력 → 확장자 보정 → 경로 구분자 차단 → 덮어쓰기 확인 → 기록.
+        """
+        h, w = img.shape[:2]
+        out_dir = Path(__file__).resolve().parent / "data" / "debug_captures"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        default_name = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        tab_name = self.tabs.tabText(self.tabs.currentIndex())
+        name, ok = QInputDialog.getText(
+            self, f"{kind} 저장",
+            f"파일 이름 (탭: {tab_name}, 해상도 {w}×{h}, PNG 저장):",
+            text=default_name,
+        )
+        if not ok:
+            return
+        name = Path(name.strip()).name  # 경로 구분자 제거 (하위 폴더 생성 방지)
+        if not name:
+            QMessageBox.warning(self, "오류", "파일 이름이 비어 있습니다")
+            return
+        if not name.lower().endswith(".png"):
+            name += ".png"
+
+        path = out_dir / name
+        if path.exists():
+            ret = QMessageBox.question(
+                self, "덮어쓰기 확인",
+                f"이미 존재하는 파일입니다:\n{path}\n\n덮어쓸까요?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if ret != QMessageBox.Yes:
+                return
+
+        if not cv2.imwrite(str(path), img):
+            QMessageBox.critical(self, "오류", f"저장 실패:\n{path}")
+            return
+        self.statusBar().showMessage(f"💾 {kind} 저장: {path} ({w}×{h})")
+        QMessageBox.information(self, "저장 완료", f"{kind} · {w}×{h}\n\n{path}")
+
+    def _save_current_capture(self):
+        """[개발용] **현재 활성 탭**의 캡처 원본 이미지를 저장 (오버레이 없음).
+
+        모든 탭이 `self.current_image`(BGR) 를 공통으로 쓰므로 탭 종류를 가리지 않는다.
+        """
+        tab = self.tabs.currentWidget()
+        tab_name = self.tabs.tabText(self.tabs.currentIndex())
+        img = getattr(tab, "current_image", None)
+        if img is None:
+            QMessageBox.warning(
+                self, "오류",
+                f"'{tab_name}' 탭에 캡처된 이미지가 없습니다.\n해당 탭에서 먼저 캡처하세요.",
+            )
+            return
+        self._save_image_to_debug(img, "원본 이미지", "capture")
+
+    def _save_rendered_capture(self):
+        """[개발용] **현재 화면에 보이는 뷰를 그대로** 이미지로 저장.
+
+        - **2D 뷰**: 검출 bbox·마스크·OBB·여는 방향 화살표·ROI 등 오버레이를 포함한
+          `_make_overlay_image()` 결과 (= 화면에 그려지는 바로 그 이미지).
+        - **3D 뷰**: PyVista 플로터의 `screenshot()` (포인트클라우드·Bin Box·Tool 좌표축 등
+          현재 카메라 시점 그대로). CAD 매칭의 CAD 뷰·클러스터 뷰도 동일하게 동작.
+
+        결과 보고·문서용 스크린샷을 만들 때 유용하다.
+        """
+        tab_name = self.tabs.tabText(self.tabs.currentIndex())
+        view = self._current_visible_view()
+        if view is None:
+            QMessageBox.warning(self, "오류", f"'{tab_name}' 탭에는 저장할 뷰가 없습니다.")
+            return
+
+        if hasattr(view, "_make_overlay_image"):        # 2D 이미지 라벨
+            img = view._make_overlay_image()
+            if img is None:
+                QMessageBox.warning(
+                    self, "오류",
+                    f"'{tab_name}' 탭에 표시된 이미지가 없습니다.\n해당 탭에서 먼저 캡처하세요.",
+                )
+                return
+            self._save_image_to_debug(img, "렌더링 이미지(2D)", "render")
+            return
+
+        plotter = getattr(view, "plotter", None)        # 3D 포인트클라우드 뷰
+        if plotter is None:
+            QMessageBox.warning(self, "오류", f"'{tab_name}' 탭의 현재 뷰는 저장할 수 없습니다.")
+            return
+        try:
+            shot = plotter.screenshot(return_img=True)  # RGB (H, W, 3 또는 4)
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"3D 뷰 캡처 실패:\n{e}")
+            return
+        if shot is None:
+            QMessageBox.warning(self, "오류", "3D 뷰를 캡처하지 못했습니다.")
+            return
+        shot = np.asarray(shot)
+        if shot.ndim == 3 and shot.shape[2] == 4:       # RGBA → RGB
+            shot = shot[:, :, :3]
+        img = cv2.cvtColor(shot, cv2.COLOR_RGB2BGR)     # cv2.imwrite 는 BGR
+        self._save_image_to_debug(img, "3D 뷰 이미지", "view3d")
 
     def _connect_robot(self):
         """로봇 연결 / 해제 토글 (카메라와 동일한 패턴).
