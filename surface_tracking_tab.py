@@ -823,9 +823,6 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         layout.addWidget(splitter)
 
         # Space = 비상정지
-        sc_estop = QShortcut(QKeySequence(Qt.Key_Space), self)
-        sc_estop.setContext(Qt.WidgetWithChildrenShortcut)
-        sc_estop.activated.connect(self._emergency_stop)
 
         # 모드 표시 주기 갱신
         self._mode_timer = QTimer(self)

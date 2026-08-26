@@ -2421,9 +2421,6 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         # 스페이스바 = 비상정지 (탭이 활성일 때만 동작)
         from PySide6.QtGui import QShortcut, QKeySequence
 
-        sc_estop = QShortcut(QKeySequence(Qt.Key_Space), self)
-        sc_estop.setContext(Qt.WidgetWithChildrenShortcut)
-        sc_estop.activated.connect(self._emergency_stop)
 
         # 모드 폴링 타이머
         self._mode_timer = QTimer(self)

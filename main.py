@@ -1139,7 +1139,30 @@ class VisuPickApp(QMainWindow):
         self.tabs.addTab(self.surface_tracking_tab, "표면 추적")
         main_layout.addWidget(self.tabs)
 
+        # === 비상정지(Space) — 창 전체에서 단일 등록 후 현재 탭으로 디스패치 ===
+        # 탭마다 따로 등록하면 (a) 탭 밖(연결 영역)에 포커스가 있을 때 안 먹고
+        # (b) 여러 등록이 겹쳐 ambiguous 가 될 수 있다.
+        sc_estop = QShortcut(QKeySequence(Qt.Key_Space), self)
+        sc_estop.setContext(Qt.WindowShortcut)
+        sc_estop.activated.connect(self._emergency_stop_current_tab)
+
+        # 모든 버튼에서 키보드 포커스를 제거한다.
+        # Space 는 Qt 에서 '포커스된 버튼 누르기' 기본 키라, 버튼에 포커스가 있으면
+        # 비상정지 단축키 대신 그 버튼이 눌린다 (실제로 '로봇 연결' 버튼이 눌려
+        # 연결이 끊기는 사고가 있었다). 버튼은 마우스로만 쓰므로 NoFocus 가 안전하다.
+        for btn in self.findChildren(QPushButton):
+            btn.setFocusPolicy(Qt.NoFocus)
+
         self.statusBar().showMessage("프로그램 시작됨")
+
+    def _emergency_stop_current_tab(self):
+        """Space → 현재 활성 탭의 비상정지. 로봇 제어가 없는 탭이면 무시."""
+        tab = self.tabs.currentWidget()
+        estop = getattr(tab, "_emergency_stop", None)
+        if callable(estop):
+            estop()
+        else:
+            self.statusBar().showMessage("이 탭에는 로봇 제어가 없습니다 (비상정지 무시)")
 
     def _current_visible_view(self):
         """현재 활성 탭에서 **화면에 보이는** 뷰 위젯.

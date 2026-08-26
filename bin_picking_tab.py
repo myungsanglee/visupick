@@ -451,6 +451,10 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.T_calib = None
         self.calib_mode = None
 
+        # 연속 픽(자동 반복) 상태
+        self._auto_running = False
+        self._auto_done = 0
+
         # Bin Box (작업 볼륨) — 충돌 방지용. **로봇 base 좌표계**에 정의한다.
         #   빈의 벽은 중력(base Z)에 평행하고 그리퍼 자세도 base 이므로 base 가 자연스럽다.
         #   (카메라 AABB 는 카메라가 기울면 실제 상자와 어긋남 → docs/bin_picking.md 참고)
@@ -896,6 +900,62 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
         info_layout.addWidget(seq_group)
 
+        # === 연속 픽 (자동 반복) — 캡처→검출→선택→픽→놓기 를 빌 때까지 반복 ===
+        auto_group = QGroupBox("연속 픽 (자동 반복)")
+        auto_layout = QVBoxLayout(auto_group)
+
+        crit_row = QHBoxLayout()
+        crit_row.addWidget(QLabel("선택 기준:"))
+        self.auto_crit_combo = QComboBox()
+        self.auto_crit_combo.addItem("가장 위 (Z 최대)", "topmost")
+        self.auto_crit_combo.addItem("검출 신뢰도 최고", "conf")
+        self.auto_crit_combo.addItem("여는 방향 신뢰도 최고", "opening")
+        self.auto_crit_combo.addItem("빈 중심에 가까움", "center")
+        self.auto_crit_combo.setToolTip(
+            "매 사이클에서 어떤 객체를 집을지 고르는 기준.\n"
+            "가장 위: 빈피킹 표준 — 아래 것부터 건드리면 더미가 무너진다.\n"
+            "빈 중심: 벽에서 먼 것부터 (Bin Box 설정 시 그 중심 기준)."
+        )
+        crit_row.addWidget(self.auto_crit_combo, stretch=1)
+        auto_layout.addLayout(crit_row)
+
+        max_row = QHBoxLayout()
+        max_row.addWidget(QLabel("최대 반복:"))
+        self.auto_max_spin = QSpinBox()
+        self.auto_max_spin.setRange(1, 200)
+        self.auto_max_spin.setValue(10)
+        self.auto_max_spin.setToolTip("폭주 방지 상한. 이 횟수만큼 픽하면 자동 종료된다.")
+        max_row.addWidget(self.auto_max_spin)
+        max_row.addStretch()
+        self.auto_progress_label = QLabel("대기 중")
+        self.auto_progress_label.setStyleSheet("color: #555;")
+        max_row.addWidget(self.auto_progress_label)
+        auto_layout.addLayout(max_row)
+
+        btn_row = QHBoxLayout()
+        self.btn_auto_start = QPushButton("▶ 연속 픽 시작")
+        self.btn_auto_start.setMinimumHeight(40)
+        self.btn_auto_start.setStyleSheet("font-weight: bold; background-color: #00695C; color: white;")
+        self.btn_auto_start.setToolTip(
+            "캡처 → SAM3 검출 → 여는 방향 → 자동 선택 → 픽 → 놓기 → Home 을\n"
+            "검출이 없을 때까지(또는 최대 반복까지) 자동 반복한다.\n"
+            "⚠ 로봇이 자율로 움직인다 — Space 또는 정지 버튼으로 즉시 중단 가능."
+        )
+        self.btn_auto_start.clicked.connect(self._auto_start)
+        self.btn_auto_start.setEnabled(False)
+        btn_row.addWidget(self.btn_auto_start)
+
+        self.btn_auto_stop = QPushButton("⏹ 정지")
+        self.btn_auto_stop.setMinimumHeight(40)
+        self.btn_auto_stop.setStyleSheet("font-weight: bold; background-color: #C62828; color: white;")
+        self.btn_auto_stop.setToolTip("현재 사이클을 마치는 대로 반복을 멈춘다 (즉시 정지는 Space 비상정지)")
+        self.btn_auto_stop.clicked.connect(lambda: self._auto_stop("사용자 정지"))
+        self.btn_auto_stop.setEnabled(False)
+        btn_row.addWidget(self.btn_auto_stop)
+        auto_layout.addLayout(btn_row)
+
+        info_layout.addWidget(auto_group)
+
         info_layout.addStretch()
 
         # 우측 패널을 ScrollArea로 감싸서 모든 컨트롤이 잘리지 않게 함
@@ -911,10 +971,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
 
-        # 스페이스바 = 비상정지 (탭이 활성일 때만 동작)
-        sc_estop = QShortcut(QKeySequence(Qt.Key_Space), self)
-        sc_estop.setContext(Qt.WidgetWithChildrenShortcut)
-        sc_estop.activated.connect(self._emergency_stop)
 
         # 모드 표시 자동 갱신 (2초마다)
         self._mode_timer = QTimer(self)
@@ -1605,6 +1661,214 @@ class BinPickingTab(RobotControlMixin, QWidget):
     # ============================================================
     # Grasp(파지) 설정 & 계산
     # ============================================================
+
+    # ============================================================
+    # 연속 픽 (자동 반복) — 캡처→검출→선택→픽→놓기→Home 을 빌 때까지
+    # ============================================================
+
+    def _auto_start(self):
+        """연속 픽 시작. 로봇이 자율로 반복 동작하므로 사전 검증 + 확인을 거친다."""
+        if self._auto_running:
+            return
+        if self.main.robot is None:
+            QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
+            return
+        if self.main.camera is None or not self.main.camera.is_capture_ready:
+            QMessageBox.warning(self, "오류", "카메라가 캡처 준비되지 않았습니다")
+            return
+        if self.T_calib is None:
+            QMessageBox.warning(self, "오류", "캘리브레이션을 먼저 로드하세요")
+            return
+        place = getattr(self.main, "place_pose", None)
+        if place is None:
+            QMessageBox.warning(
+                self, "놓기 위치 없음",
+                "놓기(Place) 위치가 저장되지 않았습니다.\n"
+                "로봇을 놓을 자리로 조그한 뒤 '📍 놓기 위치 저장'을 먼저 누르세요.",
+            )
+            return
+        prompt = self.sam3_prompt_input.text().strip()
+        if not prompt:
+            QMessageBox.warning(self, "오류", "SAM3 텍스트(검출할 객체)를 입력하세요")
+            return
+        if self._cycle_is_running():
+            QMessageBox.warning(self, "실행 중", "다른 사이클이 실행 중입니다")
+            return
+
+        home = self.main.home_pose
+        speed = self._effective_speed(self.speed_spin.value())
+        msg = [
+            f"▶ 연속 픽 시작 — 최대 {self.auto_max_spin.value()}회\n",
+            f"검출: SAM3 '{prompt}'",
+            f"선택 기준: {self.auto_crit_combo.currentText()}",
+            f"속도: {speed}%" + (" (AUT 50% 상한)" if self._is_aut_mode() else ""),
+            f"Approach: {self.approach_dist.value():.0f}mm, 흡착대기: {self.vac_dwell_spin.value():.1f}s",
+            "",
+            "각 사이클: 캡처 → SAM3 검출 → 여는 방향 → 자동 선택 →",
+            "  Approach → 하강 → 진공 ON → 상승 → 놓기 → 진공 OFF+블로우"
+            + (" → Home 복귀" if home else "  (⚠ Home 미저장 — 복귀 없음)"),
+            "",
+            "종료: 검출 0개(빈 비움) / 최대 반복 도달 / 정지 버튼 / 비상정지",
+            "",
+            "⚠ 로봇이 자율로 반복 동작합니다. ext_move 실행 중이어야 하며,",
+            "⚠ 비상시 Space 또는 비상정지 버튼을 사용하세요.",
+            "\n시작하시겠습니까?",
+        ]
+        if QMessageBox.question(self, "연속 픽 확인", "\n".join(msg),
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        try:
+            self.main.robot.set_speed(speed)
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"속도 설정 실패:\n{e}")
+            return
+
+        self._auto_running = True
+        self._auto_done = 0
+        self.btn_auto_start.setEnabled(False)
+        self.btn_auto_stop.setEnabled(True)
+        self._auto_update_progress("시작")
+        QTimer.singleShot(0, self._auto_step)  # UI 갱신 후 첫 사이클
+
+    def _auto_stop(self, reason: str = "정지"):
+        """연속 픽 종료 (현재 진행 중인 모션은 그대로 두고 반복만 멈춘다)."""
+        was = self._auto_running
+        self._auto_running = False
+        self.btn_auto_start.setEnabled(True)
+        self.btn_auto_stop.setEnabled(False)
+        self._auto_update_progress(reason)
+        if was:
+            self.main.statusBar().showMessage(f"⏹ 연속 픽 종료: {reason} (완료 {self._auto_done}회)")
+            logger.info(f"연속 픽 종료: {reason} (완료 {self._auto_done}회)")
+
+    def _auto_update_progress(self, state: str):
+        self.auto_progress_label.setText(f"{self._auto_done}/{self.auto_max_spin.value()} · {state}")
+
+    def _auto_step(self):
+        """한 사이클: 캡처 → 검출 → 여는 방향 → 선택 → 픽 사이클 실행."""
+        if not self._auto_running:
+            return
+        if self._auto_done >= self.auto_max_spin.value():
+            self._auto_stop("최대 반복 도달")
+            return
+
+        n = self._auto_done + 1
+        # ① 캡처
+        self._auto_update_progress(f"{n}회차 캡처")
+        self.main.statusBar().showMessage(f"[연속 픽 {n}] 캡처 중...")
+        QApplication.processEvents()
+        self._capture()
+        if not self._auto_running:  # 캡처 중 정지 눌렀을 수 있음
+            return
+        if self.current_image is None:
+            self._auto_stop("캡처 실패")
+            return
+
+        # ② SAM3 검출  ③ 여는 방향 (grasp 회전이 열림 방향을 쓸 수 있으므로 항상 계산)
+        self._auto_update_progress(f"{n}회차 검출")
+        QApplication.processEvents()
+        self._detect_sam3()
+        if not self._auto_running:
+            return
+        if not self.pick_objects:
+            self._auto_stop("검출 없음 — 빈 비움 완료")
+            return
+        self._detect_opening()
+        if not self._auto_running:
+            return
+
+        # ④ 자동 선택
+        idx = self._auto_pick_index()
+        if idx is None:
+            self._auto_stop("파지 가능한 객체 없음 (Z 안전/자세 계산 실패)")
+            return
+
+        # ⑤ 선택 → target_pose 계산
+        self._select_object(idx)
+        if self.target_pose is None:
+            self._auto_stop("선택 객체의 파지 자세 계산 실패")
+            return
+
+        # ⑥ 픽 사이클 (기존 상태머신 재사용) — 완료되면 다음 사이클로
+        target = dict(self.target_pose)
+        offset = self.approach_dist.value()
+        dwell = self.vac_dwell_spin.value()
+        place = getattr(self.main, "place_pose", None)
+        home = self.main.home_pose
+        ax, ay, az = self._compute_approach_position(target, offset)
+        for z in (target["z"], az, place["z"]) + ((home["z"],) if home else ()):
+            if z < self.z_min_spin.value():
+                self._auto_stop(f"Z 안전 한계 초과 (z={z:.1f} < {self.z_min_spin.value():.1f})")
+                return
+
+        self._auto_update_progress(f"{n}회차 픽 실행")
+        steps = self._build_pick_steps(target, offset, dwell, place, home, label=f"[{n}]")
+        self._run_cycle(
+            steps, f"연속 픽 {n}회차 완료",
+            on_done=self._auto_after_pick,
+            on_abort=lambda m: self._auto_stop(f"사이클 중단: {m}"),
+        )
+
+    def _auto_after_pick(self):
+        """픽 사이클 완료 콜백 → 다음 사이클."""
+        self._auto_done += 1
+        if not self._auto_running:
+            self._auto_stop("정지")
+            return
+        if self._auto_done >= self.auto_max_spin.value():
+            self._auto_stop("최대 반복 도달")
+            return
+        self._auto_update_progress("다음 사이클 준비")
+        QTimer.singleShot(400, self._auto_step)  # 진동 가라앉을 짧은 여유
+
+    def _auto_pick_index(self) -> Optional[int]:
+        """자동 선택 기준으로 픽할 객체의 검출 index 반환. 후보 없으면 None.
+
+        후보마다 **실제 파지 TCP**(_compute_grasp_tcp, Grasp 설정 반영)를 구해
+        로봇이 실제로 갈 지점 기준으로 정렬한다. Z 안전 한계를 못 넘는 후보는 제외.
+        """
+        if not self.pick_objects:
+            return None
+        cur_tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        if not cur_tcp:
+            cur_tcp = {"x": 0, "y": 0, "z": 0, "a": 0, "b": 0, "c": 180}
+        z_min = self.z_min_spin.value()
+        offset = self.approach_dist.value()
+
+        cands = []
+        for obj in self.pick_objects:
+            i = obj["index"]
+            det = self.detections[i] if i < len(self.detections) else {}
+            tcp, err = self._compute_grasp_tcp(obj, det, cur_tcp)
+            if tcp is None:
+                continue
+            _, _, az = self._compute_approach_position(tcp, offset)
+            if tcp["z"] < z_min or az < z_min:
+                continue  # Z 안전 한계 미달 → 후보 제외
+            cands.append({"index": i, "tcp": tcp, "det": det})
+        if not cands:
+            return None
+
+        crit = self.auto_crit_combo.currentData()
+        if crit == "conf":
+            cands.sort(key=lambda c: -float(c["det"].get("confidence", 0.0)))
+        elif crit == "opening":
+            cands.sort(key=lambda c: -float((c["det"].get("opening") or {}).get("confidence", 0.0)))
+        elif crit == "center":
+            if self.bin_box:
+                bx, by = self.bin_box["cx"], self.bin_box["cy"]
+            else:
+                bx = float(np.mean([c["tcp"]["x"] for c in cands]))
+                by = float(np.mean([c["tcp"]["y"] for c in cands]))
+            cands.sort(key=lambda c: (c["tcp"]["x"] - bx) ** 2 + (c["tcp"]["y"] - by) ** 2)
+        else:  # topmost (기본) — base Z 가 큰 것 = 더미 위쪽
+            cands.sort(key=lambda c: -c["tcp"]["z"])
+
+        best = cands[0]
+        logger.info(f"연속 픽 선택({crit}): 객체 #{best['index'] + 1}, "
+                    f"TCP z={best['tcp']['z']:.1f}mm, 후보 {len(cands)}개")
+        return best["index"]
 
     # ============================================================
     # Bin Box (작업 볼륨) — 충돌 방지 기반

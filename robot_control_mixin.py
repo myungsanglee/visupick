@@ -72,6 +72,10 @@ class RobotControlMixin:
         # 실행 중인 픽/시퀀스 사이클도 중단 (남은 스텝 전송 방지)
         if self._cycle_is_running():
             self._cycle_abort("비상정지로 사이클 중단")
+        # 연속 픽(자동 반복) 루프도 즉시 종료 — 사이클이 안 돌고 있던 순간
+        # (캡처/검출 중)에 눌렸을 수도 있으므로 별도로 확인한다.
+        if getattr(self, "_auto_running", False):
+            self._auto_stop("비상정지")
 
     def _emergency_stop_release(self):
         """
@@ -99,7 +103,8 @@ class RobotControlMixin:
             self.btn_add_home_to_seq.setEnabled(True)
         # 진공/픽 버튼 (탭이 _build_vacuum_row() 를 호출한 경우에만 존재)
         for name in ("btn_vac_on", "btn_vac_off", "btn_vac_blow",
-                     "btn_pick_cycle", "btn_set_place", "btn_add_pick_to_seq"):
+                     "btn_pick_cycle", "btn_set_place", "btn_add_pick_to_seq",
+                     "btn_auto_start"):
             btn = getattr(self, name, None)
             if btn is not None:
                 btn.setEnabled(True)
@@ -270,7 +275,8 @@ class RobotControlMixin:
     def _cycle_is_running(self) -> bool:
         return bool(getattr(self, "_cycle_active", False))
 
-    def _run_cycle(self, steps: List[Tuple], done_msg: str = "사이클 완료"):
+    def _run_cycle(self, steps: List[Tuple], done_msg: str = "사이클 완료",
+                   on_done=None, on_abort=None):
         if self._cycle_is_running():
             QMessageBox.warning(self, "실행 중", "이미 사이클이 실행 중입니다")
             return
@@ -282,6 +288,9 @@ class RobotControlMixin:
         self._cycle_pending_slots: List[int] = []
         self._cycle_dwell_until = 0.0
         self._cycle_done_msg = done_msg
+        # 완료/중단 콜백 — 연속 픽 루프가 다음 사이클을 이어가거나 즉시 멈추는 데 쓴다.
+        self._cycle_on_done = on_done
+        self._cycle_on_abort = on_abort
         self._cycle_active = True
         if getattr(self, "_cycle_timer", None) is None:
             self._cycle_timer = QTimer(self)
@@ -297,6 +306,13 @@ class RobotControlMixin:
         self._cycle_pending_slots = []
         self.main.statusBar().showMessage(f"⚠ {msg}")
         logger.warning(f"사이클 중단: {msg}")
+        # 중단됐으므로 이어가기 콜백은 버리고, 중단 콜백만 알린다
+        # (비상정지·오류 시 연속 픽 루프가 계속 돌면 안 됨)
+        cb = getattr(self, "_cycle_on_abort", None)
+        self._cycle_on_done = None
+        self._cycle_on_abort = None
+        if cb is not None:
+            cb(msg)
 
     def _cycle_tick(self):
         """사이클 상태 머신 1틱.
@@ -375,6 +391,13 @@ class RobotControlMixin:
             self._cycle_active = False
             self.main.statusBar().showMessage(f"✅ {self._cycle_done_msg}")
             logger.info(self._cycle_done_msg)
+            # 완료 콜백 (연속 픽 루프의 다음 사이클). 콜백이 새 사이클을 시작할 수
+            # 있으므로 _cycle_active 를 먼저 False 로 내린 뒤 호출한다.
+            cb = getattr(self, "_cycle_on_done", None)
+            self._cycle_on_done = None
+            self._cycle_on_abort = None
+            if cb is not None:
+                cb()
         except Exception as e:
             self._cycle_abort(f"사이클 오류: {e}")
 
