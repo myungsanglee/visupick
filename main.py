@@ -3,6 +3,7 @@ Hand-Eye Calibration GUI
 PySide6 기반 데이터 수집 및 캘리브레이션 검증 프로그램
 """
 
+import os
 import sys
 import json
 import shutil
@@ -1038,8 +1039,13 @@ class VisuPickApp(QMainWindow):
 
         self.robot = None
         self.camera = None
+        # 티칭 위치 (탭 공용). 파일로 유지되므로 앱을 껐다 켜도 살아남는다.
+        #   home_pose  — Home 복귀 위치
+        #   place_pose — 픽 사이클이 물체를 내려놓는 위치
         self.home_pose = None
-        self.place_pose = None  # 픽 사이클의 놓기(Place) 위치 — 탭 공용, '놓기 위치 저장'으로 티칭
+        self.place_pose = None
+        self._teach_pose_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teach_poses.json")
+        self._load_teach_poses()
 
         self._init_ui()
 
@@ -1299,6 +1305,59 @@ class VisuPickApp(QMainWindow):
         img = cv2.cvtColor(shot, cv2.COLOR_RGB2BGR)  # cv2.imwrite 는 BGR
         self._save_image_to_debug(img, "3D 뷰 이미지", "view3d")
 
+    # ------------------------------------------------------------
+    # 티칭 위치 (Home / 놓기) 영구 저장
+    # ------------------------------------------------------------
+    # 예전에는 로봇에 연결할 때마다 그 순간의 TCP 를 Home 으로 잡고, 놓기 위치는
+    # 매번 새로 티칭해야 했다. 셀 배치가 고정된 현장에서는 두 위치가 거의 바뀌지
+    # 않는데 재시작마다 다시 잡아야 하는 게 번거롭고, "연결 순간의 자세"가 그대로
+    # Home 이 되므로 로봇이 어디 있느냐에 따라 Home 이 매번 달라지는 문제도 있었다.
+    # 그래서 Grasp 설정(grasp_config.json) · Bin Box(bin_box.json) 와 같은 방식으로
+    # teach_poses.json 에 저장해 둔다.
+    #
+    # 주의: 저장된 값은 **저장 당시의 Tool / Base 번호 기준**이다. Tool/Base 를 바꿔서
+    # 재연결하면 좌표 의미가 달라지므로 Home / 놓기 위치를 다시 티칭해야 한다.
+
+    # 모션에 실제로 쓰는 6개 키 (KUKA FRAME). get_tcp_position 은 $POS_ACT 를 파싱하므로
+    # 여기에 더해 s/t(Status·Turn)·e1~e6(외부축)도 함께 들어온다 — 지금은 쓰지 않지만
+    # 저장·복원 때 버리지 않는다. 새로 티칭한 포즈와 파일에서 복원한 포즈의 내용이
+    # 달라지면 나중에 이 값들을 쓰게 됐을 때 재현이 안 되는 버그가 되기 때문.
+    POSE_KEYS = ("x", "y", "z", "a", "b", "c")
+
+    def _valid_pose(self, pose) -> bool:
+        """저장 파일이 손상됐을 때 이상한 좌표로 로봇을 보내지 않도록 형식을 검사한다.
+        6개 필수 키가 모두 숫자여야 통과하고, 그 밖의 키(s/t/e1~e6)는 있어도 그만이다."""
+        return isinstance(pose, dict) and all(isinstance(pose.get(k), (int, float)) for k in self.POSE_KEYS)
+
+    def _load_teach_poses(self):
+        """앱 시작 시 저장된 Home / 놓기 위치 복원. 파일이 없으면 조용히 넘어간다
+        (로봇 연결 시점에 현재 TCP 로 초기화된다)."""
+        try:
+            if not os.path.exists(self._teach_pose_path):
+                return
+            with open(self._teach_pose_path) as f:
+                data = json.load(f)
+            for key, attr in (("home_pose", "home_pose"), ("place_pose", "place_pose")):
+                pose = data.get(key)
+                if pose is None:
+                    continue
+                if self._valid_pose(pose):
+                    # 필수 6개 키 외의 값(s/t/e1~e6)도 그대로 살려 둔다
+                    setattr(self, attr, {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in pose.items()})
+                else:
+                    logger.warning(f"티칭 위치 '{key}' 형식이 올바르지 않아 무시함: {pose}")
+            logger.info(f"티칭 위치 로드: {self._teach_pose_path} (home={self.home_pose is not None}, place={self.place_pose is not None})")
+        except Exception as e:
+            logger.warning(f"티칭 위치 로드 실패: {e}")
+
+    def _save_teach_poses(self):
+        """Home / 놓기 위치를 파일에 기록. 재설정 버튼과 로봇 최초 연결에서 호출한다."""
+        try:
+            with open(self._teach_pose_path, "w") as f:
+                json.dump({"home_pose": self.home_pose, "place_pose": self.place_pose}, f, indent=2)
+        except Exception as e:
+            logger.warning(f"티칭 위치 저장 실패: {e}")
+
     def _connect_robot(self):
         """로봇 연결 / 해제 토글 (카메라와 동일한 패턴).
         해제해도 KRL(ext_move) 쪽에서 이미 실행 중인 모션은 계속 진행된다 —
@@ -1310,7 +1369,8 @@ class VisuPickApp(QMainWindow):
             except Exception as e:
                 logger.warning(f"로봇 disconnect 중 오류 (무시): {e}")
             self.robot = None
-            self.home_pose = None
+            # home_pose / place_pose 는 지우지 않는다 — teach_poses.json 으로 유지되는
+            # 티칭 값이라 연결 해제·재연결·앱 재시작에도 살아남아야 한다.
             self.robot_status.setText("미연결")
             self.robot_status.setStyleSheet("color: red; font-weight: bold;")
             self.btn_connect_robot.setText("로봇 연결")
@@ -1334,12 +1394,29 @@ class VisuPickApp(QMainWindow):
                 self.tool_num_input.setEnabled(False)
                 self.base_num_input.setEnabled(False)
 
-                # 연결 시점의 TCP를 home으로 저장
-                self.home_pose = self.robot.get_tcp_position()
-                if self.home_pose:
-                    logger.info(f"Home 위치 저장: X={self.home_pose['x']:.2f}, " f"Y={self.home_pose['y']:.2f}, Z={self.home_pose['z']:.2f}")
+                # 티칭 위치 초기화 — 저장된 값이 있으면 그대로 쓰고,
+                # 없을 때만(=최초 실행) 연결 시점의 TCP 로 잡아 파일에 남긴다.
+                taught = []
+                if self.home_pose is None or self.place_pose is None:
+                    cur = self.robot.get_tcp_position()
+                    if cur:
+                        if self.home_pose is None:
+                            self.home_pose = cur
+                            taught.append("Home")
+                        if self.place_pose is None:
+                            self.place_pose = dict(cur)  # 같은 dict 를 공유하면 한쪽 수정이 다른 쪽에 번진다
+                            taught.append("놓기")
+                        self._save_teach_poses()
+                    else:
+                        logger.warning("현재 TCP 를 읽지 못해 티칭 위치를 초기화하지 못했습니다")
+                if taught:
+                    logger.info(f"{'/'.join(taught)} 위치를 현재 TCP 로 초기화: {self.home_pose}")
+                    pose_msg = f"{'/'.join(taught)} 위치를 현재 TCP 로 설정"
+                else:
+                    logger.info(f"저장된 티칭 위치 사용 (home={self.home_pose}, place={self.place_pose})")
+                    pose_msg = "저장된 Home/놓기 위치 복원"
 
-                self.statusBar().showMessage(f"로봇 연결 성공 (Tool:{tool}, Base:{base}, Home 저장됨)")
+                self.statusBar().showMessage(f"로봇 연결 성공 (Tool:{tool}, Base:{base}) — {pose_msg}")
                 self.data_tab._update_tcp()
                 self.verification_tab._update_tcp()
                 # bin picking / CAD 매칭 탭에도 home 저장 알림 (UI 갱신)

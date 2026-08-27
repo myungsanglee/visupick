@@ -79,3 +79,6 @@ bin_box.json
 NOTES.md
 TODO.md
 grasp_config.json
+
+# 티칭 위치 (Home / 놓기) — 셀마다 다른 사용자 데이터
+teach_poses.json

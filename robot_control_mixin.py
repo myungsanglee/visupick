@@ -520,6 +520,7 @@ class RobotControlMixin:
             return
 
         self.main.place_pose = cur
+        self.main._save_teach_poses()  # 앱을 껐다 켜도 유지되도록 teach_poses.json 에 기록
         QMessageBox.information(
             self,
             "저장 완료",
@@ -836,6 +837,7 @@ class RobotControlMixin:
             return
 
         self.main.home_pose = cur
+        self.main._save_teach_poses()  # 앱을 껐다 켜도 유지되도록 teach_poses.json 에 기록
         self.btn_move_home.setEnabled(True)
         self.btn_add_home_to_seq.setEnabled(True)
         self.main.statusBar().showMessage(f"📍 Home 재설정됨: X={cur['x']:.1f}, Y={cur['y']:.1f}, Z={cur['z']:.1f}")
