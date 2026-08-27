@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QScrollArea,
     QProgressBar,
-    QListWidget,
     QDialog,
     QDialogButtonBox,
 )
@@ -2237,162 +2236,10 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         sel_layout.addWidget(self.btn_flip_180)
         info_layout.addWidget(sel_group)
 
-        # ============================================================
-        # 로봇 이동 제어 (bin_picking_tab과 동일 구성)
-        # ============================================================
-        move_group = QGroupBox("로봇 이동 제어")
-        move_layout = QVBoxLayout(move_group)
-
-        # 이동 방식
-        opt_row = QHBoxLayout()
-        opt_row.addWidget(QLabel("방식:"))
-        self.move_mode_combo = QComboBox()
-        self.move_mode_combo.addItems(["LIN (직선, 추천)", "PTP (최단 경로)"])
-        opt_row.addWidget(self.move_mode_combo)
-        move_layout.addLayout(opt_row)
-
-        # 속도 + 적용 버튼
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("속도(%):"))
-        self.speed_spin = QSpinBox()
-        self.speed_spin.setRange(1, 100)
-        self.speed_spin.setValue(30)
-        self.speed_spin.setFixedWidth(70)
-        self.speed_spin.valueChanged.connect(self._on_speed_changed)
-        speed_row.addWidget(self.speed_spin)
-        self.btn_apply_speed = QPushButton("적용")
-        self.btn_apply_speed.setFixedWidth(50)
-        self.btn_apply_speed.clicked.connect(self._apply_speed_now)
-        speed_row.addWidget(self.btn_apply_speed)
-        speed_row.addStretch()
-        move_layout.addLayout(speed_row)
-
-        # Approach / Retract
-        approach_row = QHBoxLayout()
-        self.use_approach = QCheckBox("접근/철수 사용")
-        self.use_approach.setChecked(True)
-        self.use_approach.setToolTip(
-            "체크 시 [Approach → Target → Retract] 3단계 모션을 큐에 추가\n" "Tool +Z 방향으로 위에 안전하게 다가갔다 → 정밀 접근 → 다시 위로"
-        )
-        approach_row.addWidget(self.use_approach)
-        approach_row.addWidget(QLabel("거리(mm):"))
-        self.approach_dist = QSpinBox()
-        self.approach_dist.setRange(5, 500)
-        self.approach_dist.setValue(50)
-        self.approach_dist.setFixedWidth(60)
-        approach_row.addWidget(self.approach_dist)
-        approach_row.addStretch()
-        move_layout.addLayout(approach_row)
-
-        # Z 최소 한계
-        zlim_row = QHBoxLayout()
-        zlim_row.addWidget(QLabel("Z 최소(mm):"))
-        self.z_min_spin = QSpinBox()
-        self.z_min_spin.setRange(-2000, 2000)
-        self.z_min_spin.setValue(5)
-        self.z_min_spin.setFixedWidth(80)
-        self.z_min_spin.setToolTip("타겟 Z 좌표가 이 값보다 낮으면 이동을 거부합니다 (바닥 충돌 방지)")
-        zlim_row.addWidget(self.z_min_spin)
-        zlim_row.addStretch()
-        move_layout.addLayout(zlim_row)
-
-        # 이동 버튼 (큰 파랑)
-        self.btn_move = QPushButton("선택 위치로 이동")
-        self.btn_move.setMinimumHeight(45)
-        self.btn_move.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #1976D2; color: white;")
-        self.btn_move.clicked.connect(self._execute_move)
-        self.btn_move.setEnabled(False)
-        move_layout.addWidget(self.btn_move)
-
-        # Home 이동/재설정 (한 줄)
-        home_row = QHBoxLayout()
-        self.btn_move_home = QPushButton("🏠 Home으로 이동")
-        self.btn_move_home.setMinimumHeight(40)
-        self.btn_move_home.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #2E7D32; color: white;")
-        self.btn_move_home.clicked.connect(self._move_to_home)
-        self.btn_move_home.setEnabled(False)
-        home_row.addWidget(self.btn_move_home, stretch=2)
-
-        self.btn_set_home = QPushButton("📍 Home\n재설정")
-        self.btn_set_home.setMinimumHeight(40)
-        self.btn_set_home.setStyleSheet("font-size: 11px; background-color: #689F38; color: white;")
-        self.btn_set_home.setToolTip("현재 로봇 TCP 위치를 새 Home으로 저장합니다")
-        self.btn_set_home.clicked.connect(self._set_home_to_current)
-        self.btn_set_home.setEnabled(False)
-        home_row.addWidget(self.btn_set_home, stretch=1)
-        move_layout.addLayout(home_row)
-
-        # 진공 그리퍼 제어 (Mixin 공용 — ON/OFF/블로우)
-        move_layout.addLayout(self._build_vacuum_row())
-
-        # 큐 비우기
-        self.btn_clear_queue = QPushButton("🗑 큐 비우기 (이전 명령 취소)")
-        self.btn_clear_queue.setStyleSheet("background-color: #F57C00; color: white; font-weight: bold;")
-        self.btn_clear_queue.clicked.connect(self._clear_motion_queue)
-        move_layout.addWidget(self.btn_clear_queue)
-
-        # 비상정지 (큰 빨강)
-        self.btn_estop = QPushButton("⛔ 비상정지 (Space)")
-        self.btn_estop.setMinimumHeight(60)
-        self.btn_estop.setStyleSheet("font-size: 16px; font-weight: bold; background-color: #D32F2F; color: white;")
-        self.btn_estop.clicked.connect(self._emergency_stop)
-        move_layout.addWidget(self.btn_estop)
-
-        # 비상정지 해제 (작게)
-        self.btn_estop_release = QPushButton("비상정지 해제")
-        self.btn_estop_release.setStyleSheet("background-color: #757575; color: white;")
-        self.btn_estop_release.clicked.connect(self._emergency_stop_release)
-        move_layout.addWidget(self.btn_estop_release)
-
-        info_layout.addWidget(move_group)
-
-        # ============================================================
-        # 시퀀스 큐 (자동 실행 시나리오)
-        # ============================================================
-        seq_group = QGroupBox("시퀀스 큐 (자동 실행 순서)")
-        seq_layout = QVBoxLayout(seq_group)
-
-        self.action_list = QListWidget()
-        self.action_list.setMinimumHeight(80)
-        self.action_list.setMaximumHeight(150)
-        seq_layout.addWidget(self.action_list)
-
-        # 추가 버튼들
-        add_row = QHBoxLayout()
-        self.btn_add_obj_to_seq = QPushButton("➕ 객체 이동 추가")
-        self.btn_add_obj_to_seq.setStyleSheet("background-color: #1976D2; color: white;")
-        self.btn_add_obj_to_seq.clicked.connect(self._enqueue_object_move)
-        self.btn_add_obj_to_seq.setEnabled(False)
-        add_row.addWidget(self.btn_add_obj_to_seq)
-
-        self.btn_add_home_to_seq = QPushButton("➕ Home 추가")
-        self.btn_add_home_to_seq.setStyleSheet("background-color: #2E7D32; color: white;")
-        self.btn_add_home_to_seq.clicked.connect(self._enqueue_home_to_sequence)
-        self.btn_add_home_to_seq.setEnabled(False)
-        add_row.addWidget(self.btn_add_home_to_seq)
-
-        add_row.addWidget(self._make_add_pick_to_seq_button())
-        seq_layout.addLayout(add_row)
-
-        # 제거 버튼들
-        del_row = QHBoxLayout()
-        self.btn_remove_seq_item = QPushButton("선택 항목 제거")
-        self.btn_remove_seq_item.clicked.connect(self._remove_selected_action)
-        del_row.addWidget(self.btn_remove_seq_item)
-
-        self.btn_clear_seq = QPushButton("시퀀스 비우기")
-        self.btn_clear_seq.clicked.connect(self._clear_user_queue)
-        del_row.addWidget(self.btn_clear_seq)
-        seq_layout.addLayout(del_row)
-
-        # 시작 버튼 (큰 파랑)
-        self.btn_start_seq = QPushButton("▶ 시퀀스 시작")
-        self.btn_start_seq.setMinimumHeight(45)
-        self.btn_start_seq.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #1565C0; color: white;")
-        self.btn_start_seq.clicked.connect(self._start_sequence)
-        seq_layout.addWidget(self.btn_start_seq)
-
-        info_layout.addWidget(seq_group)
+        # 로봇 이동 제어 + 시퀀스 큐 — 레이아웃은 RobotControlMixin 이 소유한다.
+        # (탭마다 복붙하지 않으므로 여기서 버튼을 옮기면 다른 탭에도 같이 반영됨)
+        info_layout.addWidget(self._build_move_group())
+        info_layout.addWidget(self._build_seq_group())
 
         info_layout.addStretch()
 

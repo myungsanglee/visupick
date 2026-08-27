@@ -6,13 +6,20 @@ RobotControlMixin — BinPickingTab과 CADMatchingTab이 공유하는 로봇 제
 (객체/인스턴스 명사 차이만 SEQ_OBJECT_NOUN 클래스 속성으로 매개변수화),
 각 탭은 `class XxxTab(RobotControlMixin, QWidget)` 형태로 상속한다.
 
-이 믹스인은 각 탭이 _init_ui에서 생성하는 다음 속성에 의존한다 (여기서 만들지 않음):
-  self.main (.robot, .home_pose, .statusBar()), self.speed_spin, self.z_min_spin,
-  self.move_mode_combo, self.use_approach, self.approach_dist, self.target_pose,
-  self.selected_idx, self.user_queue, self.action_list, self.btn_move,
-  self.btn_add_obj_to_seq, self.btn_move_home, self.btn_set_home,
-  self.btn_add_home_to_seq, self._current_mode
-또한 각 탭 고유의 self._refresh_mode_display()를 호출한다 (MRO상 탭 구현이 사용됨).
+동작뿐 아니라 **레이아웃도** 여기서 소유한다. 탭들이 똑같은 패널 코드를 복붙하는 바람에
+버튼 하나 옮기려면 탭마다 손을 대야 했고 배치가 조금씩 어긋났기 때문에, 다음 빌더로 합쳤다:
+  _build_move_group()  — `로봇 이동 제어` 그룹박스 통째로 (빈 픽킹 / CAD 매칭)
+  _build_seq_group()   — `시퀀스 큐` 그룹박스 통째로 (빈 픽킹 / CAD 매칭)
+  _build_home_row() / _build_place_row() / _build_safety_rows() / _build_vacuum_row()
+                       — 패널 전체는 안 맞고 일부 행만 필요한 탭(표면 추적)이 골라 쓰는 하위 빌더
+이 빌더들이 믹스인의 나머지 메서드가 참조하는 위젯을 만든다: speed_spin, z_min_spin,
+move_mode_combo, use_approach, approach_dist, action_list, btn_move, btn_move_home,
+btn_set_home, btn_move_place, btn_set_place, btn_add_obj_to_seq, btn_add_home_to_seq …
+
+빌더가 만들지 않아 **탭이 직접 준비해야 하는** 것: self.main (.robot, .home_pose,
+.statusBar()), self.target_pose, self.selected_idx, self.user_queue, self._current_mode.
+또한 각 탭 고유의 self._refresh_mode_display() 와 self._execute_move() 를 호출한다
+(MRO상 탭 구현이 사용됨).
 """
 
 import time
@@ -22,7 +29,19 @@ from typing import Optional, List, Dict, Tuple
 import numpy as np  # noqa: F401  (탭 코드와의 일관성 위해 유지)
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMessageBox, QPushButton, QHBoxLayout, QVBoxLayout, QLabel, QDoubleSpinBox
+from PySide6.QtWidgets import (
+    QMessageBox,
+    QPushButton,
+    QHBoxLayout,
+    QVBoxLayout,
+    QLabel,
+    QDoubleSpinBox,
+    QGroupBox,
+    QComboBox,
+    QCheckBox,
+    QSpinBox,
+    QListWidget,
+)
 
 from calibration import tcp_to_homogeneous
 from kuka_robot import is_auto_mode
@@ -102,15 +121,262 @@ class RobotControlMixin:
             self.btn_move_home.setEnabled(True)
             self.btn_add_home_to_seq.setEnabled(True)
         # 진공/픽 버튼 (탭이 _build_vacuum_row() 를 호출한 경우에만 존재)
-        for name in ("btn_vac_on", "btn_vac_off", "btn_vac_blow", "btn_pick_cycle", "btn_set_place", "btn_add_pick_to_seq", "btn_auto_start"):
+        for name in (
+            "btn_vac_on",
+            "btn_vac_off",
+            "btn_vac_blow",
+            "btn_pick_cycle",
+            "btn_set_place",
+            "btn_move_place",
+            "btn_add_pick_to_seq",
+            "btn_auto_start",
+        ):
             btn = getattr(self, name, None)
             if btn is not None:
                 btn.setEnabled(True)
         self._refresh_mode_display()
 
     # ============================================================
+    # 공용 UI 빌더 — "로봇 이동 제어" / "시퀀스 큐" 패널
+    # ============================================================
+    #
+    # 예전에는 이 두 패널을 각 탭의 _init_ui 가 **똑같은 코드로 각각** 만들었다.
+    # 그래서 버튼 하나를 옮기려면 탭마다 손으로 고쳐야 했고, 실제로 배치가
+    # 조금씩 어긋나 있었다. 레이아웃도 동작처럼 여기 한 곳에 모아서,
+    # **한 번 고치면 이 빌더를 쓰는 모든 탭에 동시에 반영**되게 한다.
+    #
+    # 사용법 (탭의 _init_ui):
+    #     info_layout.addWidget(self._build_move_group())
+    #     info_layout.addWidget(self._build_seq_group())
+    #
+    # 패널 통째로는 안 맞고 일부 행만 필요한 탭(표면 추적 = "실행 제어" 그룹)은
+    # 하위 빌더(_build_home_row / _build_place_row / _build_safety_rows)만 골라 쓴다.
+
+    # 이동 방식 콤보 항목 (인덱스 0 = LIN 이 기본).
+    MOVE_MODE_ITEMS = ["LIN (직선, 추천)", "PTP (최단 경로)"]
+    # 속도(%) 초기값 — AUT 모드에서는 _effective_speed 가 50% 로 한 번 더 제한한다.
+    MOVE_SPEED_DEFAULT = 30
+    # Z 최소 한계(mm) 초기값 — 바닥 충돌 방지.
+    MOVE_Z_MIN_DEFAULT = 5
+
+    def _build_move_group(self) -> QGroupBox:
+        """`로봇 이동 제어` 그룹박스를 통째로 생성해서 돌려준다.
+
+        구성 (위 → 아래):
+            이동 방식 / 속도(%) / 접근·철수 / Z 최소(mm) / 흡착대기(s)
+            → 선택 위치로 이동
+            → [Home 으로 이동 | Home 재설정]
+            → [놓기 위치로 이동 | 놓기 위치 재설정]
+            → 진공 그리퍼 행 + 픽 실행
+            → 큐 비우기 / 비상정지 / 비상정지 해제
+
+        여기서 만드는 위젯은 믹스인의 다른 메서드들이 이름으로 참조한다
+        (speed_spin, z_min_spin, move_mode_combo, use_approach, approach_dist,
+        btn_move, btn_move_home, btn_set_home, btn_move_place, btn_set_place …).
+        """
+        group = QGroupBox("로봇 이동 제어")
+        layout = QVBoxLayout(group)
+
+        # --- 이동 방식 (LIN = 직선 보간 / PTP = 관절 최단 경로) ---
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("방식:"))
+        self.move_mode_combo = QComboBox()
+        self.move_mode_combo.addItems(self.MOVE_MODE_ITEMS)
+        mode_row.addWidget(self.move_mode_combo)
+        layout.addLayout(mode_row)
+
+        # --- 속도(%) — 값을 바꾸면 즉시 로봇에 적용($OV_PRO) ---
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("속도(%):"))
+        self.speed_spin = QSpinBox()
+        self.speed_spin.setRange(1, 100)
+        self.speed_spin.setValue(self.MOVE_SPEED_DEFAULT)
+        self.speed_spin.setFixedWidth(70)
+        self.speed_spin.valueChanged.connect(self._on_speed_changed)
+        speed_row.addWidget(self.speed_spin)
+        self.btn_apply_speed = QPushButton("적용")
+        self.btn_apply_speed.setFixedWidth(50)
+        self.btn_apply_speed.clicked.connect(self._apply_speed_now)
+        speed_row.addWidget(self.btn_apply_speed)
+        speed_row.addStretch()
+        layout.addLayout(speed_row)
+
+        # --- 접근/철수 (Approach → Target → Retract 3단계) ---
+        approach_row = QHBoxLayout()
+        self.use_approach = QCheckBox("접근/철수 사용")
+        self.use_approach.setChecked(True)
+        self.use_approach.setToolTip(
+            "체크 시 [Approach → Target → Retract] 3단계 모션을 큐에 추가\n" "Tool +Z 방향으로 위에 안전하게 다가갔다 → 정밀 접근 → 다시 위로"
+        )
+        approach_row.addWidget(self.use_approach)
+        approach_row.addWidget(QLabel("거리(mm):"))
+        self.approach_dist = QSpinBox()
+        self.approach_dist.setRange(5, 500)
+        self.approach_dist.setValue(50)
+        self.approach_dist.setFixedWidth(60)
+        approach_row.addWidget(self.approach_dist)
+        approach_row.addStretch()
+        layout.addLayout(approach_row)
+
+        # --- Z 최소 한계 (안전: 바닥 충돌 방지) ---
+        zlim_row = QHBoxLayout()
+        zlim_row.addWidget(QLabel("Z 최소(mm):"))
+        self.z_min_spin = QSpinBox()
+        self.z_min_spin.setRange(-2000, 2000)
+        self.z_min_spin.setValue(self.MOVE_Z_MIN_DEFAULT)
+        self.z_min_spin.setFixedWidth(80)
+        self.z_min_spin.setToolTip("타겟 Z 좌표가 이 값보다 낮으면 이동을 거부합니다 (바닥 충돌 방지)")
+        zlim_row.addWidget(self.z_min_spin)
+        zlim_row.addStretch()
+        layout.addLayout(zlim_row)
+
+        # --- 흡착대기(s) — Z 최소와 같은 "설정" 성격이라 바로 아래 배치 ---
+        dwell_row = QHBoxLayout()
+        dwell_row.addWidget(QLabel("흡착대기(s):"))
+        dwell_row.addWidget(self._make_dwell_spin())
+        dwell_row.addStretch()
+        layout.addLayout(dwell_row)
+        # 이 그룹이 흡착대기·놓기 버튼을 자체 행으로 만들었으므로, 아래
+        # _build_vacuum_row() 가 같은 위젯을 또 만들지 않게 인스턴스 속성으로 덮어쓴다.
+        self.DWELL_SPIN_IN_OWN_ROW = True
+        self.PLACE_BUTTONS_IN_OWN_ROW = True
+
+        # --- 선택 위치로 이동 (큰 파랑) ---
+        self.btn_move = QPushButton("선택 위치로 이동")
+        self.btn_move.setMinimumHeight(45)
+        self.btn_move.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #1976D2; color: white;")
+        self.btn_move.clicked.connect(self._execute_move)
+        self.btn_move.setEnabled(False)
+        layout.addWidget(self.btn_move)
+
+        layout.addLayout(self._build_home_row())
+        layout.addLayout(self._build_place_row())
+        layout.addLayout(self._build_vacuum_row())
+        self._build_safety_rows(layout)
+        return group
+
+    def _build_home_row(self) -> QHBoxLayout:
+        """[🏠 Home 으로 이동 | 📍 Home 재설정] 한 줄 (2:1 비율)."""
+        row = QHBoxLayout()
+
+        self.btn_move_home = QPushButton("🏠 Home으로 이동")
+        self.btn_move_home.setMinimumHeight(40)
+        self.btn_move_home.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #2E7D32; color: white;")
+        self.btn_move_home.setToolTip("저장된 Home 위치로 PTP 이동합니다")
+        self.btn_move_home.clicked.connect(self._move_to_home)
+        self.btn_move_home.setEnabled(False)
+        row.addWidget(self.btn_move_home, stretch=2)
+
+        self.btn_set_home = QPushButton("📍 Home\n재설정")
+        self.btn_set_home.setMinimumHeight(40)
+        self.btn_set_home.setStyleSheet("font-size: 11px; background-color: #689F38; color: white;")
+        self.btn_set_home.setToolTip("현재 로봇 TCP 위치를 새 Home으로 저장합니다")
+        self.btn_set_home.clicked.connect(self._set_home_to_current)
+        self.btn_set_home.setEnabled(False)
+        row.addWidget(self.btn_set_home, stretch=1)
+        return row
+
+    def _build_place_row(self) -> QHBoxLayout:
+        """[📦 놓기 위치로 이동 | 📍 놓기 위치 재설정] 한 줄 — Home 행과 같은 구성/크기."""
+        row = QHBoxLayout()
+
+        self.btn_move_place = QPushButton("📦 놓기 위치로 이동")
+        self.btn_move_place.setMinimumHeight(40)
+        self.btn_move_place.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #00695C; color: white;")
+        self.btn_move_place.setToolTip("저장된 놓기(Place) 위치로 PTP 이동합니다")
+        self.btn_move_place.clicked.connect(self._move_to_place)
+        self.btn_move_place.setEnabled(False)
+        row.addWidget(self.btn_move_place, stretch=2)
+
+        self.btn_set_place = QPushButton("📍 놓기 위치\n재설정")
+        self.btn_set_place.setMinimumHeight(40)
+        self.btn_set_place.setStyleSheet("font-size: 11px; background-color: #26A69A; color: white;")
+        self.btn_set_place.setToolTip("현재 로봇 TCP 위치를 '놓기(Place) 위치'로 저장 — 픽 사이클이 여기에 내려놓음")
+        self.btn_set_place.clicked.connect(self._set_place_to_current)
+        self.btn_set_place.setEnabled(False)
+        row.addWidget(self.btn_set_place, stretch=1)
+        return row
+
+    def _build_safety_rows(self, layout: QVBoxLayout) -> None:
+        """큐 비우기 / 비상정지 / 비상정지 해제 — 항상 패널 맨 아래에 붙는 3개 버튼."""
+        self.btn_clear_queue = QPushButton("🗑 큐 비우기 (이전 명령 취소)")
+        self.btn_clear_queue.setStyleSheet("background-color: #F57C00; color: white; font-weight: bold;")
+        self.btn_clear_queue.setToolTip("KRL 모션 큐에 남아 있는 이전 명령을 모두 취소합니다")
+        self.btn_clear_queue.clicked.connect(self._clear_motion_queue)
+        layout.addWidget(self.btn_clear_queue)
+
+        self.btn_estop = QPushButton("⛔ 비상정지 (Space)")
+        self.btn_estop.setMinimumHeight(60)
+        self.btn_estop.setStyleSheet("font-size: 16px; font-weight: bold; background-color: #D32F2F; color: white;")
+        self.btn_estop.clicked.connect(self._emergency_stop)
+        layout.addWidget(self.btn_estop)
+
+        self.btn_estop_release = QPushButton("비상정지 해제")
+        self.btn_estop_release.setStyleSheet("background-color: #757575; color: white;")
+        self.btn_estop_release.clicked.connect(self._emergency_stop_release)
+        layout.addWidget(self.btn_estop_release)
+
+    def _build_seq_group(self) -> QGroupBox:
+        """`시퀀스 큐` 그룹박스를 통째로 생성해서 돌려준다.
+
+        시퀀스 큐 = 사용자가 Python 쪽에서 미리 쌓아두는 액션 시나리오
+        (객체 이동 / Home / 픽). `▶ 시퀀스 시작` 을 누르면 위에서부터 차례로
+        로봇 모션 큐에 흘려보낸다 — 실행 로직은 _start_sequence 이하 참고.
+        """
+        group = QGroupBox("시퀀스 큐 (자동 실행 순서)")
+        layout = QVBoxLayout(group)
+
+        self.action_list = QListWidget()
+        self.action_list.setMinimumHeight(80)
+        self.action_list.setMaximumHeight(150)
+        layout.addWidget(self.action_list)
+
+        # --- 추가 버튼들 ---
+        add_row = QHBoxLayout()
+        self.btn_add_obj_to_seq = QPushButton("➕ 객체 이동 추가")
+        self.btn_add_obj_to_seq.setStyleSheet("background-color: #1976D2; color: white;")
+        self.btn_add_obj_to_seq.clicked.connect(self._enqueue_object_move)
+        self.btn_add_obj_to_seq.setEnabled(False)
+        add_row.addWidget(self.btn_add_obj_to_seq)
+
+        self.btn_add_home_to_seq = QPushButton("➕ Home 추가")
+        self.btn_add_home_to_seq.setStyleSheet("background-color: #2E7D32; color: white;")
+        self.btn_add_home_to_seq.clicked.connect(self._enqueue_home_to_sequence)
+        self.btn_add_home_to_seq.setEnabled(False)
+        add_row.addWidget(self.btn_add_home_to_seq)
+
+        add_row.addWidget(self._make_add_pick_to_seq_button())
+        layout.addLayout(add_row)
+
+        # --- 제거 버튼들 ---
+        del_row = QHBoxLayout()
+        self.btn_remove_seq_item = QPushButton("선택 항목 제거")
+        self.btn_remove_seq_item.clicked.connect(self._remove_selected_action)
+        del_row.addWidget(self.btn_remove_seq_item)
+
+        self.btn_clear_seq = QPushButton("시퀀스 비우기")
+        self.btn_clear_seq.clicked.connect(self._clear_user_queue)
+        del_row.addWidget(self.btn_clear_seq)
+        layout.addLayout(del_row)
+
+        # --- 시작 버튼 (큰 파랑) ---
+        self.btn_start_seq = QPushButton("▶ 시퀀스 시작")
+        self.btn_start_seq.setMinimumHeight(45)
+        self.btn_start_seq.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #1565C0; color: white;")
+        self.btn_start_seq.clicked.connect(self._start_sequence)
+        layout.addWidget(self.btn_start_seq)
+        return group
+
+    # ============================================================
     # 진공 그리퍼 (SMC ZK2 — $OUT[7]=VAC_ON / $OUT[8]=VAC_Blow)
     # ============================================================
+
+    # 놓기 위치 버튼 / 흡착대기 스핀이 **이미 다른 행에 만들어졌는지** 표시하는 플래그.
+    # True 면 아래 _build_vacuum_row() 가 같은 위젯을 또 만들지 않는다 (중복 방지).
+    # _build_move_group() 을 쓰는 탭(빈 픽킹·CAD 매칭)은 그 안에서 자동으로 True 가 되고,
+    # 진공 행만 따로 가져다 쓰는 탭(표면 추적)은 기본값 False 라 예전처럼 한 줄에 모인다.
+    PLACE_BUTTONS_IN_OWN_ROW = False
+    DWELL_SPIN_IN_OWN_ROW = False
 
     def _build_vacuum_row(self) -> QVBoxLayout:
         """진공 그리퍼 + 픽 사이클 UI 생성 (2행). 탭의 _init_ui 에서 호출해 레이아웃에 추가.
@@ -152,25 +418,35 @@ class RobotControlMixin:
         )
         self.btn_pick_cycle.clicked.connect(self._execute_pick_cycle)
         self.btn_pick_cycle.setEnabled(False)
-        pick_row.addWidget(self.btn_pick_cycle)
+        # stretch=1 — 흡착대기·놓기 버튼을 다른 곳으로 옮긴 탭에서는 이 버튼이
+        # 남는 가로 공간을 채운다 (빈 공간이 생기지 않게).
+        pick_row.addWidget(self.btn_pick_cycle, stretch=1)
 
-        self.btn_set_place = QPushButton("📍 놓기 위치 저장")
-        self.btn_set_place.setToolTip("현재 로봇 TCP 위치를 '놓기(Place) 위치'로 저장 — 픽 사이클이 여기에 내려놓음")
-        self.btn_set_place.clicked.connect(self._set_place_to_current)
-        self.btn_set_place.setEnabled(False)
-        pick_row.addWidget(self.btn_set_place)
+        if not self.DWELL_SPIN_IN_OWN_ROW:
+            # 이 탭은 흡착대기를 따로 배치하지 않으므로 여기에 만든다
+            pick_row.addWidget(QLabel("흡착대기(s)"))
+            pick_row.addWidget(self._make_dwell_spin())
 
-        pick_row.addWidget(QLabel("흡착대기(s)"))
+        if not self.PLACE_BUTTONS_IN_OWN_ROW:
+            # 이 탭은 놓기 버튼을 따로 배치하지 않으므로 여기에 만든다
+            self.btn_set_place = QPushButton("📍 놓기 위치 저장")
+            self.btn_set_place.setToolTip("현재 로봇 TCP 위치를 '놓기(Place) 위치'로 저장 — 픽 사이클이 여기에 내려놓음")
+            self.btn_set_place.clicked.connect(self._set_place_to_current)
+            self.btn_set_place.setEnabled(False)
+            pick_row.addWidget(self.btn_set_place)
+
+        vbox.addLayout(pick_row)
+        return vbox
+
+    def _make_dwell_spin(self) -> QDoubleSpinBox:
+        """흡착대기(s) 스핀 생성. 탭이 원하는 위치에 직접 배치할 수 있도록 분리했다."""
         self.vac_dwell_spin = QDoubleSpinBox()
         self.vac_dwell_spin.setRange(0.1, 5.0)
         self.vac_dwell_spin.setSingleStep(0.1)
         self.vac_dwell_spin.setValue(0.5)
-        self.vac_dwell_spin.setFixedWidth(70)
+        self.vac_dwell_spin.setFixedWidth(80)
         self.vac_dwell_spin.setToolTip("진공 ON 후 상승 전 대기 시간 (흡착이 자리잡을 시간)")
-        pick_row.addWidget(self.vac_dwell_spin)
-        pick_row.addStretch()
-        vbox.addLayout(pick_row)
-        return vbox
+        return self.vac_dwell_spin
 
     def _make_add_pick_to_seq_button(self) -> QPushButton:
         """'픽(잡기→놓기)을 시퀀스 큐에 추가' 버튼 생성. 시퀀스 큐 그룹의 추가 버튼 행에
@@ -600,6 +876,46 @@ class RobotControlMixin:
             self.main.statusBar().showMessage(f"🏠 Home 이동 명령 큐에 추가됨 (slot={slot})")
         except Exception as e:
             QMessageBox.critical(self, "오류", f"Home 이동 실패:\n{e}")
+
+    def _move_to_place(self):
+        """저장된 놓기(Place) 위치로 PTP 이동. Home 이동과 같은 패턴 (확인 다이얼로그 + Z 검증)."""
+        if self.main.robot is None:
+            QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
+            return
+        place = getattr(self.main, "place_pose", None)
+        if place is None:
+            QMessageBox.warning(
+                self,
+                "오류",
+                "놓기(Place) 위치가 저장되지 않았습니다.\n로봇을 놓을 자리로 조그한 뒤 '놓기 위치 재설정'을 먼저 누르세요.",
+            )
+            return
+
+        if not self._validate_z(place["z"]):
+            return
+        speed = self._effective_speed(self.speed_spin.value())
+        msg = (
+            f"📦 놓기 위치로 이동\n\n"
+            f"방식: PTP (관절)\n"
+            f"속도: {speed}%" + (" (AUT 50% 상한 적용)" if self._is_aut_mode() else "") + "\n\n"
+            f"목표:\n"
+            f"  X: {place['x']:.2f}\n  Y: {place['y']:.2f}\n  Z: {place['z']:.2f}\n"
+            f"  A: {place['a']:.2f}\n  B: {place['b']:.2f}\n  C: {place['c']:.2f}\n\n"
+            f"진행하시겠습니까?"
+        )
+        ret = QMessageBox.question(self, "놓기 위치 이동 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+
+        try:
+            self.main.robot.set_speed(speed)
+            slot = self.main.robot.add_move_ptp(place["x"], place["y"], place["z"], place["a"], place["b"], place["c"])
+            if slot is None:
+                QMessageBox.critical(self, "오류", "놓기 위치 이동 명령 큐에 추가 실패")
+                return
+            self.main.statusBar().showMessage(f"📦 놓기 위치 이동 명령 큐에 추가됨 (slot={slot})")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"놓기 위치 이동 실패:\n{e}")
 
     def _clear_motion_queue(self):
         """KRL 큐의 모든 슬롯을 0으로 리셋 (대기 중인 이동 취소)."""

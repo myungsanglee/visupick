@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QSplitter,
     QCheckBox,
-    QListWidget,
     QScrollArea,
     QLineEdit,
     QDialog,
@@ -330,6 +329,41 @@ class GraspConfigDialog(QDialog):
             "이미지에서 잰 방향 각도를 base yaw(A)로 바꿀 때 더하는 보정 상수.\n카메라 장착 방향에 따른 고정 오프셋 — 한 번 맞춰두면 됨."
         )
         yaw_form.addRow("A 보정 오프셋", self.a_offset)
+
+        # --- Z축 회전 제한 (호스/케이블 감김 방지) ---
+        self.yaw_limit_chk = QCheckBox("Z 회전 제한 사용")
+        self.yaw_limit_chk.setToolTip(
+            "진공 호스가 팔을 따라 붙어 있어 손목이 계속 한 방향으로 돌면 줄이 감긴다.\n"
+            "A(Z축 회전)를 아래 범위 안으로 강제하고, 못 맞추는 파지는 자동 배제한다.\n"
+            "끄면 예전처럼 제한 없이 계산한다 (감김 위험)."
+        )
+        yaw_form.addRow(self.yaw_limit_chk)
+
+        self.yaw_min = QDoubleSpinBox()
+        self.yaw_min.setRange(-720, 720)
+        self.yaw_min.setDecimals(1)
+        self.yaw_min.setSuffix(" °")
+        self.yaw_max = QDoubleSpinBox()
+        self.yaw_max.setRange(-720, 720)
+        self.yaw_max.setDecimals(1)
+        self.yaw_max.setSuffix(" °")
+        lim_row = QHBoxLayout()
+        lim_row.addWidget(self.yaw_min)
+        lim_row.addWidget(QLabel("~"))
+        lim_row.addWidget(self.yaw_max)
+        lim_row.addStretch()
+        lim_w = QWidget()
+        lim_row.setContentsMargins(0, 0, 0, 0)
+        lim_w.setLayout(lim_row)
+        yaw_form.addRow("허용 A 범위", lim_w)
+
+        self.yaw_allow_180 = QCheckBox("180° 뒤집힌 자세도 허용")
+        self.yaw_allow_180.setToolTip(
+            "흡착 패드는 원형이라 툴을 Z축으로 180° 뒤집어도 같은 지점을 잡는다.\n"
+            "허용하면 범위를 맞출 선택지가 넓어져 배제되는 파지가 줄어든다.\n"
+            "다만 툴 X 방향이 반대가 되므로 '여는 방향 정렬'이 중요하면 끈다."
+        )
+        yaw_form.addRow(self.yaw_allow_180)
         root.addWidget(yaw_group)
 
         # --- 티칭 ---
@@ -352,6 +386,7 @@ class GraspConfigDialog(QDialog):
         self.pos_mode.currentIndexChanged.connect(self._update_enabled)
         self.approach.currentIndexChanged.connect(self._update_enabled)
         self.yaw_source.currentIndexChanged.connect(self._update_enabled)
+        self.yaw_limit_chk.stateChanged.connect(self._update_enabled)
         self._update_enabled()
 
     @staticmethod
@@ -371,6 +406,10 @@ class GraspConfigDialog(QDialog):
         self._set_combo(self.yaw_source, cfg.get("yaw_source", "opening"))
         self.a_fixed.setValue(cfg.get("a_fixed", 0.0))
         self.a_offset.setValue(cfg.get("a_offset", 0.0))
+        self.yaw_limit_chk.setChecked(bool(cfg.get("yaw_limit", True)))
+        self.yaw_min.setValue(cfg.get("yaw_min", -180.0))
+        self.yaw_max.setValue(cfg.get("yaw_max", 180.0))
+        self.yaw_allow_180.setChecked(bool(cfg.get("yaw_allow_180", False)))
 
     def _update_enabled(self):
         is_plane = self.pos_mode.currentData() == "plane"
@@ -383,6 +422,10 @@ class GraspConfigDialog(QDialog):
         self.yaw_source.setEnabled(is_vert)
         self.a_fixed.setEnabled(is_vert and self.yaw_source.currentData() == "fixed")
         self.a_offset.setEnabled(is_vert and self.yaw_source.currentData() != "fixed")
+        on = self.yaw_limit_chk.isChecked()
+        self.yaw_min.setEnabled(on)
+        self.yaw_max.setEnabled(on)
+        self.yaw_allow_180.setEnabled(on)
 
     def _teach_from_current(self):
         if self._get_tcp is None:
@@ -414,6 +457,10 @@ class GraspConfigDialog(QDialog):
             "yaw_source": self.yaw_source.currentData(),
             "a_fixed": self.a_fixed.value(),
             "a_offset": self.a_offset.value(),
+            "yaw_limit": self.yaw_limit_chk.isChecked(),
+            "yaw_min": self.yaw_min.value(),
+            "yaw_max": self.yaw_max.value(),
+            "yaw_allow_180": self.yaw_allow_180.isChecked(),
         }
 
 
@@ -477,6 +524,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.bin_box = None
         self._bin_box_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin_box.json")
         self._load_bin_box()
+        self._grasp_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grasp_config.json")
 
         # Grasp(파지) 설정 — 검출된 객체를 어떻게 잡을지 규칙. 기본값은 기존 동작
         # (3D 중심 + 표면 법선). 투명/평면 객체는 다이얼로그에서 아래로 바꾼다:
@@ -493,7 +541,25 @@ class BinPickingTab(RobotControlMixin, QWidget):
             "yaw_source": "opening",  # vertical 일 때 A 결정: opening | obb_long | fixed
             "a_fixed": 0.0,  # yaw_source=fixed 일 때 A(deg)
             "a_offset": 0.0,  # 이미지 각도 → base yaw 보정 상수(deg)
+            # Z축 회전(A) 제한 — 진공 호스/케이블이 손목에 감기는 것을 막는다.
+            # ABC unwrap 은 "현재 자세에 가장 가까운 표현"을 고르므로 A 가 190°, 200°…
+            # 로 누적될 수 있다. 아래 범위를 벗어나면 같은 자세의 다른 표현(±360,
+            # 선택 시 ±180)으로 되돌리고, 그래도 안 되면 그 파지를 배제한다.
+            # 기본은 **끔**. 켜면 범위 밖 각도의 객체는 파지 후보에서 배제된다.
+            # 주의: 이 제한만으로는 호스 감김을 못 막는다. 손목이 어느 쪽으로 도는지는
+            # 우리가 보내는 Cartesian A 가 아니라 로봇의 관절 해(解) 선택이 정하기 때문이다
+            # (A=-170° 와 +190° 는 같은 자세). 감김 제어가 필요하면 $AXIS_ACT 로 A6 를
+            # 직접 읽어 관절 제어(add_move_axis)로 가야 한다 — 미구현.
+            "yaw_limit": False,
+            "yaw_min": -180.0,  # 허용 A 최소(deg) — 제한을 켰을 때만 의미
+            "yaw_max": 180.0,  # 허용 A 최대(deg)
+            # 180° 뒤집힌 자세 허용 여부. 흡착 패드는 원형이라 파지 지점은 같지만
+            # **툴 X 방향이 반대**가 되어 '여는 방향 정렬'이 뒤집힌다. 배치 방향
+            # 일관성이 이 시스템의 목적이므로 기본은 끔 — 범위를 못 맞추는 파지는
+            # 뒤집는 대신 그냥 건너뛴다. 방향이 상관없으면 켜서 성공률을 올릴 수 있다.
+            "yaw_allow_180": False,
         }
+        self._load_grasp_config()  # 저장된 설정 복원 (Z 회전 제한 등 안전 설정이 재시작에 살아남도록)
 
         # 시퀀스 큐 (Python에서 만드는 액션 시나리오)
         # 각 액션: {"type": "object_move"|"home", "label": str, "target": dict, ...}
@@ -759,160 +825,10 @@ class BinPickingTab(RobotControlMixin, QWidget):
             sel_layout.addLayout(cell, r, c)
         info_layout.addWidget(sel_group)
 
-        # 로봇 이동 제어
-        move_group = QGroupBox("로봇 이동 제어")
-        move_layout = QVBoxLayout(move_group)
-
-        # 이동 방식 + 속도
-        opt_row = QHBoxLayout()
-        opt_row.addWidget(QLabel("방식:"))
-        self.move_mode_combo = QComboBox()
-        self.move_mode_combo.addItems(["LIN (직선, 추천)", "PTP (최단 경로)"])
-        opt_row.addWidget(self.move_mode_combo)
-        move_layout.addLayout(opt_row)
-
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("속도(%):"))
-        self.speed_spin = QSpinBox()
-        self.speed_spin.setRange(1, 100)
-        self.speed_spin.setValue(30)
-        self.speed_spin.setFixedWidth(70)
-        # 값 변경 시 즉시 로봇에 적용
-        self.speed_spin.valueChanged.connect(self._on_speed_changed)
-        speed_row.addWidget(self.speed_spin)
-        self.btn_apply_speed = QPushButton("적용")
-        self.btn_apply_speed.setFixedWidth(50)
-        self.btn_apply_speed.clicked.connect(self._apply_speed_now)
-        speed_row.addWidget(self.btn_apply_speed)
-        speed_row.addStretch()
-        move_layout.addLayout(speed_row)
-
-        # 접근/철수 옵션
-        approach_row = QHBoxLayout()
-        self.use_approach = QCheckBox("접근/철수 사용")
-        self.use_approach.setChecked(True)
-        self.use_approach.setToolTip(
-            "체크 시 [Approach → Target → Retract] 3단계 모션을 큐에 추가\n" "법선 방향으로 위에 안전하게 다가갔다 → 정밀 접근 → 다시 위로"
-        )
-        approach_row.addWidget(self.use_approach)
-        approach_row.addWidget(QLabel("거리(mm):"))
-        self.approach_dist = QSpinBox()
-        self.approach_dist.setRange(5, 500)
-        self.approach_dist.setValue(50)
-        self.approach_dist.setFixedWidth(60)
-        approach_row.addWidget(self.approach_dist)
-        approach_row.addStretch()
-        move_layout.addLayout(approach_row)
-
-        # Z 최소 한계 (안전: 바닥 충돌 방지)
-        zlim_row = QHBoxLayout()
-        zlim_row.addWidget(QLabel("Z 최소(mm):"))
-        self.z_min_spin = QSpinBox()
-        self.z_min_spin.setRange(-2000, 2000)
-        self.z_min_spin.setValue(5)
-        self.z_min_spin.setFixedWidth(80)
-        self.z_min_spin.setToolTip("타겟 Z 좌표가 이 값보다 낮으면 이동을 거부합니다 (바닥 충돌 방지)")
-        zlim_row.addWidget(self.z_min_spin)
-        zlim_row.addStretch()
-        move_layout.addLayout(zlim_row)
-
-        # 이동 버튼
-        self.btn_move_robot = QPushButton("선택 위치로 이동")
-        self.btn_move_robot.setMinimumHeight(45)
-        self.btn_move_robot.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #1976D2; color: white;")
-        self.btn_move_robot.clicked.connect(self._execute_move)
-        self.btn_move_robot.setEnabled(False)
-        move_layout.addWidget(self.btn_move_robot)
-
-        # Home 이동/재설정 버튼 (한 줄에 배치)
-        home_row = QHBoxLayout()
-
-        self.btn_move_home = QPushButton("🏠 Home으로 이동")
-        self.btn_move_home.setMinimumHeight(40)
-        self.btn_move_home.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #2E7D32; color: white;")
-        self.btn_move_home.clicked.connect(self._move_to_home)
-        self.btn_move_home.setEnabled(False)
-        home_row.addWidget(self.btn_move_home, stretch=2)
-
-        self.btn_set_home = QPushButton("📍 Home\n재설정")
-        self.btn_set_home.setMinimumHeight(40)
-        self.btn_set_home.setStyleSheet("font-size: 11px; background-color: #689F38; color: white;")
-        self.btn_set_home.setToolTip("현재 로봇 TCP 위치를 새 Home으로 저장합니다")
-        self.btn_set_home.clicked.connect(self._set_home_to_current)
-        self.btn_set_home.setEnabled(False)
-        home_row.addWidget(self.btn_set_home, stretch=1)
-
-        move_layout.addLayout(home_row)
-
-        # 진공 그리퍼 제어 (Mixin 공용 — ON/OFF/블로우)
-        move_layout.addLayout(self._build_vacuum_row())
-
-        # 큐 비우기 버튼 (이전 명령 취소)
-        self.btn_clear_queue = QPushButton("🗑 큐 비우기 (이전 명령 취소)")
-        self.btn_clear_queue.setStyleSheet("background-color: #F57C00; color: white; font-weight: bold;")
-        self.btn_clear_queue.clicked.connect(self._clear_motion_queue)
-        move_layout.addWidget(self.btn_clear_queue)
-
-        # 비상정지 버튼 (큼지막한 빨간색)
-        self.btn_estop = QPushButton("⛔ 비상정지 (Space)")
-        self.btn_estop.setMinimumHeight(60)
-        self.btn_estop.setStyleSheet("font-size: 16px; font-weight: bold; background-color: #D32F2F; color: white;")
-        self.btn_estop.clicked.connect(self._emergency_stop)
-        move_layout.addWidget(self.btn_estop)
-
-        # 비상정지 해제 버튼 (작게)
-        self.btn_estop_release = QPushButton("비상정지 해제")
-        self.btn_estop_release.setStyleSheet("background-color: #757575; color: white;")
-        self.btn_estop_release.clicked.connect(self._emergency_stop_release)
-        move_layout.addWidget(self.btn_estop_release)
-
-        info_layout.addWidget(move_group)
-
-        # === 시퀀스 큐 (자동 실행 시나리오) ===
-        seq_group = QGroupBox("시퀀스 큐 (자동 실행 순서)")
-        seq_layout = QVBoxLayout(seq_group)
-
-        self.action_list = QListWidget()
-        self.action_list.setMinimumHeight(80)
-        self.action_list.setMaximumHeight(150)
-        seq_layout.addWidget(self.action_list)
-
-        # 추가 버튼들
-        add_row = QHBoxLayout()
-        self.btn_add_obj_to_seq = QPushButton("➕ 객체 이동 추가")
-        self.btn_add_obj_to_seq.setStyleSheet("background-color: #1976D2; color: white;")
-        self.btn_add_obj_to_seq.clicked.connect(self._enqueue_object_move)
-        self.btn_add_obj_to_seq.setEnabled(False)
-        add_row.addWidget(self.btn_add_obj_to_seq)
-
-        self.btn_add_home_to_seq = QPushButton("➕ Home 추가")
-        self.btn_add_home_to_seq.setStyleSheet("background-color: #2E7D32; color: white;")
-        self.btn_add_home_to_seq.clicked.connect(self._enqueue_home_to_sequence)
-        self.btn_add_home_to_seq.setEnabled(False)
-        add_row.addWidget(self.btn_add_home_to_seq)
-
-        add_row.addWidget(self._make_add_pick_to_seq_button())
-        seq_layout.addLayout(add_row)
-
-        # 제거 버튼들
-        del_row = QHBoxLayout()
-        self.btn_remove_seq_item = QPushButton("선택 항목 제거")
-        self.btn_remove_seq_item.clicked.connect(self._remove_selected_action)
-        del_row.addWidget(self.btn_remove_seq_item)
-
-        self.btn_clear_seq = QPushButton("시퀀스 비우기")
-        self.btn_clear_seq.clicked.connect(self._clear_user_queue)
-        del_row.addWidget(self.btn_clear_seq)
-        seq_layout.addLayout(del_row)
-
-        # 시작 버튼 (큰 파란색)
-        self.btn_start_seq = QPushButton("▶ 시퀀스 시작")
-        self.btn_start_seq.setMinimumHeight(45)
-        self.btn_start_seq.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #1565C0; color: white;")
-        self.btn_start_seq.clicked.connect(self._start_sequence)
-        seq_layout.addWidget(self.btn_start_seq)
-
-        info_layout.addWidget(seq_group)
+        # 로봇 이동 제어 + 시퀀스 큐 — 레이아웃은 RobotControlMixin 이 소유한다.
+        # (탭마다 복붙하지 않으므로 여기서 버튼을 옮기면 다른 탭에도 같이 반영됨)
+        info_layout.addWidget(self._build_move_group())
+        info_layout.addWidget(self._build_seq_group())
 
         # === 연속 픽 (자동 반복) — 캡처→검출→선택→픽→놓기 를 빌 때까지 반복 ===
         auto_group = QGroupBox("연속 픽 (자동 반복)")
@@ -1079,7 +995,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.selected_idx = None
         self.target_pose = None
         self._tcp_viz_actors.clear()  # 3D 뷰가 곧 clear되니 추적 리스트도 비움
-        self.btn_move_robot.setEnabled(False)
+        self.btn_move.setEnabled(False)
         self.det_table.setRowCount(0)
         for axis in ["X", "Y", "Z", "A", "B", "C"]:
             self.robot_labels[axis].setText("---")
@@ -1644,7 +1560,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             for axis in ["X", "Y", "Z", "A", "B", "C"]:
                 self.robot_labels[axis].setText("---")
             self.target_pose = None
-            self.btn_move_robot.setEnabled(False)
+            self.btn_move.setEnabled(False)
             return
 
         for axis in ["X", "Y", "Z", "A", "B", "C"]:
@@ -1655,7 +1571,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
         # 이동 / 시퀀스 추가 버튼은 로봇 연결이 되어 있고 타겟이 유효할 때만 활성화
         connected = self.main.robot is not None
-        self.btn_move_robot.setEnabled(connected)
+        self.btn_move.setEnabled(connected)
         self.btn_add_obj_to_seq.setEnabled(connected)
         self.btn_add_pick_to_seq.setEnabled(connected)
 
@@ -2084,12 +2000,35 @@ class BinPickingTab(RobotControlMixin, QWidget):
                 f"yaw {bb['yaw']:.1f}° Z[{bb['z_floor']:.0f}~{bb['z_rim']:.0f}]mm"
             )
 
+    def _save_grasp_config(self):
+        try:
+            with open(self._grasp_cfg_path, "w") as f:
+                json.dump(self.grasp_config, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Grasp 설정 저장 실패: {e}")
+
+    def _load_grasp_config(self):
+        """앱 시작 시 저장된 Grasp 설정 복원.
+
+        Z 회전 제한 같은 **안전 설정이 재시작 때 기본값으로 돌아가면 위험**하므로
+        (호스 감김) 파일로 유지한다. 새 항목이 추가돼도 안전하도록 기본값 위에 덮어쓴다.
+        """
+        try:
+            if os.path.exists(self._grasp_cfg_path):
+                with open(self._grasp_cfg_path) as f:
+                    loaded = json.load(f)
+                self.grasp_config.update(loaded)
+                logger.info(f"Grasp 설정 로드: {self._grasp_cfg_path}")
+        except Exception as e:
+            logger.warning(f"Grasp 설정 로드 실패: {e}")
+
     def _open_grasp_config(self):
         get_tcp = (lambda: self.main.robot.get_tcp_position()) if self.main.robot else None
         dlg = GraspConfigDialog(self.grasp_config, get_current_tcp=get_tcp, parent=self)
         if dlg.exec():
             self.grasp_config = dlg.result_config()
-            self.main.statusBar().showMessage("Grasp 설정 적용됨")
+            self._save_grasp_config()
+            self.main.statusBar().showMessage("Grasp 설정 적용됨 (저장됨)")
             if self.selected_idx is not None:  # 선택 중이면 새 설정으로 즉시 재계산
                 self._select_object(self.selected_idx)
 
@@ -2203,6 +2142,36 @@ class BinPickingTab(RobotControlMixin, QWidget):
         dxy = p1 - p0
         return float(np.degrees(np.arctan2(dxy[1], dxy[0])) + cfg["a_offset"])
 
+    def _limit_yaw(self, a: float, cur_a: float) -> Optional[float]:
+        """Z축 회전(A)을 허용 범위 안으로 되돌린다. 불가능하면 None (그 파지는 배제).
+
+        **왜 필요한가:** 진공 호스가 로봇 팔을 따라 붙어 있어 손목이 한 방향으로 계속
+        돌면 줄이 감긴다. 그런데 `compute_approach_pose` 의 ABC unwrap 은 "현재 자세에
+        가장 가까운 표현"을 고르므로(모듈로-360), A 가 190°·200°… 로 **누적**될 수 있다.
+
+        같은 물리 자세를 나타내는 후보들 중 범위 안에 들면서 현재 A 에 가장 가까운 것을 고른다:
+          · A ± 360k  — 완전히 동일한 자세 (표현만 다름)
+          · A ± 180   — 툴을 Z축으로 뒤집은 자세. 흡착 그리퍼는 패드가 원형이라 파지
+                        지점이 같아 대개 동등하다. 다만 툴 X 방향이 반대가 되므로
+                        '여는 방향 정렬'이 중요하면 yaw_allow_180 을 끈다.
+        """
+        cfg = self.grasp_config
+        if not cfg.get("yaw_limit", True):
+            return a
+        lo, hi = float(cfg.get("yaw_min", -180.0)), float(cfg.get("yaw_max", 180.0))
+        if lo > hi:
+            lo, hi = hi, lo
+        bases = [a, a + 180.0] if cfg.get("yaw_allow_180", False) else [a]
+        cands = []
+        for base in bases:
+            for k in range(-3, 4):  # ±1080° 범위면 실용적으로 충분
+                v = base + 360.0 * k
+                if lo - 1e-9 <= v <= hi + 1e-9:
+                    cands.append(v)
+        if not cands:
+            return None
+        return min(cands, key=lambda v: abs(v - cur_a))  # 현재 자세에서 가장 덜 돌아가는 것
+
     def _compute_grasp_tcp(self, obj, det, cur_tcp):
         """grasp_config 에 따라 검출 객체의 로봇 base TCP 계산. (tcp dict, None) 또는 (None, 에러문구)."""
         cfg = self.grasp_config
@@ -2241,6 +2210,15 @@ class BinPickingTab(RobotControlMixin, QWidget):
                 a = self._yaw_from_direction(det, cfg)
                 if a is None:
                     return None, "회전(yaw) 방향을 정할 수 없음 (마스크/OBB/열림 방향 필요)"
+
+        # Z축 회전 제한 (호스/케이블 감김 방지) — 범위를 못 맞추면 이 파지는 배제
+        a_limited = self._limit_yaw(float(a), float(cur_tcp.get("a", 0.0)))
+        if a_limited is None:
+            cfg_y = self.grasp_config
+            return None, (
+                f"Z 회전 제한 초과 (A={a:.1f}° → 허용 " f"{cfg_y.get('yaw_min', -180):.0f}~{cfg_y.get('yaw_max', 180):.0f}° 안으로 못 맞춤)"
+            )
+        a = a_limited
 
         return {"x": x, "y": y, "z": z, "a": a, "b": b, "c": c}, None
 

@@ -508,9 +508,11 @@ class CADMatchingTab(RobotControlMixin, QWidget): ...
 
 로 Mixin 을 상속. MRO 가 `RobotControlMixin → QWidget` 순이라 Mixin 메서드가 우선 적용되고, 탭별로 다른 `_refresh_mode_display` 같은 메서드는 각 탭 클래스에 그대로 남아 있어 자연스럽게 해결된다.
 
+Mixin 은 메서드뿐 아니라 **`로봇 이동 제어` / `시퀀스 큐` 패널의 레이아웃까지** 소유한다 (`_build_move_group()` / `_build_seq_group()`). 각 탭의 `_init_ui` 는 두 줄만 부르면 된다. 표면 추적 탭은 그룹 구성이 달라 하위 빌더(`_build_home_row` / `_build_vacuum_row` / `_build_safety_rows`)만 골라 쓴다.
+
 이 구조의 이점:
 - 안전 관련 수정(예: AUT 감지 통일, e-stop 해제 동작) 이 한 곳에서 끝남
-- 두 탭의 동작이 **드리프트하지 않음** (이전엔 따로 수정되다 안전 동작이 어긋난 적 있음)
+- 두 탭의 동작과 **버튼 배치**가 **드리프트하지 않음** (이전엔 따로 수정되다 안전 동작·UI 가 어긋난 적 있음)
 - 시퀀스 라벨 같은 작은 차이는 클래스 속성으로 파라미터화: `SEQ_OBJECT_NOUN = "객체"` (bin) / `"인스턴스"` (cad)
 
 자세한 사용 패턴은 [docs/bin_picking.md § 10.5](bin_picking.md) 참고.

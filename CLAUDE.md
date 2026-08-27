@@ -26,7 +26,11 @@ python main.py                 # 유일한 진입점 — GUI 실행
 
 **탭 5개, 믹스인 2개:**
 - [main.py](main.py)에 `DataCollectionTab`과 `VerificationTab`이 정의됨 (둘 다 `ImageViewerMixin` 사용).
-- `BinPickingTab`([bin_picking_tab.py](bin_picking_tab.py)), `CADMatchingTab`([cad_matching_tab.py](cad_matching_tab.py)), `SurfaceTrackingTab`([surface_tracking_tab.py](surface_tracking_tab.py))은 모두 [robot_control_mixin.py](robot_control_mixin.py)의 `RobotControlMixin`을 상속한다. 이 믹스인이 *공유* 로봇 모션 UI를 제공한다: 단일 이동, 시퀀스 큐, Z 안전 한계, AUT 속도 상한, `Space` 키 비상정지. **이 세 탭의 로봇 안전/모션 동작은 탭별이 아니라 믹스인 한 곳에서 수정한다.**
+- `BinPickingTab`([bin_picking_tab.py](bin_picking_tab.py)), `CADMatchingTab`([cad_matching_tab.py](cad_matching_tab.py)), `SurfaceTrackingTab`([surface_tracking_tab.py](surface_tracking_tab.py))은 모두 [robot_control_mixin.py](robot_control_mixin.py)의 `RobotControlMixin`을 상속한다. 이 믹스인이 *공유* 로봇 모션 기능을 제공한다: 단일 이동, 시퀀스 큐, Z 안전 한계, AUT 속도 상한, `Space` 키 비상정지.
+
+  믹스인은 **동작뿐 아니라 레이아웃도 소유한다** — `_build_move_group()`(`로봇 이동 제어` 그룹박스 통째로), `_build_seq_group()`(`시퀀스 큐` 그룹박스 통째로), 그리고 하위 빌더 `_build_home_row` / `_build_place_row` / `_build_vacuum_row` / `_build_safety_rows`. 빈 픽킹·CAD 매칭 탭의 `_init_ui` 는 앞의 두 빌더를 부르는 두 줄이 전부고, 구성이 다른 표면 추적 탭(`실행 제어` 그룹)은 하위 빌더만 골라 쓴다.
+
+  **이 세 탭의 로봇 안전/모션 동작도, 버튼 배치·스타일도 탭별이 아니라 믹스인 한 곳에서 수정한다** — 탭에 패널 UI 코드를 다시 복붙하면 예전처럼 탭마다 배치가 어긋난다.
 
 **카메라 추상화 (GUI를 안 건드리고 카메라 추가):** [base_camera.py](base_camera.py)의 `BaseCamera(ABC)`가 인터페이스이고, [camera_factory.py](camera_factory.py)의 `_REGISTRY`(이름 → 모듈 경로 → 클래스명)가 `create_camera()` 호출 시점에만 해당 SDK를 지연 임포트한다 (SDK가 없어도 앱 시작이 깨지지 않음). 카메라 추가 방법: `BaseCamera` 구현 → `_REGISTRY`에 등록 → GUI 콤보에 자동 노출. 구현체: [zivid_camera.py](zivid_camera.py), [realsense_camera.py](realsense_camera.py), [percipio_camera.py](percipio_camera.py).
 

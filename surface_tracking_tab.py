@@ -755,46 +755,22 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self.btn_stop.setEnabled(False)
         exec_layout.addWidget(self.btn_stop)
 
-        # Home (RobotControlMixin)
-        home_row = QHBoxLayout()
-        self.btn_move_home = QPushButton("🏠 Home으로 이동")
-        self.btn_move_home.setMinimumHeight(40)
-        self.btn_move_home.setStyleSheet("font-size: 13px; font-weight: bold; " "background-color: #2E7D32; color: white;")
-        self.btn_move_home.clicked.connect(self._move_to_home)
-        self.btn_move_home.setEnabled(False)
-        home_row.addWidget(self.btn_move_home, stretch=2)
-
-        self.btn_set_home = QPushButton("📍 Home\n재설정")
-        self.btn_set_home.setMinimumHeight(40)
-        self.btn_set_home.setStyleSheet("font-size: 11px; background-color: #689F38; color: white;")
-        self.btn_set_home.clicked.connect(self._set_home_to_current)
-        self.btn_set_home.setEnabled(False)
-        home_row.addWidget(self.btn_set_home, stretch=1)
-        exec_layout.addLayout(home_row)
+        # Home 행 (RobotControlMixin 공용 빌더 — 다른 탭과 배치/스타일이 자동으로 일치)
+        exec_layout.addLayout(self._build_home_row())
 
         # 진공 그리퍼 제어 (Mixin 공용 — ON/OFF/블로우)
         exec_layout.addLayout(self._build_vacuum_row())
 
-        self.btn_clear_queue = QPushButton("🗑 큐 비우기")
-        self.btn_clear_queue.setStyleSheet("background-color: #F57C00; color: white;")
-        self.btn_clear_queue.clicked.connect(self._clear_motion_queue)
-        exec_layout.addWidget(self.btn_clear_queue)
-
-        self.btn_estop = QPushButton("⛔ 비상정지 (Space)")
-        self.btn_estop.setMinimumHeight(60)
-        self.btn_estop.setStyleSheet("font-size: 16px; font-weight: bold; " "background-color: #D32F2F; color: white;")
-        self.btn_estop.clicked.connect(self._emergency_stop)
-        exec_layout.addWidget(self.btn_estop)
-
-        self.btn_estop_release = QPushButton("비상정지 해제")
-        self.btn_estop_release.setStyleSheet("background-color: #757575; color: white;")
-        self.btn_estop_release.clicked.connect(self._emergency_stop_release)
-        exec_layout.addWidget(self.btn_estop_release)
+        # 큐 비우기 / 비상정지 / 비상정지 해제 (RobotControlMixin 공용 빌더)
+        self._build_safety_rows(exec_layout)
 
         info_layout.addWidget(exec_group)
         info_layout.addStretch()
 
-        # Mixin이 참조하지만 SurfaceTracking 에서는 안 쓰는 위젯들 (호환용 hidden)
+        # Mixin이 참조하지만 SurfaceTracking 에서는 안 쓰는 위젯들 (호환용 hidden).
+        # 이 탭은 _build_move_group()/_build_seq_group() 을 쓰지 않으므로 —
+        # "선택 위치로 이동" 대신 시작/정지, 이동 방식은 LIN 고정, 시퀀스 큐 없음 —
+        # 그 빌더들이 만들어 줬을 위젯을 여기서 더미로 채워 준다.
         self.use_approach = self._make_hidden_checkbox(True)
         self.approach_dist = self._make_hidden_spinbox(50)
         self.btn_move = self.btn_start  # alias
