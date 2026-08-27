@@ -65,8 +65,7 @@ class ObjectDetector(ABC):
         """모델을 (한 번만) 로드. 실패 시 DetectorUnavailable."""
 
     @abstractmethod
-    def _is_loaded(self) -> bool:
-        ...
+    def _is_loaded(self) -> bool: ...
 
     @abstractmethod
     def detect(self, image_bgr: np.ndarray, conf_thresh: float, **kwargs) -> Tuple[List[Dict], float]:
@@ -96,9 +95,7 @@ class RFDetrDetector(ObjectDetector):
             from detector import Detector
         except ImportError as e:
             raise DetectorUnavailable(
-                f"detector 모듈 import 실패:\n{e}\n\n"
-                f"경로: {self.detector_dir}\n"
-                "필요 패키지: supervision, tensorrt, pycuda"
+                f"detector 모듈 import 실패:\n{e}\n\n" f"경로: {self.detector_dir}\n" "필요 패키지: supervision, tensorrt, pycuda"
             )
         if not os.path.exists(self.model_path):
             raise DetectorUnavailable(f"모델 파일 없음:\n{self.model_path}")

@@ -897,10 +897,7 @@ def ppf_match_whole_scene(
     scene_data = pcd_to_ppf_format(scene)
     prep_ms = (time.perf_counter() - t0) * 1000.0
     ds_msg = f"{n_before}→{len(scene.points)}점(voxel={scene_voxel:.2f}mm)" if scene_voxel > 0 else f"{len(scene.points)}점(다운샘플 없음)"
-    debug_log.append(
-        f"전체장면 PPF: scene {ds_msg}, model diag={model_diag:.1f}mm, "
-        f"ICP voxel={voxel_for_icp:.2f}mm, NMS 거리={nms_dist:.1f}mm"
-    )
+    debug_log.append(f"전체장면 PPF: scene {ds_msg}, model diag={model_diag:.1f}mm, " f"ICP voxel={voxel_for_icp:.2f}mm, NMS 거리={nms_dist:.1f}mm")
     if len(scene_data) < 100:
         debug_log.append("장면 점이 너무 적음 → 종료")
         return instances, debug_log
@@ -936,9 +933,7 @@ def ppf_match_whole_scene(
         kept_raw.append(r)
         if len(kept_raw) >= max_instances * 2:  # ICP 검증에서 일부 탈락 대비 여유
             break
-    debug_log.append(
-        f"PPF 후보 {len(results)}개 → votes≥{min_votes} {len(raw)}개 → pre-ICP NMS 후 {len(kept_raw)}개 ICP"
-    )
+    debug_log.append(f"PPF 후보 {len(results)}개 → votes≥{min_votes} {len(raw)}개 → pre-ICP NMS 후 {len(kept_raw)}개 ICP")
 
     # --- ICP 정밀화 (pre-NMS로 걸러진 후보만) ---
     t0 = time.perf_counter()
@@ -953,19 +948,19 @@ def ppf_match_whole_scene(
         T = np.asarray(icp.transformation, dtype=np.float64)
         if float(icp.fitness) < fitness_threshold:
             continue
-        refined.append({
-            "transformation": T.copy(),
-            "fitness": float(icp.fitness),
-            "rmse": float(icp.inlier_rmse),
-            "votes": r["votes"],
-            "center": (T @ np.append(model_centroid, 1.0))[:3],
-        })
+        refined.append(
+            {
+                "transformation": T.copy(),
+                "fitness": float(icp.fitness),
+                "rmse": float(icp.inlier_rmse),
+                "votes": r["votes"],
+                "center": (T @ np.append(model_centroid, 1.0))[:3],
+            }
+        )
     icp_ms = (time.perf_counter() - t0) * 1000.0
 
     if not refined:
-        debug_log.append(
-            f"fitness≥{fitness_threshold} 통과 후보 없음 | ⏱ 준비 {prep_ms:.0f} / voting {vote_ms:.0f} / ICP {icp_ms:.0f}ms"
-        )
+        debug_log.append(f"fitness≥{fitness_threshold} 통과 후보 없음 | ⏱ 준비 {prep_ms:.0f} / voting {vote_ms:.0f} / ICP {icp_ms:.0f}ms")
         return instances, debug_log
 
     # --- post-ICP NMS: ICP 로 중심이 이동했을 수 있어 다시 한 번 (fitness 우선) ---
@@ -2420,7 +2415,6 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
         # 스페이스바 = 비상정지 (탭이 활성일 때만 동작)
         from PySide6.QtGui import QShortcut, QKeySequence
-
 
         # 모드 폴링 타이머
         self._mode_timer = QTimer(self)

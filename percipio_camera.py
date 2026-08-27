@@ -86,7 +86,7 @@ class PercipioCamera(BaseCamera):
         self._capture_lock = threading.Lock()
 
         # 상태
-        self.settings: Optional[Dict[str, Any]] = None   # load_settings 후 path 기록
+        self.settings: Optional[Dict[str, Any]] = None  # load_settings 후 path 기록
         self._connected = False
         self._capturing = False
         self._color_intrinsic: Optional[np.ndarray] = None
@@ -125,10 +125,7 @@ class PercipioCamera(BaseCamera):
             # 무효 항목을 먼저 걸러내고, 순서에 의존하지 않고 유효한 것을 고른다.
             self._cam_info = self._select_valid_camera(infos)
             if self._cam_info is None:
-                logger.error(
-                    "Percipio: 유효한 카메라가 없습니다 "
-                    f"(발견 {len(infos)}개가 모두 InvalidNetCam 등 무효 상태)"
-                )
+                logger.error("Percipio: 유효한 카메라가 없습니다 " f"(발견 {len(infos)}개가 모두 InvalidNetCam 등 무효 상태)")
                 return False
             sn = getattr(self._cam_info, "serial_number", str(self._cam_info))
             logger.info(f"Percipio 카메라 발견: SN={sn}, model={getattr(self._cam_info, 'model', '?')}")
@@ -141,10 +138,10 @@ class PercipioCamera(BaseCamera):
                 return False
 
             # SingleFrame + SoftTrigger 모드 — capture() 호출마다 트리거를 한 번 발사
-            if not self._set_feature_int("AcquisitionMode", 0):   # 0=SingleFrame
+            if not self._set_feature_int("AcquisitionMode", 0):  # 0=SingleFrame
                 self._cam.Disconnect()
                 return False
-            if not self._set_feature_int("TriggerSource", 8):     # 8=SoftTrigger
+            if not self._set_feature_int("TriggerSource", 8):  # 8=SoftTrigger
                 self._cam.Disconnect()
                 return False
 
@@ -187,7 +184,7 @@ class PercipioCamera(BaseCamera):
         try:
             has, _ = self._cam.HasSensor(sensor_type)
         except Exception:
-            has = True   # API 차이로 호출 실패 시, 무조건 활성화 시도
+            has = True  # API 차이로 호출 실패 시, 무조건 활성화 시도
         if not has:
             logger.info(f"Percipio: {label} 센서 없음 — skip")
             return
@@ -200,7 +197,7 @@ class PercipioCamera(BaseCamera):
         try:
             has, _ = self._cam.HasSensor(sensor_type)
         except Exception:
-            has = True   # API 차이로 호출 실패 시, 무조건 활성화 시도
+            has = True  # API 차이로 호출 실패 시, 무조건 활성화 시도
         if not has:
             return
         try:
@@ -442,7 +439,7 @@ class PercipioCamera(BaseCamera):
             color = frame.get("color") if frame else None
             if color is None:
                 return None
-            return color.copy()   # (H, W, 3) BGR uint8
+            return color.copy()  # (H, W, 3) BGR uint8
         except Exception as e:
             logger.error(f"2D 이미지 추출 실패: {e}")
             return None
@@ -453,7 +450,7 @@ class PercipioCamera(BaseCamera):
             xyz = frame.get("xyz") if frame else None
             if xyz is None:
                 return None
-            return xyz.copy()     # (H, W, 3) float32 mm, invalid=NaN
+            return xyz.copy()  # (H, W, 3) float32 mm, invalid=NaN
         except Exception as e:
             logger.error(f"포인트 클라우드 추출 실패: {e}")
             return None

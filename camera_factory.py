@@ -19,7 +19,6 @@ from typing import List, Tuple
 
 from base_camera import BaseCamera
 
-
 # 카메라 등록: (사람이 읽는 이름, 모듈 경로, 클래스명)
 _REGISTRY: List[Tuple[str, str, str]] = [
     ("Zivid", "zivid_camera", "ZividCamera"),
@@ -60,10 +59,5 @@ def create_camera(name: str) -> BaseCamera:
                 cls = getattr(module, class_name)
                 return cls()
             except Exception as e:
-                raise RuntimeError(
-                    f"카메라 '{registered_name}' 초기화 실패: {e}\n"
-                    f"({module_path}.{class_name} 의 SDK 가 설치되어 있는지 확인.)"
-                )
-    raise ValueError(
-        f"알 수 없는 카메라: '{name}'. 등록된 카메라: {list_available_camera_names()}"
-    )
+                raise RuntimeError(f"카메라 '{registered_name}' 초기화 실패: {e}\n" f"({module_path}.{class_name} 의 SDK 가 설치되어 있는지 확인.)")
+    raise ValueError(f"알 수 없는 카메라: '{name}'. 등록된 카메라: {list_available_camera_names()}")

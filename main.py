@@ -151,12 +151,14 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         mode_row.addSpacing(15)
         mode_row.addWidget(QLabel("포즈 추정:"))
         self.pose_method_combo = QComboBox()
-        self.pose_method_combo.addItems([
-            "auto (포인트클라우드 우선, 없으면 PnP)",
-            "compare (두 방법 비교)",
-            "pointcloud (3D 직접 매칭 강제)",
-            "pnp (solvePnP 강제 — RealSense 같은 저정밀 깊이용)",
-        ])
+        self.pose_method_combo.addItems(
+            [
+                "auto (포인트클라우드 우선, 없으면 PnP)",
+                "compare (두 방법 비교)",
+                "pointcloud (3D 직접 매칭 강제)",
+                "pnp (solvePnP 강제 — RealSense 같은 저정밀 깊이용)",
+            ]
+        )
         self.pose_method_combo.setToolTip(
             "체커보드 자세 추정 방식.\n"
             "auto: Zivid 같은 정밀 깊이 카메라에 적합.\n"
@@ -276,9 +278,9 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
             return
         if (Path("data") / name).exists():
             QMessageBox.warning(
-                self, "오류",
-                f"data/{name} 폴더가 이미 있습니다.\n"
-                "다른 이름을 쓰거나, 이어서 작업하려면 '기존 세션 불러오기'를 사용하세요.",
+                self,
+                "오류",
+                f"data/{name} 폴더가 이미 있습니다.\n" "다른 이름을 쓰거나, 이어서 작업하려면 '기존 세션 불러오기'를 사용하세요.",
             )
             return
 
@@ -294,7 +296,9 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
     def _load_session(self):
         """기존 세션 폴더 로드 (pose_*/tcp.json 파일 스캔)"""
         path = QFileDialog.getExistingDirectory(
-            self, "세션 폴더 선택", "data",
+            self,
+            "세션 폴더 선택",
+            "data",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
@@ -343,9 +347,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         self.pose_count = max_num
 
         self.pose_count_label.setText(f"수집된 포즈: {loaded}")
-        self.main.statusBar().showMessage(
-            f"세션 로드 완료: {loaded}개 포즈 ({session_path.name})"
-        )
+        self.main.statusBar().showMessage(f"세션 로드 완료: {loaded}개 포즈 ({session_path.name})")
         logger.info(f"세션 로드: {session_path}, {loaded}개 포즈")
 
     def _append_pose_row(self, pose_num: int, tcp_data: dict):
@@ -390,8 +392,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         reply = QMessageBox.question(
             self,
             "포즈 삭제",
-            f"포즈 {pose_num} 을(를) 삭제할까요?\n\n{pose_dir}\n"
-            "폴더와 저장된 파일(이미지/포인트클라우드)이 함께 삭제됩니다.",
+            f"포즈 {pose_num} 을(를) 삭제할까요?\n\n{pose_dir}\n" "폴더와 저장된 파일(이미지/포인트클라우드)이 함께 삭제됩니다.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -434,9 +435,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
             self.checkerboard_status.setStyleSheet("color: #E65100; font-weight: bold; font-size: 14px;")
         # 리뷰 중 저장 방지 — 새로 '캡처' 해야 저장 버튼이 다시 활성화됨
         self.btn_save.setEnabled(False)
-        self.main.statusBar().showMessage(
-            f"포즈 {pose_num} 리뷰 중 — '캡처'를 누르면 실시간 화면으로 돌아갑니다"
-        )
+        self.main.statusBar().showMessage(f"포즈 {pose_num} 리뷰 중 — '캡처'를 누르면 실시간 화면으로 돌아갑니다")
 
     def _update_tcp(self):
         if not self.main.robot:
@@ -547,7 +546,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
 
         # 포즈 추정 방식 결정 (콤보 첫 단어가 키)
         method_text = self.pose_method_combo.currentText()
-        method_key = method_text.split(" ", 1)[0]   # "auto" / "compare" / "pointcloud" / "pnp"
+        method_key = method_text.split(" ", 1)[0]  # "auto" / "compare" / "pointcloud" / "pnp"
 
         self.main.statusBar().showMessage("캘리브레이션 계산 중...")
         QApplication.processEvents()
@@ -555,18 +554,30 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         if method_key == "compare":
             # 두 방법으로 각각 풀어 일관성 metric 비교
             res_pc = compute_hand_eye(
-                str(self.session_dir), board_size=board_size, square_size=square_size,
-                mode=mode, pose_method="pointcloud", return_metric=True,
+                str(self.session_dir),
+                board_size=board_size,
+                square_size=square_size,
+                mode=mode,
+                pose_method="pointcloud",
+                return_metric=True,
             )
             res_pnp = compute_hand_eye(
-                str(self.session_dir), board_size=board_size, square_size=square_size,
-                mode=mode, pose_method="pnp", return_metric=True,
+                str(self.session_dir),
+                board_size=board_size,
+                square_size=square_size,
+                mode=mode,
+                pose_method="pnp",
+                return_metric=True,
             )
             self._show_compare_result(res_pc, res_pnp, mode, mode_text)
         else:
             res = compute_hand_eye(
-                str(self.session_dir), board_size=board_size, square_size=square_size,
-                mode=mode, pose_method=method_key, return_metric=True,
+                str(self.session_dir),
+                board_size=board_size,
+                square_size=square_size,
+                mode=mode,
+                pose_method=method_key,
+                return_metric=True,
             )
             T = res["T"] if res else None
             if T is not None:
@@ -629,10 +640,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         def fmt(name, res):
             if res is None:
                 return f"[{name}]  실패 (포즈 부족 또는 데이터 누락)"
-            return (
-                f"[{name}]  일관성 mean = {res['metric_mean']:.3f} mm, "
-                f"사용 포즈 {res['n_used']}/{res['n_total']}, alg={res['algorithm']}"
-            )
+            return f"[{name}]  일관성 mean = {res['metric_mean']:.3f} mm, " f"사용 포즈 {res['n_used']}/{res['n_total']}, alg={res['algorithm']}"
 
         lines.append(fmt("Pointcloud (3D 직접 매칭)", res_pc))
         lines.append(fmt("PnP        (solvePnP)     ", res_pnp))
@@ -665,8 +673,7 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
             elif diff < 2.0:
                 lines.append(f"📌 두 방법 차이 = {diff:.3f} mm (중간). 카메라 종류에 따라 한쪽이 더 정밀할 수 있음.")
             else:
-                lines.append(f"⚠ 두 방법 차이 = {diff:.3f} mm (큼). 한쪽이 부정확 — "
-                             "Zivid 같으면 pointcloud, RealSense 같으면 pnp 가 신뢰도 ↑")
+                lines.append(f"⚠ 두 방법 차이 = {diff:.3f} mm (큼). 한쪽이 부정확 — " "Zivid 같으면 pointcloud, RealSense 같으면 pnp 가 신뢰도 ↑")
 
         QMessageBox.information(self, "캘리브레이션 비교 결과", "\n".join(lines))
         self.main.statusBar().showMessage(f"캘리브레이션 완료 (비교: '{best_name}' 채택)")
@@ -679,11 +686,11 @@ class VerificationTab(QWidget, ImageViewerMixin):
         super().__init__()
         self.main = main_window
 
-        self.T_calib = None       # 로드된 캘리브레이션 변환 행렬
-        self.calib_mode = None    # "eye_to_hand" or "eye_in_hand"
-        self.corner_cam = None    # 체커보드 0번 코너의 카메라 좌표 (3D, mm)
-        self.normal_cam = None    # 체커보드 평면 법선 (카메라 좌표계)
-        self.current_tcp = None   # 현재 로봇 TCP
+        self.T_calib = None  # 로드된 캘리브레이션 변환 행렬
+        self.calib_mode = None  # "eye_to_hand" or "eye_in_hand"
+        self.corner_cam = None  # 체커보드 0번 코너의 카메라 좌표 (3D, mm)
+        self.normal_cam = None  # 체커보드 평면 법선 (카메라 좌표계)
+        self.current_tcp = None  # 현재 로봇 TCP
 
         self._init_image_viewer()
         self._init_ui()
@@ -843,7 +850,10 @@ class VerificationTab(QWidget, ImageViewerMixin):
 
     def _load_calibration(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "캘리브레이션 파일 선택", "data", "JSON Files (*.json)",
+            self,
+            "캘리브레이션 파일 선택",
+            "data",
+            "JSON Files (*.json)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
@@ -930,7 +940,11 @@ class VerificationTab(QWidget, ImageViewerMixin):
         # 0번 코너 주변 XYZ 포인트로 국소 평면 피팅 → 법선 (카메라 좌표계)
         # Zivid normals는 fallback으로 전달
         self.normal_cam = estimate_normal_at_pixel(
-            xyz, px, py, patch_radius=15, normals=normals,
+            xyz,
+            px,
+            py,
+            patch_radius=15,
+            normals=normals,
         )
 
         if self.normal_cam is not None:
@@ -942,8 +956,7 @@ class VerificationTab(QWidget, ImageViewerMixin):
 
         # 0번 코너 강조 (빨간 원)
         cv2.circle(overlay, (px, py), 15, (0, 0, 255), 3)
-        cv2.putText(overlay, "0", (px + 20, py - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8, (0, 0, 255), 2)
+        cv2.putText(overlay, "0", (px + 20, py - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
         self.checkerboard_status.setText(f"체커보드 검출 성공 ({len(corners)} 코너, 0번 코너 표시됨)")
         self.checkerboard_status.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
@@ -1013,9 +1026,7 @@ class VerificationTab(QWidget, ImageViewerMixin):
             for axis in ["X", "Y", "Z", "A", "B", "C"]:
                 self.approach_labels[axis].setText("---")
 
-        self.main.statusBar().showMessage(
-            f"타겟 위치: X={target['x']:.2f}, Y={target['y']:.2f}, Z={target['z']:.2f}"
-        )
+        self.main.statusBar().showMessage(f"타겟 위치: X={target['x']:.2f}, Y={target['y']:.2f}, Z={target['z']:.2f}")
         logger.info(f"계산된 타겟 위치: {target}")
 
 
@@ -1193,7 +1204,8 @@ class VisuPickApp(QMainWindow):
         default_name = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         tab_name = self.tabs.tabText(self.tabs.currentIndex())
         name, ok = QInputDialog.getText(
-            self, f"{kind} 저장",
+            self,
+            f"{kind} 저장",
             f"파일 이름 (탭: {tab_name}, 해상도 {w}×{h}, PNG 저장):",
             text=default_name,
         )
@@ -1209,9 +1221,11 @@ class VisuPickApp(QMainWindow):
         path = out_dir / name
         if path.exists():
             ret = QMessageBox.question(
-                self, "덮어쓰기 확인",
+                self,
+                "덮어쓰기 확인",
                 f"이미 존재하는 파일입니다:\n{path}\n\n덮어쓸까요?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
             if ret != QMessageBox.Yes:
                 return
@@ -1232,7 +1246,8 @@ class VisuPickApp(QMainWindow):
         img = getattr(tab, "current_image", None)
         if img is None:
             QMessageBox.warning(
-                self, "오류",
+                self,
+                "오류",
                 f"'{tab_name}' 탭에 캡처된 이미지가 없습니다.\n해당 탭에서 먼저 캡처하세요.",
             )
             return
@@ -1254,18 +1269,19 @@ class VisuPickApp(QMainWindow):
             QMessageBox.warning(self, "오류", f"'{tab_name}' 탭에는 저장할 뷰가 없습니다.")
             return
 
-        if hasattr(view, "_make_overlay_image"):        # 2D 이미지 라벨
+        if hasattr(view, "_make_overlay_image"):  # 2D 이미지 라벨
             img = view._make_overlay_image()
             if img is None:
                 QMessageBox.warning(
-                    self, "오류",
+                    self,
+                    "오류",
                     f"'{tab_name}' 탭에 표시된 이미지가 없습니다.\n해당 탭에서 먼저 캡처하세요.",
                 )
                 return
             self._save_image_to_debug(img, "렌더링 이미지(2D)", "render")
             return
 
-        plotter = getattr(view, "plotter", None)        # 3D 포인트클라우드 뷰
+        plotter = getattr(view, "plotter", None)  # 3D 포인트클라우드 뷰
         if plotter is None:
             QMessageBox.warning(self, "오류", f"'{tab_name}' 탭의 현재 뷰는 저장할 수 없습니다.")
             return
@@ -1278,9 +1294,9 @@ class VisuPickApp(QMainWindow):
             QMessageBox.warning(self, "오류", "3D 뷰를 캡처하지 못했습니다.")
             return
         shot = np.asarray(shot)
-        if shot.ndim == 3 and shot.shape[2] == 4:       # RGBA → RGB
+        if shot.ndim == 3 and shot.shape[2] == 4:  # RGBA → RGB
             shot = shot[:, :, :3]
-        img = cv2.cvtColor(shot, cv2.COLOR_RGB2BGR)     # cv2.imwrite 는 BGR
+        img = cv2.cvtColor(shot, cv2.COLOR_RGB2BGR)  # cv2.imwrite 는 BGR
         self._save_image_to_debug(img, "3D 뷰 이미지", "view3d")
 
     def _connect_robot(self):
@@ -1321,14 +1337,9 @@ class VisuPickApp(QMainWindow):
                 # 연결 시점의 TCP를 home으로 저장
                 self.home_pose = self.robot.get_tcp_position()
                 if self.home_pose:
-                    logger.info(
-                        f"Home 위치 저장: X={self.home_pose['x']:.2f}, "
-                        f"Y={self.home_pose['y']:.2f}, Z={self.home_pose['z']:.2f}"
-                    )
+                    logger.info(f"Home 위치 저장: X={self.home_pose['x']:.2f}, " f"Y={self.home_pose['y']:.2f}, Z={self.home_pose['z']:.2f}")
 
-                self.statusBar().showMessage(
-                    f"로봇 연결 성공 (Tool:{tool}, Base:{base}, Home 저장됨)"
-                )
+                self.statusBar().showMessage(f"로봇 연결 성공 (Tool:{tool}, Base:{base}, Home 저장됨)")
                 self.data_tab._update_tcp()
                 self.verification_tab._update_tcp()
                 # bin picking / CAD 매칭 탭에도 home 저장 알림 (UI 갱신)
@@ -1367,7 +1378,7 @@ class VisuPickApp(QMainWindow):
         # 연결 시도
         kind = self.camera_type_combo.currentText()
         try:
-            self.camera = create_camera(kind)   # factory: 지연 import + 인스턴스화
+            self.camera = create_camera(kind)  # factory: 지연 import + 인스턴스화
             if self.camera.connect():
                 self.camera_status.setText(f"연결됨 ({kind})")
                 self.camera_status.setStyleSheet("color: green; font-weight: bold;")
@@ -1391,7 +1402,8 @@ class VisuPickApp(QMainWindow):
         # DontUseNativeDialog: VTK/PyVista가 OpenGL context를 점유하고 있어 GNOME/KDE
         # native 다이얼로그가 빈 창으로 뜨는 문제 회피 (Linux + PySide6 + PyVista 조합).
         path, _ = QFileDialog.getOpenFileName(
-            self, f"카메라 설정 파일 선택 ({kind})",
+            self,
+            f"카메라 설정 파일 선택 ({kind})",
             str(Path(__file__).parent / "config"),
             file_filter,
             options=QFileDialog.Option.DontUseNativeDialog,

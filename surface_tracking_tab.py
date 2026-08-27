@@ -133,23 +133,19 @@ class ClickPointImageLabel(ZoomableImageLabel):
         if self._sample_pixels:
             for i, (sx, sy) in enumerate(self._sample_pixels):
                 cv2.circle(canvas, (int(sx), int(sy)), 4, (0, 165, 255), -1)
-                cv2.putText(canvas, str(i + 1), (int(sx) + 5, int(sy) - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
+                cv2.putText(canvas, str(i + 1), (int(sx) + 5, int(sy) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
 
         if self._start_pt is not None:
             cv2.circle(canvas, self._start_pt, 8, (0, 255, 0), 2)
-            cv2.putText(canvas, "S", (self._start_pt[0] + 10, self._start_pt[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(canvas, "S", (self._start_pt[0] + 10, self._start_pt[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         if self._end_pt is not None:
             cv2.circle(canvas, self._end_pt, 8, (0, 0, 255), 2)
-            cv2.putText(canvas, "E", (self._end_pt[0] + 10, self._end_pt[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(canvas, "E", (self._end_pt[0] + 10, self._end_pt[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         if self._roi_rect is not None:
             rx1, ry1, rx2, ry2 = self._roi_rect
             cv2.rectangle(canvas, (rx1, ry1), (rx2, ry2), (0, 255, 255), 2)
-            cv2.putText(canvas, "ROI", (rx1, max(ry1 - 5, 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            cv2.putText(canvas, "ROI", (rx1, max(ry1 - 5, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         return canvas
 
@@ -228,13 +224,12 @@ class ClickPointImageLabel(ZoomableImageLabel):
 # 빨강은 H 둘레가 0/180에서 wrap-around 되므로 두 구간 OR.
 # S/V 최저값은 default 70 — 사용자가 spin 으로 더 낮춰서 흐릿한 마커도 잡을 수 있음.
 COLOR_HSV_RANGES = {
-    "red":     [((0, 70, 70), (10, 255, 255)),
-                ((170, 70, 70), (180, 255, 255))],
-    "blue":    [((100, 70, 70), (130, 255, 255))],
-    "green":   [((40, 70, 70), (80, 255, 255))],
-    "yellow":  [((20, 70, 70), (35, 255, 255))],
+    "red": [((0, 70, 70), (10, 255, 255)), ((170, 70, 70), (180, 255, 255))],
+    "blue": [((100, 70, 70), (130, 255, 255))],
+    "green": [((40, 70, 70), (80, 255, 255))],
+    "yellow": [((20, 70, 70), (35, 255, 255))],
     "magenta": [((140, 70, 70), (170, 255, 255))],
-    "cyan":    [((80, 70, 70), (100, 255, 255))],
+    "cyan": [((80, 70, 70), (100, 255, 255))],
 }
 
 
@@ -273,10 +268,12 @@ def detect_line(
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
         bs = max(3, block_size | 1)
         binary = cv2.adaptiveThreshold(
-            blur, 255,
+            blur,
+            255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV,
-            bs, threshold_c,
+            bs,
+            threshold_c,
         )
     else:
         ranges = COLOR_HSV_RANGES.get(color_mode)
@@ -447,9 +444,9 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self.main = main_window
 
         # 캡처 데이터
-        self.current_image = None       # BGR
-        self.current_xyz = None         # (H, W, 3) mm
-        self.current_normals = None     # (H, W, 3) 또는 None
+        self.current_image = None  # BGR
+        self.current_xyz = None  # (H, W, 3) mm
+        self.current_normals = None  # (H, W, 3) 또는 None
         self.current_intrinsics = None
         self.current_rgb = None
 
@@ -467,7 +464,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         # 경로
         self.path_pixels: Optional[List[Tuple[int, int]]] = None
         self.sample_indices: List[int] = []
-        self.path_points: List[Dict] = []   # 각 sample 에 대해 robot base 좌표계 TCP 자세
+        self.path_points: List[Dict] = []  # 각 sample 에 대해 robot base 좌표계 TCP 자세
 
         # 캘리브레이션
         self.T_calib = None
@@ -475,7 +472,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
 
         # 실행 상태
         self._motion_running = False
-        self._pending_points: List[Dict] = []   # 아직 KRL 큐에 보내지 못한 점
+        self._pending_points: List[Dict] = []  # 아직 KRL 큐에 보내지 못한 점
         self._sent_count = 0
         self._total_count = 0
         self._send_timer: Optional[QTimer] = None
@@ -535,8 +532,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         top_row.addStretch()
 
         self.mode_label = QLabel("모드: ?")
-        self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; "
-                                      "background-color: #BDBDBD; color: white; border-radius: 3px;")
+        self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #BDBDBD; color: white; border-radius: 3px;")
         top_row.addWidget(self.mode_label)
 
         self.btn_view_2d = QPushButton("2D 뷰")
@@ -748,8 +744,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         # 시작 / 정지
         self.btn_start = QPushButton("▶ 경로 추적 시작")
         self.btn_start.setMinimumHeight(45)
-        self.btn_start.setStyleSheet("font-size: 14px; font-weight: bold; "
-                                     "background-color: #1565C0; color: white;")
+        self.btn_start.setStyleSheet("font-size: 14px; font-weight: bold; " "background-color: #1565C0; color: white;")
         self.btn_start.clicked.connect(self._start_path_motion)
         self.btn_start.setEnabled(False)
         exec_layout.addWidget(self.btn_start)
@@ -764,8 +759,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         home_row = QHBoxLayout()
         self.btn_move_home = QPushButton("🏠 Home으로 이동")
         self.btn_move_home.setMinimumHeight(40)
-        self.btn_move_home.setStyleSheet("font-size: 13px; font-weight: bold; "
-                                         "background-color: #2E7D32; color: white;")
+        self.btn_move_home.setStyleSheet("font-size: 13px; font-weight: bold; " "background-color: #2E7D32; color: white;")
         self.btn_move_home.clicked.connect(self._move_to_home)
         self.btn_move_home.setEnabled(False)
         home_row.addWidget(self.btn_move_home, stretch=2)
@@ -788,8 +782,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
 
         self.btn_estop = QPushButton("⛔ 비상정지 (Space)")
         self.btn_estop.setMinimumHeight(60)
-        self.btn_estop.setStyleSheet("font-size: 16px; font-weight: bold; "
-                                     "background-color: #D32F2F; color: white;")
+        self.btn_estop.setStyleSheet("font-size: 16px; font-weight: bold; " "background-color: #D32F2F; color: white;")
         self.btn_estop.clicked.connect(self._emergency_stop)
         exec_layout.addWidget(self.btn_estop)
 
@@ -808,6 +801,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self.btn_add_obj_to_seq = self._make_hidden_button()
         self.btn_add_home_to_seq = self._make_hidden_button()
         from PySide6.QtWidgets import QListWidget
+
         self.action_list = QListWidget()
 
         info_scroll = QScrollArea()
@@ -831,6 +825,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
 
     def _make_hidden_checkbox(self, checked: bool):
         from PySide6.QtWidgets import QCheckBox
+
         cb = QCheckBox()
         cb.setChecked(checked)
         cb.setVisible(False)
@@ -861,7 +856,10 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
 
     def _load_calibration(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "캘리브레이션 파일 선택", "data", "JSON Files (*.json)",
+            self,
+            "캘리브레이션 파일 선택",
+            "data",
+            "JSON Files (*.json)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
@@ -932,7 +930,8 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         # 3D 뷰 갱신
         self.view_3d.clear()
         self.view_3d.show_pointcloud(
-            xyz, self.current_rgb,
+            xyz,
+            self.current_rgb,
             intrinsics=self.current_intrinsics,
             image_shape=image.shape,
         )
@@ -951,7 +950,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
     def _on_color_mode_changed(self, idx: int):
         """검정/컬러 모드 전환 시 각 모드의 파라미터 spin 활성화 토글."""
         mode = self._color_options[idx][1] if 0 <= idx < len(self._color_options) else "black"
-        is_black = (mode == "black")
+        is_black = mode == "black"
         self.block_size_spin.setEnabled(is_black)
         self.thresh_c_spin.setEnabled(is_black)
         self.s_min_spin.setEnabled(not is_black)
@@ -978,10 +977,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         )
         if mask is None:
             scope = "ROI 영역에서 " if self.roi_2d is not None else ""
-            QMessageBox.warning(
-                self, "검출 실패",
-                f"{scope}{color_label} 선을 찾지 못했습니다. 파라미터/ROI를 조정해 보세요."
-            )
+            QMessageBox.warning(self, "검출 실패", f"{scope}{color_label} 선을 찾지 못했습니다. 파라미터/ROI를 조정해 보세요.")
             self.line_mask = None
             self.skeleton = None
             self.view_2d.set_overlay(None)
@@ -993,16 +989,13 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         # 시각화 오버레이: mask 회색 + skeleton 시안 (빨강 마커와 색 겹치지 않게)
         overlay = np.zeros_like(self.current_image)
         overlay[mask > 0] = (60, 60, 60)
-        overlay[skel > 0] = (255, 255, 0)   # BGR=노랑·시안 계열 (실제로는 시안)
+        overlay[skel > 0] = (255, 255, 0)  # BGR=노랑·시안 계열 (실제로는 시안)
         self.view_2d.set_overlay(overlay)
 
         n_skel = int(np.count_nonzero(skel))
         n_mask = int(np.count_nonzero(mask))
         scope_msg = " (ROI 영역)" if self.roi_2d is not None else ""
-        self.main.statusBar().showMessage(
-            f"{color_label} 선 검출 완료{scope_msg}: mask {n_mask} px, "
-            f"skeleton {n_skel} px — 시작점/끝점 클릭"
-        )
+        self.main.statusBar().showMessage(f"{color_label} 선 검출 완료{scope_msg}: mask {n_mask} px, " f"skeleton {n_skel} px — 시작점/끝점 클릭")
 
     # ------------------------------------------------------------
     # 끝점 클릭 / 경로 계산
@@ -1056,9 +1049,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self._clear_3d_path_markers()
         self.btn_compute_path.setEnabled(False)
         self.btn_start.setEnabled(False)
-        self.main.statusBar().showMessage(
-            f"ROI 설정: ({x1},{y1})–({x2},{y2}) — 검출 다시 실행"
-        )
+        self.main.statusBar().showMessage(f"ROI 설정: ({x1},{y1})–({x2},{y2}) — 검출 다시 실행")
 
     def _clear_roi(self):
         if self.roi_2d is None:
@@ -1110,12 +1101,8 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self.btn_start.setEnabled(False)
 
     def _update_endpoint_labels(self):
-        self.start_label.setText(
-            f"시작점: {self.start_pt}" if self.start_pt else "시작점: 미설정"
-        )
-        self.end_label.setText(
-            f"끝점:   {self.end_pt}" if self.end_pt else "끝점: 미설정"
-        )
+        self.start_label.setText(f"시작점: {self.start_pt}" if self.start_pt else "시작점: 미설정")
+        self.end_label.setText(f"끝점:   {self.end_pt}" if self.end_pt else "끝점: 미설정")
 
     def _update_path_info(self):
         n = len(self.path_points)
@@ -1134,18 +1121,16 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         path_px = trace_path_on_skeleton(self.skeleton, self.start_pt, self.end_pt)
         if path_px is None or len(path_px) < 2:
             QMessageBox.warning(
-                self, "경로 검색 실패",
-                "시작점→끝점 사이에서 skeleton 위 경로를 찾지 못했습니다.\n"
-                "검출 파라미터를 조정하거나 끝점 위치를 바꿔 보세요."
+                self,
+                "경로 검색 실패",
+                "시작점→끝점 사이에서 skeleton 위 경로를 찾지 못했습니다.\n" "검출 파라미터를 조정하거나 끝점 위치를 바꿔 보세요.",
             )
             return
         self.path_pixels = path_px
         self.view_2d.set_path(path_px)
 
         # 2) 누적 3D 거리 sampling
-        self.sample_indices = sample_path_by_3d_distance(
-            path_px, self.current_xyz, self.sampling_spin.value()
-        )
+        self.sample_indices = sample_path_by_3d_distance(path_px, self.current_xyz, self.sampling_spin.value())
         if len(self.sample_indices) < 2:
             QMessageBox.warning(self, "오류", "유효한 3D 점이 부족해 sampling 실패")
             return
@@ -1157,12 +1142,14 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         cam_points = []
         cam_normals = []
         patch_r = self.normal_patch_spin.value()
-        for (px, py) in sample_pixels:
+        for px, py in sample_pixels:
             p3d = self.current_xyz[py, px]
             if np.any(np.isnan(p3d)):
                 continue
             n_cam = estimate_normal_at_pixel(
-                self.current_xyz, px, py,
+                self.current_xyz,
+                px,
+                py,
                 patch_radius=patch_r,
                 normals=self.current_normals,
             )
@@ -1181,9 +1168,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         # 4) 카메라 → base 변환
         if self.calib_mode == "eye_to_hand":
             R_c2b = self.T_calib[:3, :3]
-            base_points = (self.T_calib @ np.hstack(
-                [cam_points, np.ones((len(cam_points), 1))]
-            ).T).T[:, :3]
+            base_points = (self.T_calib @ np.hstack([cam_points, np.ones((len(cam_points), 1))]).T).T[:, :3]
             base_normals = (R_c2b @ cam_normals.T).T
         elif self.calib_mode == "eye_in_hand":
             if self.main.robot is None:
@@ -1193,9 +1178,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
             T_g2b = tcp_to_homogeneous(cur_tcp)
             T_c2b = T_g2b @ self.T_calib
             R_c2b = T_c2b[:3, :3]
-            base_points = (T_c2b @ np.hstack(
-                [cam_points, np.ones((len(cam_points), 1))]
-            ).T).T[:, :3]
+            base_points = (T_c2b @ np.hstack([cam_points, np.ones((len(cam_points), 1))]).T).T[:, :3]
             base_normals = (R_c2b @ cam_normals.T).T
         else:
             QMessageBox.critical(self, "오류", f"알 수 없는 모드: {self.calib_mode}")
@@ -1228,8 +1211,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self._update_path_info()
         self.btn_start.setEnabled(self.main.robot is not None and len(self.path_points) >= 2)
         self.main.statusBar().showMessage(
-            f"경로 계산 완료: {len(self.path_points)}점 "
-            f"(간격 {self.sampling_spin.value():.1f}mm, offset {offset_mm:+.1f}mm)"
+            f"경로 계산 완료: {len(self.path_points)}점 " f"(간격 {self.sampling_spin.value():.1f}mm, offset {offset_mm:+.1f}mm)"
         )
 
     # ------------------------------------------------------------
@@ -1255,8 +1237,11 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         cloud = pv.PolyData(cam_points.astype(np.float32))
         sphere_glyph = cloud.glyph(geom=pv.Sphere(radius=3), scale=False, orient=False)
         plotter.add_mesh(
-            sphere_glyph, color="orange",
-            name="path_spheres", pickable=False, reset_camera=False,
+            sphere_glyph,
+            color="orange",
+            name="path_spheres",
+            pickable=False,
+            reset_camera=False,
         )
         self._tcp_viz_actors.append("path_spheres")
 
@@ -1267,9 +1252,13 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
             poly = pv.PolyData(cam_points.astype(np.float32))
             poly.lines = lines
             plotter.add_mesh(
-                poly, color="yellow", line_width=4,
-                render_lines_as_tubes=True, name="path_line",
-                pickable=False, reset_camera=False,
+                poly,
+                color="yellow",
+                line_width=4,
+                render_lines_as_tubes=True,
+                name="path_line",
+                pickable=False,
+                reset_camera=False,
             )
             self._tcp_viz_actors.append("path_line")
 
@@ -1279,8 +1268,11 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         arrows["vectors"] = (cam_normals * 30.0).astype(np.float32)
         arrow_glyph = arrows.glyph(geom=pv.Arrow(), orient="vectors", scale="vectors", factor=1.0)
         plotter.add_mesh(
-            arrow_glyph, color="cyan",
-            name="path_normals", pickable=False, reset_camera=False,
+            arrow_glyph,
+            color="cyan",
+            name="path_normals",
+            pickable=False,
+            reset_camera=False,
         )
         self._tcp_viz_actors.append("path_normals")
 
@@ -1327,8 +1319,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
             f"⚠ 비상시 Space 또는 비상정지 버튼\n\n"
             f"진행하시겠습니까?"
         )
-        ret = QMessageBox.question(self, "경로 추적 확인", msg,
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        ret = QMessageBox.question(self, "경로 추적 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
 
@@ -1407,9 +1398,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
             self._completion_timer.setInterval(500)
             self._completion_timer.timeout.connect(self._check_completion)
         self._completion_timer.start()
-        self.main.statusBar().showMessage(
-            f"✅ 모든 점({self._total_count}) 송신 완료 — 큐가 비길 대기"
-        )
+        self.main.statusBar().showMessage(f"✅ 모든 점({self._total_count}) 송신 완료 — 큐가 비길 대기")
 
     def _check_completion(self):
         robot = self.main.robot
@@ -1440,9 +1429,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
             self.progress_label.setText(f"중단: {error}")
             self.main.statusBar().showMessage(f"⛔ 경로 추적 중단: {error}")
         else:
-            self.progress_label.setText(
-                f"완료: {self._sent_count}/{self._total_count}"
-            )
+            self.progress_label.setText(f"완료: {self._sent_count}/{self._total_count}")
             self.main.statusBar().showMessage("✅ 경로 추적 완료")
 
     def _stop_path_motion(self):
@@ -1450,10 +1437,11 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         if not self._motion_running:
             return
         ret = QMessageBox.question(
-            self, "정지 확인",
-            "경로 추적을 중단하고 남은 KRL 큐를 비우시겠습니까?\n"
-            "(이미 진행 중인 모션 1개는 끝까지 실행됩니다.)",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            self,
+            "정지 확인",
+            "경로 추적을 중단하고 남은 KRL 큐를 비우시겠습니까?\n" "(이미 진행 중인 모션 1개는 끝까지 실행됩니다.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
             return
@@ -1465,10 +1453,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self._finish_motion(error="사용자 중단")
 
     def _update_progress(self):
-        self.progress_label.setText(
-            f"진행: {self._sent_count}/{self._total_count} 점 큐 전송"
-            f" (남은 {len(self._pending_points)})"
-        )
+        self.progress_label.setText(f"진행: {self._sent_count}/{self._total_count} 점 큐 전송" f" (남은 {len(self._pending_points)})")
 
     def _rot_change_deg(self, a: Dict, b: Dict) -> Optional[float]:
         try:
@@ -1488,8 +1473,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         if self.main.robot is None:
             self._current_mode = "?"
             self.mode_label.setText("모드: 미연결")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; "
-                                          "background-color: #BDBDBD; color: white; border-radius: 3px;")
+            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #BDBDBD; color: white; border-radius: 3px;")
             return
         try:
             m = self.main.robot.read_variable("$MODE_OP")
@@ -1500,13 +1484,10 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
 
         if is_auto_mode(self._current_mode):
             self.mode_label.setText(f"⚠ {self._current_mode} (자동 운용)")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; "
-                                          "background-color: #D32F2F; color: white; border-radius: 3px;")
+            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #D32F2F; color: white; border-radius: 3px;")
         elif "T1" in self._current_mode or "T2" in self._current_mode:
             self.mode_label.setText(f"{self._current_mode} (수동)")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; "
-                                          "background-color: #2E7D32; color: white; border-radius: 3px;")
+            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #2E7D32; color: white; border-radius: 3px;")
         else:
             self.mode_label.setText(f"모드: {self._current_mode}")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; "
-                                          "background-color: #757575; color: white; border-radius: 3px;")
+            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #757575; color: white; border-radius: 3px;")

@@ -102,9 +102,7 @@ class RobotControlMixin:
             self.btn_move_home.setEnabled(True)
             self.btn_add_home_to_seq.setEnabled(True)
         # 진공/픽 버튼 (탭이 _build_vacuum_row() 를 호출한 경우에만 존재)
-        for name in ("btn_vac_on", "btn_vac_off", "btn_vac_blow",
-                     "btn_pick_cycle", "btn_set_place", "btn_add_pick_to_seq",
-                     "btn_auto_start"):
+        for name in ("btn_vac_on", "btn_vac_off", "btn_vac_blow", "btn_pick_cycle", "btn_set_place", "btn_add_pick_to_seq", "btn_auto_start"):
             btn = getattr(self, name, None)
             if btn is not None:
                 btn.setEnabled(True)
@@ -231,33 +229,27 @@ class RobotControlMixin:
 
         old = getattr(self.main, "place_pose", None)
         old_str = (
-            f"  X: {old['x']:.2f}, Y: {old['y']:.2f}, Z: {old['z']:.2f}\n"
-            f"  A: {old['a']:.2f}, B: {old['b']:.2f}, C: {old['c']:.2f}"
+            f"  X: {old['x']:.2f}, Y: {old['y']:.2f}, Z: {old['z']:.2f}\n" f"  A: {old['a']:.2f}, B: {old['b']:.2f}, C: {old['c']:.2f}"
             if old
             else "(저장된 놓기 위치 없음)"
         )
-        new_str = (
-            f"  X: {cur['x']:.2f}, Y: {cur['y']:.2f}, Z: {cur['z']:.2f}\n"
-            f"  A: {cur['a']:.2f}, B: {cur['b']:.2f}, C: {cur['c']:.2f}"
-        )
+        new_str = f"  X: {cur['x']:.2f}, Y: {cur['y']:.2f}, Z: {cur['z']:.2f}\n" f"  A: {cur['a']:.2f}, B: {cur['b']:.2f}, C: {cur['c']:.2f}"
         msg = (
             f"📍 현재 위치를 놓기(Place) 위치로 저장하시겠습니까?\n\n"
             f"[기존 놓기 위치]\n{old_str}\n\n[새 놓기 위치 (현재 TCP)]\n{new_str}\n\n"
             f"픽 사이클이 물체를 이 위치에 내려놓습니다."
         )
-        ret = QMessageBox.question(self, "놓기 위치 저장 확인", msg,
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        ret = QMessageBox.question(self, "놓기 위치 저장 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
 
         self.main.place_pose = cur
         QMessageBox.information(
-            self, "저장 완료",
+            self,
+            "저장 완료",
             f"놓기 위치가 저장되었습니다.\n\n{new_str}",
         )
-        self.main.statusBar().showMessage(
-            f"📍 놓기 위치 저장됨: X={cur['x']:.1f}, Y={cur['y']:.1f}, Z={cur['z']:.1f}"
-        )
+        self.main.statusBar().showMessage(f"📍 놓기 위치 저장됨: X={cur['x']:.1f}, Y={cur['y']:.1f}, Z={cur['z']:.1f}")
         logger.info(f"Place 위치 저장: {cur}")
 
     # ============================================================
@@ -275,8 +267,7 @@ class RobotControlMixin:
     def _cycle_is_running(self) -> bool:
         return bool(getattr(self, "_cycle_active", False))
 
-    def _run_cycle(self, steps: List[Tuple], done_msg: str = "사이클 완료",
-                   on_done=None, on_abort=None):
+    def _run_cycle(self, steps: List[Tuple], done_msg: str = "사이클 완료", on_done=None, on_abort=None):
         if self._cycle_is_running():
             QMessageBox.warning(self, "실행 중", "이미 사이클이 실행 중입니다")
             return
@@ -458,9 +449,9 @@ class RobotControlMixin:
         place = getattr(self.main, "place_pose", None)
         if place is None:
             QMessageBox.warning(
-                self, "놓기 위치 없음",
-                "놓기(Place) 위치가 저장되지 않았습니다.\n"
-                "로봇을 놓을 자리로 조그한 뒤 '📍 놓기 위치 저장'을 먼저 누르세요.",
+                self,
+                "놓기 위치 없음",
+                "놓기(Place) 위치가 저장되지 않았습니다.\n" "로봇을 놓을 자리로 조그한 뒤 '📍 놓기 위치 저장'을 먼저 누르세요.",
             )
             return
 
@@ -481,15 +472,13 @@ class RobotControlMixin:
             f"속도: {speed}%" + (" (AUT 50% 상한)" if self._is_aut_mode() else ""),
             f"Approach 거리: {offset:.0f}mm, 흡착 대기: {dwell:.1f}s",
             "",
-            "순서: Approach → 하강 → 진공ON → 상승 → 놓기 위치 → 진공OFF+블로우"
-            + (" → Home" if home else ""),
+            "순서: Approach → 하강 → 진공ON → 상승 → 놓기 위치 → 진공OFF+블로우" + (" → Home" if home else ""),
             "",
             "⚠ ext_move 가 실행 중이어야 합니다 (진공 + 모션 모두)",
             "⚠ 비상시 Space 또는 비상정지 버튼",
             "\n진행하시겠습니까?",
         ]
-        if QMessageBox.question(self, "픽 사이클 확인", "\n".join(msg),
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if QMessageBox.question(self, "픽 사이클 확인", "\n".join(msg), QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
 
         try:
@@ -722,9 +711,9 @@ class RobotControlMixin:
         place = getattr(self.main, "place_pose", None)
         if has_pick and place is None:
             QMessageBox.warning(
-                self, "놓기 위치 없음",
-                "시퀀스에 픽 액션이 있는데 놓기(Place) 위치가 저장되지 않았습니다.\n"
-                "'📍 놓기 위치 저장'을 먼저 누르세요.",
+                self,
+                "놓기 위치 없음",
+                "시퀀스에 픽 액션이 있는데 놓기(Place) 위치가 저장되지 않았습니다.\n" "'📍 놓기 위치 저장'을 먼저 누르세요.",
             )
             return
         if has_pick and place is not None and not self._validate_z(place["z"]):

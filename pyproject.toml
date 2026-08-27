@@ -1,0 +1,17 @@
+# 코드 포맷 설정 — 에디터(자동 포맷)와 손으로 작성하는 코드가 같은 규칙을 따르도록
+# 이 파일을 저장소에 둔다. black/ruff 모두 pyproject.toml 을 자동으로 읽는다.
+#
+# line-length 150: 한글 주석·UI 문자열이 많아 88(기본)이면 과도하게 잘린다.
+# black 은 한글/전각을 2칸으로 세므로(East Asian Width) 실제 표시 폭 기준 150칸이다.
+#
+# 포맷 적용:  ./venv/bin/python -m black .
+# 확인만:     ./venv/bin/python -m black --check --diff .
+
+[tool.black]
+line-length = 150
+target-version = ["py311"]
+
+# ruff 를 쓰는 편집기용 (동일 규칙)
+[tool.ruff]
+line-length = 150
+target-version = "py311"

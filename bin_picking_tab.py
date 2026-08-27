@@ -96,8 +96,10 @@ class BinBoxDialog(QDialog):
 
         root = QVBoxLayout(self)
 
-        hint_top = QLabel("XY·크기는 2D 뷰에서 <b>드래그</b>로 설정합니다. 여기서는 값을 미세 조정하세요 — "
-                          "특히 <b>회전(yaw)</b>은 드래그로 만들 수 없어 여기서만 조정합니다.")
+        hint_top = QLabel(
+            "XY·크기는 2D 뷰에서 <b>드래그</b>로 설정합니다. 여기서는 값을 미세 조정하세요 — "
+            "특히 <b>회전(yaw)</b>은 드래그로 만들 수 없어 여기서만 조정합니다."
+        )
         hint_top.setWordWrap(True)
         hint_top.setStyleSheet("color:#555; padding:4px;")
         root.addWidget(hint_top)
@@ -147,7 +149,9 @@ class BinBoxDialog(QDialog):
         g3 = QGroupBox("③ 그리퍼·여유 (충돌 검사용)")
         f3 = QFormLayout(g3)
         self.gripper_r = self._mk_spin(0, 300, " mm")
-        self.gripper_r.setToolTip("그리퍼를 원기둥으로 근사했을 때의 반경 (흡착패드+하우징 최대 반경).\n파지점이 벽에서 이만큼 떨어져 있어야 안 부딪힌다.")
+        self.gripper_r.setToolTip(
+            "그리퍼를 원기둥으로 근사했을 때의 반경 (흡착패드+하우징 최대 반경).\n파지점이 벽에서 이만큼 떨어져 있어야 안 부딪힌다."
+        )
         self.wall_margin = self._mk_spin(0, 200, " mm")
         self.wall_margin.setToolTip("벽 추가 안전 여유")
         self.floor_margin = self._mk_spin(0, 200, " mm")
@@ -189,12 +193,17 @@ class BinBoxDialog(QDialog):
         return w
 
     def _load(self, c: Dict):
-        self.cx.setValue(c["cx"]); self.cy.setValue(c["cy"])
-        self.sx.setValue(c["sx"]); self.sy.setValue(c["sy"])
+        self.cx.setValue(c["cx"])
+        self.cy.setValue(c["cy"])
+        self.sx.setValue(c["sx"])
+        self.sy.setValue(c["sy"])
         self.yaw.setValue(c["yaw"])
-        self.z_rim.setValue(c["z_rim"]); self.z_floor.setValue(c["z_floor"])
-        self.gripper_r.setValue(c["gripper_r"]); self.wall_margin.setValue(c["wall_margin"])
-        self.floor_margin.setValue(c["floor_margin"]); self.safe_height.setValue(c["safe_height"])
+        self.z_rim.setValue(c["z_rim"])
+        self.z_floor.setValue(c["z_floor"])
+        self.gripper_r.setValue(c["gripper_r"])
+        self.wall_margin.setValue(c["wall_margin"])
+        self.floor_margin.setValue(c["floor_margin"])
+        self.safe_height.setValue(c["safe_height"])
 
     def _teach(self, spin: QDoubleSpinBox, label: str):
         if self._get_tcp is None:
@@ -209,12 +218,17 @@ class BinBoxDialog(QDialog):
 
     def result_config(self) -> Dict:
         return {
-            "cx": self.cx.value(), "cy": self.cy.value(),
-            "sx": self.sx.value(), "sy": self.sy.value(),
+            "cx": self.cx.value(),
+            "cy": self.cy.value(),
+            "sx": self.sx.value(),
+            "sy": self.sy.value(),
             "yaw": self.yaw.value(),
-            "z_rim": self.z_rim.value(), "z_floor": self.z_floor.value(),
-            "gripper_r": self.gripper_r.value(), "wall_margin": self.wall_margin.value(),
-            "floor_margin": self.floor_margin.value(), "safe_height": self.safe_height.value(),
+            "z_rim": self.z_rim.value(),
+            "z_floor": self.z_floor.value(),
+            "gripper_r": self.gripper_r.value(),
+            "wall_margin": self.wall_margin.value(),
+            "floor_margin": self.floor_margin.value(),
+            "safe_height": self.safe_height.value(),
         }
 
 
@@ -971,7 +985,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
 
-
         # 모드 표시 자동 갱신 (2초마다)
         self._mode_timer = QTimer(self)
         self._mode_timer.timeout.connect(self._refresh_mode_display)
@@ -1135,8 +1148,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             )
         elif self.roi_3d is not None:
             self.main.statusBar().showMessage(
-                f"ROI 설정 (캘리브레이션 없어 Bin Box 미생성): "
-                f"Z[{self.roi_3d['z_min']:.0f},{self.roi_3d['z_max']:.0f}] mm"
+                f"ROI 설정 (캘리브레이션 없어 Bin Box 미생성): " f"Z[{self.roi_3d['z_min']:.0f},{self.roi_3d['z_max']:.0f}] mm"
             )
 
     def _apply_roi_to_3d(self):
@@ -1682,9 +1694,9 @@ class BinPickingTab(RobotControlMixin, QWidget):
         place = getattr(self.main, "place_pose", None)
         if place is None:
             QMessageBox.warning(
-                self, "놓기 위치 없음",
-                "놓기(Place) 위치가 저장되지 않았습니다.\n"
-                "로봇을 놓을 자리로 조그한 뒤 '📍 놓기 위치 저장'을 먼저 누르세요.",
+                self,
+                "놓기 위치 없음",
+                "놓기(Place) 위치가 저장되지 않았습니다.\n" "로봇을 놓을 자리로 조그한 뒤 '📍 놓기 위치 저장'을 먼저 누르세요.",
             )
             return
         prompt = self.sam3_prompt_input.text().strip()
@@ -1705,8 +1717,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             f"Approach: {self.approach_dist.value():.0f}mm, 흡착대기: {self.vac_dwell_spin.value():.1f}s",
             "",
             "각 사이클: 캡처 → SAM3 검출 → 여는 방향 → 자동 선택 →",
-            "  Approach → 하강 → 진공 ON → 상승 → 놓기 → 진공 OFF+블로우"
-            + (" → Home 복귀" if home else "  (⚠ Home 미저장 — 복귀 없음)"),
+            "  Approach → 하강 → 진공 ON → 상승 → 놓기 → 진공 OFF+블로우" + (" → Home 복귀" if home else "  (⚠ Home 미저장 — 복귀 없음)"),
             "",
             "종료: 검출 0개(빈 비움) / 최대 반복 도달 / 정지 버튼 / 비상정지",
             "",
@@ -1714,8 +1725,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             "⚠ 비상시 Space 또는 비상정지 버튼을 사용하세요.",
             "\n시작하시겠습니까?",
         ]
-        if QMessageBox.question(self, "연속 픽 확인", "\n".join(msg),
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if QMessageBox.question(self, "연속 픽 확인", "\n".join(msg), QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
 
         try:
@@ -1805,7 +1815,8 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self._auto_update_progress(f"{n}회차 픽 실행")
         steps = self._build_pick_steps(target, offset, dwell, place, home, label=f"[{n}]")
         self._run_cycle(
-            steps, f"연속 픽 {n}회차 완료",
+            steps,
+            f"연속 픽 {n}회차 완료",
             on_done=self._auto_after_pick,
             on_abort=lambda m: self._auto_stop(f"사이클 중단: {m}"),
         )
@@ -1866,8 +1877,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
             cands.sort(key=lambda c: -c["tcp"]["z"])
 
         best = cands[0]
-        logger.info(f"연속 픽 선택({crit}): 객체 #{best['index'] + 1}, "
-                    f"TCP z={best['tcp']['z']:.1f}mm, 후보 {len(cands)}개")
+        logger.info(f"연속 픽 선택({crit}): 객체 #{best['index'] + 1}, " f"TCP z={best['tcp']['z']:.1f}mm, 후보 {len(cands)}개")
         return best["index"]
 
     # ============================================================
@@ -1878,15 +1888,17 @@ class BinPickingTab(RobotControlMixin, QWidget):
     def _default_bin_box() -> Dict:
         """Bin Box 기본값 (base 좌표계, mm/deg)."""
         return {
-            "cx": 0.0, "cy": 500.0,     # base XY 중심
-            "sx": 300.0, "sy": 200.0,   # 가로·세로 크기
-            "yaw": 0.0,                 # base Z 축 회전(deg) — 빈이 축과 안 맞을 때
-            "z_rim": 150.0,             # 빈 상단(림) 높이 — 진입 안전고 기준
-            "z_floor": 0.0,             # 빈 바닥 높이 — 하강 하한
-            "gripper_r": 30.0,          # 그리퍼 원기둥 근사 반경
-            "wall_margin": 5.0,         # 벽 여유
-            "floor_margin": 5.0,        # 바닥 여유
-            "safe_height": 50.0,        # 림 위로 띄울 진입/이탈 안전고
+            "cx": 0.0,
+            "cy": 500.0,  # base XY 중심
+            "sx": 300.0,
+            "sy": 200.0,  # 가로·세로 크기
+            "yaw": 0.0,  # base Z 축 회전(deg) — 빈이 축과 안 맞을 때
+            "z_rim": 150.0,  # 빈 상단(림) 높이 — 진입 안전고 기준
+            "z_floor": 0.0,  # 빈 바닥 높이 — 하강 하한
+            "gripper_r": 30.0,  # 그리퍼 원기둥 근사 반경
+            "wall_margin": 5.0,  # 벽 여유
+            "floor_margin": 5.0,  # 바닥 여유
+            "safe_height": 50.0,  # 림 위로 띄울 진입/이탈 안전고
         }
 
     @staticmethod
@@ -1985,12 +1997,11 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
         if self.bin_box:  # 기존 값이 있으면 높이·그리퍼 설정은 그대로 둔다
             bb = dict(self.bin_box)
-        else:             # 처음 생성 — 측정값으로 높이 초기화
+        else:  # 처음 생성 — 측정값으로 높이 초기화
             bb = self._default_bin_box()
             bb["z_floor"] = float(np.percentile(base_pts[:, 2], 2))
             bb["z_rim"] = float(np.percentile(base_pts[:, 2], 98))
-        bb.update({"cx": float(cx), "cy": float(cy),
-                   "sx": float(sx), "sy": float(sy), "yaw": float(ang)})
+        bb.update({"cx": float(cx), "cy": float(cy), "sx": float(sx), "sy": float(sy), "yaw": float(ang)})
         return bb
 
     def _bin_box_image_polygon(self) -> Optional[np.ndarray]:
@@ -2029,8 +2040,10 @@ class BinPickingTab(RobotControlMixin, QWidget):
             if self.current_image is not None:
                 h, w = self.current_image.shape[:2]
                 self.roi_2d = (
-                    float(np.clip(poly[:, 0].min(), 0, w)), float(np.clip(poly[:, 1].min(), 0, h)),
-                    float(np.clip(poly[:, 0].max(), 0, w)), float(np.clip(poly[:, 1].max(), 0, h)),
+                    float(np.clip(poly[:, 0].min(), 0, w)),
+                    float(np.clip(poly[:, 1].min(), 0, h)),
+                    float(np.clip(poly[:, 0].max(), 0, w)),
+                    float(np.clip(poly[:, 1].max(), 0, h)),
                 )
         self._render_bin_box()
 
@@ -2064,7 +2077,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         if dlg.exec():
             self.bin_box = dlg.result_config()
             self._save_bin_box()
-            self._refresh_bin_box_views()   # 2D 폴리곤 + 3D 상자 동시 갱신
+            self._refresh_bin_box_views()  # 2D 폴리곤 + 3D 상자 동시 갱신
             bb = self.bin_box
             self.main.statusBar().showMessage(
                 f"Bin Box 설정: 중심({bb['cx']:.0f},{bb['cy']:.0f}) 크기({bb['sx']:.0f}×{bb['sy']:.0f}) "

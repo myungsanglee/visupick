@@ -177,8 +177,10 @@ class ZividCamera(BaseCamera):
                     [0, 0, 1],
                 ],
                 "dist_coeffs": [
-                    dist.k1, dist.k2,
-                    dist.p1, dist.p2,
+                    dist.k1,
+                    dist.k2,
+                    dist.p1,
+                    dist.p2,
                     dist.k3,
                 ],
             }

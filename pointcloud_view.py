@@ -162,9 +162,7 @@ class PointCloudView3D(QWidget):
         self.plotter.add_mesh(edges, color="yellow", line_width=4, name="roi_box", pickable=False, render_lines_as_tubes=True, reset_camera=False)
 
     # 8 코너 → 12 모서리 인덱스 (0~3 아랫면, 4~7 윗면, 같은 순서로 대응)
-    _BOX_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0),
-                  (4, 5), (5, 6), (6, 7), (7, 4),
-                  (0, 4), (1, 5), (2, 6), (3, 7)]
+    _BOX_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
 
     def show_wire_box(self, corners, name: str, color: str = "yellow", line_width: int = 4):
         """임의 방향(회전 포함) 상자를 8 코너로 받아 12 모서리 와이어프레임으로 표시.
@@ -184,8 +182,7 @@ class PointCloudView3D(QWidget):
             lines.extend([2, a, b])  # VTK 선분 포맷: [점 개수, idx0, idx1]
         poly = pv.PolyData(pts)
         poly.lines = np.asarray(lines)
-        self.plotter.add_mesh(poly, color=color, line_width=line_width, name=name,
-                              pickable=False, render_lines_as_tubes=True, reset_camera=False)
+        self.plotter.add_mesh(poly, color=color, line_width=line_width, name=name, pickable=False, render_lines_as_tubes=True, reset_camera=False)
 
     def remove_named(self, name: str):
         """이름으로 액터 제거 (없으면 무시)."""
@@ -331,4 +328,3 @@ class PointCloudView3D(QWidget):
         if best_idx is not None and best_dist < 15:
             self.highlight(best_idx)
             self.objectPicked.emit(best_idx)
-

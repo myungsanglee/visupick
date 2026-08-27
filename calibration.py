@@ -169,8 +169,7 @@ def estimate_pose_from_pointcloud(
         cam_points_projected = _project_onto_plane(cam_points, centroid, normal)
         plane_residuals = np.linalg.norm(cam_points - cam_points_projected, axis=1)
         logger.info(
-            f"평면 피팅 - 포인트 수: {len(cam_points)}, "
-            f"평면 잔차 평균: {plane_residuals.mean():.3f}mm, 최대: {plane_residuals.max():.3f}mm"
+            f"평면 피팅 - 포인트 수: {len(cam_points)}, " f"평면 잔차 평균: {plane_residuals.mean():.3f}mm, 최대: {plane_residuals.max():.3f}mm"
         )
         cam_points = cam_points_projected
 
@@ -258,7 +257,8 @@ def compute_hand_eye(
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         found, corners = cv2.findChessboardCorners(
-            gray, board_size,
+            gray,
+            board_size,
             cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE,
         )
 
@@ -359,10 +359,10 @@ def compute_hand_eye(
     best_name = None
     best_keep = list(keep_idx)
     # 개선 전/후 비교용 (1차 = 전체 포즈, outlier 제거 전)
-    initial_raw_metric = None    # OpenCV 알고리즘 결과 그대로 (비선형 정밀화 전)
-    initial_metric = None        # 비선형 정밀화(NLO) 후
-    initial_alg = None           # 1차에서 선택된 OpenCV 알고리즘 이름
-    removed_names = []           # greedy 로 제외된 포즈 이름
+    initial_raw_metric = None  # OpenCV 알고리즘 결과 그대로 (비선형 정밀화 전)
+    initial_metric = None  # 비선형 정밀화(NLO) 후
+    initial_alg = None  # 1차에서 선택된 OpenCV 알고리즘 이름
+    removed_names = []  # greedy 로 제외된 포즈 이름
 
     iteration = 0
     while True:
@@ -374,7 +374,11 @@ def compute_hand_eye(
 
         logger.info(f"=== Iteration {iteration} (포즈 {len(keep_idx)}개) ===")
         cand_T, cand_name, cand_metric = _try_all_methods(
-            R_in_sub, t_in_sub, R_tc_sub, t_tc_sub, mode,
+            R_in_sub,
+            t_in_sub,
+            R_tc_sub,
+            t_tc_sub,
+            mode,
         )
         if cand_T is None:
             logger.error("모든 알고리즘이 실패했습니다")
@@ -382,12 +386,14 @@ def compute_hand_eye(
 
         refined_T = _refine_hand_eye(cand_T, R_in_sub, t_in_sub, R_tc_sub, t_tc_sub, mode)
         refined_metric, refined_per_pose = _evaluate_hand_eye(
-            refined_T, R_in_sub, t_in_sub, R_tc_sub, t_tc_sub, mode,
+            refined_T,
+            R_in_sub,
+            t_in_sub,
+            R_tc_sub,
+            t_tc_sub,
+            mode,
         )
-        logger.info(
-            f"[{cand_name}+NLO] 일관성 오차: mean={refined_metric:.3f}mm, "
-            f"max={max(refined_per_pose):.3f}mm"
-        )
+        logger.info(f"[{cand_name}+NLO] 일관성 오차: mean={refined_metric:.3f}mm, " f"max={max(refined_per_pose):.3f}mm")
 
         if iteration == 1:  # 전체 포즈 기준 초기 오차 (개선 효과 비교용)
             initial_raw_metric = float(cand_metric)
@@ -437,26 +443,32 @@ def compute_hand_eye(
     n_removed = len(R_in_list) - len(keep_idx)
     report = {
         "T": best_T,
-        "metric_mean": float(best_metric),          # 최종 오차 (개선 후)
-        "metric_initial": initial_metric,           # 1차 오차 (전체 포즈, NLO 후)
-        "metric_initial_raw": initial_raw_metric,   # 1차 오차 (NLO 전, OpenCV 결과 그대로)
-        "algorithm": best_name,                     # 최종 채택 (예: "TSAI+NLO")
-        "algorithm_initial": initial_alg,           # 1차 선택된 OpenCV 알고리즘
+        "metric_mean": float(best_metric),  # 최종 오차 (개선 후)
+        "metric_initial": initial_metric,  # 1차 오차 (전체 포즈, NLO 후)
+        "metric_initial_raw": initial_raw_metric,  # 1차 오차 (NLO 전, OpenCV 결과 그대로)
+        "algorithm": best_name,  # 최종 채택 (예: "TSAI+NLO")
+        "algorithm_initial": initial_alg,  # 1차 선택된 OpenCV 알고리즘
         "n_used": len(keep_idx),
         "n_total": len(R_in_list),
         "n_removed": n_removed,
         "removed_poses": removed_names[:n_removed],
         "pose_method_counts": dict(method_counts),  # {"pointcloud": n, "pnp": m}
     }
-    logger.info(f"리포트: {report['algorithm_initial']} 1차 {initial_raw_metric:.3f}→NLO {initial_metric:.3f}"
-                f"→최종 {best_metric:.3f}mm, 포즈 {len(keep_idx)}/{len(R_in_list)}, 방식 {method_counts}")
+    logger.info(
+        f"리포트: {report['algorithm_initial']} 1차 {initial_raw_metric:.3f}→NLO {initial_metric:.3f}"
+        f"→최종 {best_metric:.3f}mm, 포즈 {len(keep_idx)}/{len(R_in_list)}, 방식 {method_counts}"
+    )
     if return_metric:
         return report
     return best_T
 
 
 def _try_all_methods(
-    R_in_list, t_in_list, R_target2cam_list, t_target2cam_list, mode: str,
+    R_in_list,
+    t_in_list,
+    R_target2cam_list,
+    t_target2cam_list,
+    mode: str,
 ) -> Tuple[Optional[np.ndarray], Optional[str], float]:
     """여러 hand-eye 알고리즘을 시도하고 가장 일관성 좋은 결과 반환"""
     methods = {
@@ -472,14 +484,23 @@ def _try_all_methods(
     for name, method in methods.items():
         try:
             R_out, t_out = cv2.calibrateHandEye(
-                R_in_list, t_in_list, R_target2cam_list, t_target2cam_list, method=method,
+                R_in_list,
+                t_in_list,
+                R_target2cam_list,
+                t_target2cam_list,
+                method=method,
             )
             T = np.eye(4)
             T[:3, :3] = R_out
             T[:3, 3] = t_out.flatten()
 
             metric, per_pose = _evaluate_hand_eye(
-                T, R_in_list, t_in_list, R_target2cam_list, t_target2cam_list, mode,
+                T,
+                R_in_list,
+                t_in_list,
+                R_target2cam_list,
+                t_target2cam_list,
+                mode,
             )
             logger.info(f"  [{name}] mean={metric:.3f}mm, max={max(per_pose):.3f}mm")
             if metric < best_metric:
@@ -530,11 +551,8 @@ def estimate_normal_at_pixel(
         # 품질 체크: 평면에서 벗어난 점이 많으면 fallback
         centroid = valid.mean(axis=0)
         residuals = np.abs((valid - centroid) @ normal)
-        rmse = np.sqrt(np.mean(residuals ** 2))
-        logger.info(
-            f"국소 평면 피팅: {len(valid)}점, RMSE={rmse:.3f}mm "
-            f"(patch {2 * patch_radius + 1}x{2 * patch_radius + 1})"
-        )
+        rmse = np.sqrt(np.mean(residuals**2))
+        logger.info(f"국소 평면 피팅: {len(valid)}점, RMSE={rmse:.3f}mm " f"(patch {2 * patch_radius + 1}x{2 * patch_radius + 1})")
 
         if np.linalg.norm(normal) >= 1e-6:
             normal = normal / np.linalg.norm(normal)
@@ -641,8 +659,10 @@ def _unpack_T(params: np.ndarray) -> np.ndarray:
 
 def _refine_hand_eye(
     T_init: np.ndarray,
-    R_in_list, t_in_list,
-    R_target2cam_list, t_target2cam_list,
+    R_in_list,
+    t_in_list,
+    R_target2cam_list,
+    t_target2cam_list,
     mode: str,
 ) -> np.ndarray:
     """
@@ -652,14 +672,8 @@ def _refine_hand_eye(
     (Eye-to-Hand: target은 gripper에 고정 → target_in_gripper가 일정해야 함)
     (Eye-in-Hand: target은 월드에 고정 → target_in_base가 일정해야 함)
     """
-    T_in_arr = np.array([
-        np.block([[R_in, t_in.reshape(3, 1)], [np.zeros(3), 1]])
-        for R_in, t_in in zip(R_in_list, t_in_list)
-    ])
-    T_tc_arr = np.array([
-        np.block([[R_tc, t_tc.reshape(3, 1)], [np.zeros(3), 1]])
-        for R_tc, t_tc in zip(R_target2cam_list, t_target2cam_list)
-    ])
+    T_in_arr = np.array([np.block([[R_in, t_in.reshape(3, 1)], [np.zeros(3), 1]]) for R_in, t_in in zip(R_in_list, t_in_list)])
+    T_tc_arr = np.array([np.block([[R_tc, t_tc.reshape(3, 1)], [np.zeros(3), 1]]) for R_tc, t_tc in zip(R_target2cam_list, t_target2cam_list)])
 
     def residuals(params):
         T_est = _unpack_T(params)
@@ -671,7 +685,10 @@ def _refine_hand_eye(
 
     try:
         result = least_squares(
-            residuals, _pack_T(T_init), method="lm", max_nfev=500,
+            residuals,
+            _pack_T(T_init),
+            method="lm",
+            max_nfev=500,
         )
         T_refined = _unpack_T(result.x)
 
@@ -687,8 +704,10 @@ def _refine_hand_eye(
 
 def _evaluate_hand_eye(
     T_result: np.ndarray,
-    R_in_list, t_in_list,
-    R_target2cam_list, t_target2cam_list,
+    R_in_list,
+    t_in_list,
+    R_target2cam_list,
+    t_target2cam_list,
     mode: str,
 ) -> Tuple[float, list]:
     """

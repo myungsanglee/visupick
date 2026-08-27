@@ -110,7 +110,9 @@ def opening_from_weight(mask, weight, obb, erode_ratio: float = 0.06, debug: boo
         result["_debug"] = {"eroded": eroded, "geom": (gx0, gy0), "wc": (ex, ey)}
     return result
 
+
 # ---- 개발용 디버그 시각화 (OPENING_DEBUG=True 일 때만) ----
+
 
 def _label_hconcat(panels, h: int = 260, pad: int = 6):
     """[(라벨, BGR 이미지), ...] → 같은 높이로 리사이즈 + 라벨바 붙여 가로로 이어붙인 몽타주."""
@@ -133,6 +135,7 @@ def _label_hconcat(panels, h: int = 260, pad: int = 6):
         out.append(c)
         out.append(np.zeros((hmax, pad, 3), np.uint8))
     return np.hstack(out[:-1])
+
 
 def debug_show_opening(rgb, det, obb, weight, res, idx):
     """'여는 방향' 영상처리 단계를 cv2.imshow 몽타주로 표시 (개발용, OPENING_DEBUG)."""
@@ -197,6 +200,7 @@ def debug_show_opening(rgb, det, obb, weight, res, idx):
     except Exception as e:
         logger.warning(f"여는 방향 디버그 시각화 실패: {e}")
 
+
 def opening_weight_map(gray: np.ndarray, method: str, thr_pct: int) -> np.ndarray:
     """방식별 가중치 맵. seam=Sobel 에지 크기(선택적 백분위 임계), brightness=밝기."""
     if method == "brightness":
@@ -214,8 +218,8 @@ def opening_weight_map(gray: np.ndarray, method: str, thr_pct: int) -> np.ndarra
         grad = np.where(grad >= t, grad, 0.0).astype(np.float32)
     return grad
 
-def opening_from_grid(mask, gray, obb, debug: bool = False,
-                      band_thr: float = 0.4, side_crop: float = 0.15) -> Optional[Dict]:
+
+def opening_from_grid(mask, gray, obb, debug: bool = False, band_thr: float = 0.4, side_crop: float = 0.15) -> Optional[Dict]:
     """내부 격자(칸 배열) 비대칭으로 여는 방향 추정 — 투명 케이스 전용, 가장 강건.
 
     투명 케이스 내부의 2×N 칸 배열이 한쪽으로 치우쳐(빈 여백 띠가 반대쪽에) 있는 걸
@@ -301,6 +305,7 @@ def opening_from_grid(mask, gray, obb, debug: bool = False,
     if debug:
         debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf)
     return result
+
 
 def debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf):
     """[개발용] 격자 방식 중간 단계(warp+격자밴드+프로파일)를 cv2.imshow 로 표시."""

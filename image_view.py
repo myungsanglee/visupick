@@ -65,11 +65,7 @@ class ZoomableImageLabel(QLabel):
 
     def set_image(self, bgr: Optional[np.ndarray]):
         """원본 BGR 이미지 설정. 크기가 바뀌면 뷰가 자동 리셋된다."""
-        size_changed = (
-            self._bgr is None
-            or bgr is None
-            or self._bgr.shape != bgr.shape
-        )
+        size_changed = self._bgr is None or bgr is None or self._bgr.shape != bgr.shape
         self._bgr = bgr
         if size_changed:
             self._zoom = 1.0
@@ -158,12 +154,17 @@ class ZoomableImageLabel(QLabel):
         offset_y = (label_h - disp_h) / 2.0 + self._pan[1]
 
         # 이미지 → 위젯 affine 변환 한 번에 적용 (메모리/시간 모두 효율)
-        M = np.array([
-            [display, 0.0, offset_x],
-            [0.0, display, offset_y],
-        ], dtype=np.float32)
+        M = np.array(
+            [
+                [display, 0.0, offset_x],
+                [0.0, display, offset_y],
+            ],
+            dtype=np.float32,
+        )
         warped = cv2.warpAffine(
-            canvas, M, (label_w, label_h),
+            canvas,
+            M,
+            (label_w, label_h),
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=self.BACKGROUND_BGR,
@@ -175,7 +176,10 @@ class ZoomableImageLabel(QLabel):
 
         rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
         qimage = QImage(
-            rgb.data, label_w, label_h, label_w * 3,
+            rgb.data,
+            label_w,
+            label_h,
+            label_w * 3,
             QImage.Format_RGB888,
         ).copy()
         pixmap = QPixmap.fromImage(qimage)
