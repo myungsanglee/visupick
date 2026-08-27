@@ -636,7 +636,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         op_row.addSpacing(10)
         self.opening_grid_thr_spin = QSpinBox()
         self.opening_grid_thr_spin.setRange(10, 90)
-        self.opening_grid_thr_spin.setValue(40)
+        self.opening_grid_thr_spin.setValue(45)
         self.opening_grid_thr_spin.setFixedWidth(60)
         self.opening_grid_thr_spin.setToolTip(
             "격자 방식 전용: 세로벽 밀도 프로파일 최댓값의 이 % 이상인 구간을 '격자 밴드'로\n"
