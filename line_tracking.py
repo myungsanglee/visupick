@@ -14,7 +14,7 @@ surface_tracking_tab.py 의 UI 와 동거하던 모듈 레벨 알고리즘을 �
 
 import logging
 from collections import deque
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 
 import cv2
 import numpy as np

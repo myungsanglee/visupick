@@ -22,6 +22,7 @@ UI 쪽(cad_matching_tab.py)은 위젯 값을 읽어 이 함수들을 호출하�
 import copy
 import time
 import logging
+from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
 import numpy as np
