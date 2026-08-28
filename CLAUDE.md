@@ -22,7 +22,7 @@ python main.py                 # 유일한 진입점 — GUI 실행
 
 아래의 파일 간 관계를 이해하는 것이 생산성의 지름길이다:
 
-**공유 상태는 한 곳에 있다.** [main.py](main.py)의 `VisuPickApp(QMainWindow)`이 유일한 `self.robot`(`KUKARobot`), `self.camera`(`BaseCamera`), `self.calib`(`CalibrationContext` — 캘리브레이션 행렬/모드와 cam↔base 좌표 변환)을 소유한다. 탭은 [vision_tab_mixin.py](vision_tab_mixin.py)의 `VisionTabMixin` 프로퍼티(`T_calib`/`calib_mode`)로 캘리브레이션을 **읽기만** 하며, 어느 탭에서 로드하든 모든 탭에 적용된다 (탭 로컬 복사본 금지 — 대입하면 AttributeError). 모든 탭을 생성할 때 *자기 자신*을 `main_window`로 넘기므로, 탭은 `self.main.robot` / `self.main.camera`로 하드웨어에 접근한다 — 탭이 연결을 직접 소유하지 않는다. 연결/해제 버튼도 탭이 아니라 메인 윈도우에 있다.
+**공유 상태는 한 곳에 있다.** [main.py](main.py)의 `VisuPickApp(QMainWindow)`이 유일한 `self.robot`(`KUKARobot`), `self.camera`(`BaseCamera`), `self.calib`(`CalibrationContext` — 캘리브레이션 행렬/모드와 cam↔base 좌표 변환)을 소유한다. 탭은 [vision_tab_mixin.py](vision_tab_mixin.py)의 `VisionTabMixin` 프로퍼티(`T_calib`/`calib_mode`)로 캘리브레이션을 **읽기만** 하며, 어느 탭에서 로드하든 모든 탭에 적용된다 (탭 로컬 복사본 금지 — 대입하면 AttributeError). `VisionTabMixin` 은 그 외에도 비전 탭 공통 골격을 소유한다: `_capture`(카메라 캡처 골격 — 탭은 `_on_capture` 훅만 구현, 법선이 필요 없는 탭은 `CAPTURE_READS_NORMALS = False`), `_switch_view`(탭은 `self._view_pages` 목록만 선언), `_render_tcp_visualization`(그리퍼 접근 자세 3D 시각화 — 탭은 `_tcp_viz_origin` 훅만 구현). 로봇 모드 라벨(`_refresh_mode_display`)은 `RobotControlMixin` 공용이다. **이 공통 골격을 다시 탭에 복붙하지 말 것.** 모든 탭을 생성할 때 *자기 자신*을 `main_window`로 넘기므로, 탭은 `self.main.robot` / `self.main.camera`로 하드웨어에 접근한다 — 탭이 연결을 직접 소유하지 않는다. 연결/해제 버튼도 탭이 아니라 메인 윈도우에 있다.
 
 **탭 5개, 믹스인 2개:**
 - [main.py](main.py)에 `DataCollectionTab`과 `VerificationTab`이 정의됨 (둘 다 `ImageViewerMixin` 사용).

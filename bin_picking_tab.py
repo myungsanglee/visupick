@@ -787,6 +787,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.view_3d = PointCloudView3D()
         self.view_3d.objectPicked.connect(self._on_object_picked)
         self.view_stack.addWidget(self.view_3d)
+        # 뷰 전환은 VisionTabMixin._switch_view 공용 — 스택 인덱스 순서대로 (버튼, 3D뷰|None)
+        self._view_pages = [(self.btn_view_2d, None), (self.btn_view_3d, self.view_3d)]
 
         splitter.addWidget(self.view_stack)
 
@@ -924,49 +926,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.opening_grid_thr_widget.setVisible(method == "grid")
         self.opening_grid_crop_widget.setVisible(method == "grid")
 
-    def _switch_view(self, idx: int):
-        self.view_stack.setCurrentIndex(idx)
-        self.btn_view_2d.setChecked(idx == 0)
-        self.btn_view_3d.setChecked(idx == 1)
-        # 3D로 전환 시 위젯 크기가 확정된 후 카메라 재적용
-        if idx == 1:
-            # Qt가 리사이즈를 처리한 뒤 카메라 적용 (지연)
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, self.view_3d.refresh_camera)
-
-    def _capture(self):
-        if not self.main.camera or not self.main.camera.connected:
-            QMessageBox.warning(self, "오류", "카메라가 연결되지 않았습니다")
-            return
-        if not self.main.camera.is_capture_ready:
-            QMessageBox.warning(self, "오류", "카메라가 캡처 준비되지 않았습니다 (Zivid 는 YML 로드 필요)")
-            return
-
-        self.main.statusBar().showMessage("캡처 중...")
-        QApplication.processEvents()
-
-        frame = self.main.camera.capture()
-        if frame is None:
-            self.main.statusBar().showMessage("캡처 실패")
-            return
-
-        image = self.main.camera.frame_to_2d_image(frame)  # BGR
-        xyz = self.main.camera.frame_to_point_cloud(frame)  # (H, W, 3) mm
-        normals = self.main.camera.frame_to_normals(frame)  # (H, W, 3)
-        if image is None or xyz is None:
-            self.main.statusBar().showMessage("데이터 추출 실패")
-            return
-
-        self.current_image = image
-        self.current_xyz = xyz
-        self.current_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        self.current_normals = normals
-
-        intr_data = self.main.camera.get_intrinsics()
-        if intr_data:
-            self.current_intrinsics = np.array(intr_data["camera_matrix"])
-
+    def _on_capture(self, image, xyz):
+        """캡처 후처리: 이전 검출/선택 리셋 + 2D/3D 뷰 갱신 (골격은 VisionTabMixin._capture)."""
         # 검출 리셋
         self.detections = []
         self.pick_objects = []
@@ -2179,92 +2140,12 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         except Exception:
             return None
 
-    def _render_tcp_visualization(self):
-        """
-        선택된 객체 바로 위에 그리퍼 접근 자세를 시각화:
-          - Tool 좌표축 (X 빨강, Y 초록, Z 파랑) → 그리퍼가 어느 방향으로 접근할지
-          - Approach 지점 (주황 구) + target까지 경로선
-
-        3D 뷰는 **카메라 좌표계**라서 베이스 좌표계의 target_pose를 그대로
-        그리면 좌표계가 달라 객체와 동떨어진 곳에 표시된다. 따라서:
-          - 위치는 obj["center"] (카메라 좌표계 객체 중심) 사용
-          - 회전은 베이스 좌표계의 Tool 자세를 카메라 좌표계로 역변환 후 사용
-        """
-        plotter = self.view_3d.plotter
-        for name in self._tcp_viz_actors:
-            try:
-                plotter.remove_actor(name)
-            except Exception:
-                pass
-        self._tcp_viz_actors.clear()
-
-        if self.target_pose is None or self.selected_idx is None or self.T_calib is None:
-            plotter.render()
-            return
+    def _tcp_viz_origin(self):
+        """빈 픽킹: 선택 객체의 중심(카메라 좌표계)이 시각화 원점."""
         obj = next((o for o in self.pick_objects if o["index"] == self.selected_idx), None)
         if obj is None:
-            plotter.render()
-            return
-
-        # 위치: 객체 중심 (카메라 좌표계 — 3D 뷰의 좌표계와 동일)
-        origin = np.array(obj["center"], dtype=np.float32)
-
-        # 회전: 베이스 좌표계의 target 자세 → 카메라 좌표계 자세
-        R_target_base = tcp_to_homogeneous(self.target_pose)[:3, :3]
-        # cam→base 회전의 전치 = base→cam (모드 분기는 CalibrationContext 소유)
-        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
-        T_c2b = self.main.calib.T_cam_to_base(tcp)
-        if T_c2b is not None:
-            R_in_cam = T_c2b[:3, :3].T @ R_target_base
-        else:
-            plotter.render()
-            return
-
-        L = 50.0  # 축 길이 mm
-        for axis_idx, color, suffix in [(0, "red", "x"), (1, "green", "y"), (2, "blue", "z")]:
-            endpoint = (origin + R_in_cam[:, axis_idx] * L).astype(np.float32)
-            line = pv.PolyData(np.array([origin, endpoint], dtype=np.float32))
-            line.lines = np.array([2, 0, 1])
-            name = f"tcp_axis_{suffix}"
-            plotter.add_mesh(
-                line,
-                color=color,
-                line_width=6,
-                name=name,
-                render_lines_as_tubes=True,
-                pickable=False,
-                reset_camera=False,
-            )
-            self._tcp_viz_actors.append(name)
-
-        # Approach 지점 = Tool -Z 방향으로 offset 떨어진 곳 (카메라 좌표계 -Z)
-        offset = float(self.approach_dist.value()) if self.use_approach.isChecked() else 50.0
-        approach_pos = (origin - R_in_cam[:, 2] * offset).astype(np.float32)
-        sphere = pv.Sphere(radius=4, center=approach_pos)
-        plotter.add_mesh(
-            sphere,
-            color="#ffaa00",
-            name="tcp_approach",
-            pickable=False,
-            reset_camera=False,
-        )
-        self._tcp_viz_actors.append("tcp_approach")
-
-        # Approach → Target 경로선
-        path = pv.PolyData(np.array([approach_pos, origin], dtype=np.float32))
-        path.lines = np.array([2, 0, 1])
-        plotter.add_mesh(
-            path,
-            color="#ffaa00",
-            line_width=3,
-            name="tcp_path",
-            render_lines_as_tubes=True,
-            pickable=False,
-            reset_camera=False,
-        )
-        self._tcp_viz_actors.append("tcp_path")
-
-        plotter.render()
+            return None
+        return np.array(obj["center"], dtype=np.float32)
 
     # ============================================================
     # 로봇 이동 / 비상정지 제어
@@ -2393,28 +2274,3 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ============================================================
     # AUT 모드 안전 기능
     # ============================================================
-
-    def _refresh_mode_display(self):
-        """현재 로봇 모드를 라벨에 표시 (2초마다 호출)"""
-        if self.main.robot is None:
-            self._current_mode = "?"
-            self.mode_label.setText("모드: 미연결")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #BDBDBD; color: white; border-radius: 3px;")
-            return
-        try:
-            m = self.main.robot.read_variable("$MODE_OP")
-            if m:
-                self._current_mode = normalize_robot_mode(m)
-        except Exception:
-            return
-
-        if is_auto_mode(self._current_mode):
-            # AUT/EXT는 위험 → 빨간색 강조
-            self.mode_label.setText(f"⚠ {self._current_mode} (자동 운용)")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #D32F2F; color: white; border-radius: 3px;")
-        elif "T1" in self._current_mode or "T2" in self._current_mode:
-            self.mode_label.setText(f"{self._current_mode} (수동)")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #2E7D32; color: white; border-radius: 3px;")
-        else:
-            self.mode_label.setText(f"모드: {self._current_mode}")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #757575; color: white; border-radius: 3px;")

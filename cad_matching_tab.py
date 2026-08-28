@@ -520,6 +520,8 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
       7. 이동 (Approach/Target/Retract)
     """
 
+    CAPTURE_READS_NORMALS = False  # 정합(FPFH/PPF)이 법선을 자체 계산하므로 캡처 때는 불필요
+
     DEFAULT_VOXEL_SIZE = 5.0  # mm
     DEFAULT_MAX_INSTANCES = 5
     DEFAULT_FITNESS_THRESHOLD = 0.20
@@ -1102,6 +1104,14 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         # 클러스터 미리보기 전용 3D 뷰 (DBSCAN 결과 시각화)
         self.view_cluster = PointCloudView3D()
         self.view_stack.addWidget(self.view_cluster)
+        # 뷰 전환은 VisionTabMixin._switch_view 공용 — 스택 인덱스 순서대로 (버튼, 3D뷰|None)
+        self._view_pages = [
+            (self.btn_view_2d, None),
+            (self.btn_view_3d, self.view_3d),
+            (self.btn_view_cad, self.view_cad),
+            (self.btn_view_cluster, self.view_cluster),
+        ]
+
         splitter.addWidget(self.view_stack)
 
         # 우: 정보 패널
@@ -1331,19 +1341,6 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
             if not self._programmatic_axis_change:
                 self._last_non_off_grasp_axis = text
 
-    def _switch_view(self, idx: int):
-        self.view_stack.setCurrentIndex(idx)
-        self.btn_view_2d.setChecked(idx == 0)
-        self.btn_view_3d.setChecked(idx == 1)
-        self.btn_view_cad.setChecked(idx == 2)
-        self.btn_view_cluster.setChecked(idx == 3)
-        if idx == 1:
-            self.view_3d.refresh_camera()
-        elif idx == 2:
-            self.view_cad.refresh_camera()
-        elif idx == 3:
-            self.view_cluster.refresh_camera()
-
     # ---------------------------------------------------------
     # 데이터 로드
     # ---------------------------------------------------------
@@ -1432,40 +1429,8 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.calib_label.setText(f"{name} [{self.calib_mode}]")
         self.calib_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
 
-    def _capture(self):
-        if not self.main.camera or not self.main.camera.connected:
-            QMessageBox.warning(self, "오류", "카메라가 연결되지 않았습니다")
-            return
-        if not self.main.camera.is_capture_ready:
-            QMessageBox.warning(self, "오류", "카메라가 캡처 준비되지 않았습니다 (Zivid 는 YML 로드 필요)")
-            return
-
-        self.main.statusBar().showMessage("캡처 중...")
-        QApplication.processEvents()
-
-        frame = self.main.camera.capture()
-        if frame is None:
-            self.main.statusBar().showMessage("캡처 실패")
-            return
-
-        image = self.main.camera.frame_to_2d_image(frame)
-        xyz = self.main.camera.frame_to_point_cloud(frame)
-        if image is None or xyz is None:
-            self.main.statusBar().showMessage("이미지/포인트클라우드 추출 실패")
-            return
-
-        self.current_image = image
-        self.current_xyz = xyz
-        # PyVista용 RGB
-        import cv2
-
-        self.current_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # intrinsics
-        intr_data = self.main.camera.get_intrinsics()
-        if intr_data:
-            self.current_intrinsics = np.array(intr_data["camera_matrix"])
-
+    def _on_capture(self, image, xyz):
+        """캡처 후처리: 뷰 갱신 + 이전 매칭 결과 리셋 (골격은 VisionTabMixin._capture)."""
         # 2D 뷰 갱신
         self.view_2d.set_image(image)
         # 3D 뷰 갱신
@@ -2115,98 +2080,13 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         # 3D 뷰에 Tool 자세 시각화 (Tool 좌표축 + approach 지점 + 경로선)
         self._render_tcp_visualization()
 
-    def _render_tcp_visualization(self):
-        """
-        선택된 인스턴스의 grasp 점에 그리퍼 접근 자세를 시각화:
-          - Tool 좌표축 (X 빨강, Y 초록, Z 파랑) → 그리퍼가 어느 방향으로 다가갈지
-          - Approach 지점 (주황 구) + target까지 경로선
-
-        bin_picking 탭의 동일 기능과 같은 디자인. 단 cad_matching은
-        target_pose의 origin이 객체 중심이 아니라 grasp 점이고, ABC 회전
-        보정도 들어가 있으므로:
-          - 위치는 인스턴스 변환 + grasp_offset을 카메라 좌표계로 적용한 점
-          - 회전은 target_pose(베이스)를 카메라 좌표계로 역변환
-        """
-        plotter = self.view_3d.plotter
-        for name in self._tcp_viz_actors:
-            try:
-                plotter.remove_actor(name)
-            except Exception:
-                pass
-        self._tcp_viz_actors.clear()
-
-        if self.target_pose is None or self.selected_idx is None or self.T_calib is None or self.selected_idx >= len(self.instances):
-            plotter.render()
-            return
-
-        # 위치: 인스턴스 변환 + grasp_offset → 카메라 좌표계 grasp 점
+    def _tcp_viz_origin(self):
+        """CAD 매칭: 인스턴스 변환 + grasp_offset 을 적용한 grasp 점(카메라 좌표계)."""
+        if self.selected_idx >= len(self.instances):
+            return None
         T_inst = self.instances[self.selected_idx]["transformation"]
-        grasp_local = np.array(
-            [
-                self.grasp_position_cad[0],
-                self.grasp_position_cad[1],
-                self.grasp_position_cad[2],
-                1.0,
-            ]
-        )
-        origin = (T_inst @ grasp_local)[:3].astype(np.float32)
-
-        # 회전: 베이스 좌표계 target 자세 → 카메라 좌표계
-        R_target_base = tcp_to_homogeneous(self.target_pose)[:3, :3]
-        # cam→base 회전의 전치 = base→cam (모드 분기는 CalibrationContext 소유)
-        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
-        T_c2b = self.main.calib.T_cam_to_base(tcp)
-        if T_c2b is not None:
-            R_in_cam = T_c2b[:3, :3].T @ R_target_base
-        else:
-            plotter.render()
-            return
-
-        L = 50.0
-        for axis_idx, color, suffix in [(0, "red", "x"), (1, "green", "y"), (2, "blue", "z")]:
-            endpoint = (origin + R_in_cam[:, axis_idx] * L).astype(np.float32)
-            line = pv.PolyData(np.array([origin, endpoint], dtype=np.float32))
-            line.lines = np.array([2, 0, 1])
-            name = f"tcp_axis_{suffix}"
-            plotter.add_mesh(
-                line,
-                color=color,
-                line_width=6,
-                name=name,
-                render_lines_as_tubes=True,
-                pickable=False,
-                reset_camera=False,
-            )
-            self._tcp_viz_actors.append(name)
-
-        # Approach 지점 (Tool -Z 방향으로 offset)
-        offset = float(self.approach_dist.value()) if self.use_approach.isChecked() else 50.0
-        approach_pos = (origin - R_in_cam[:, 2] * offset).astype(np.float32)
-        sphere = pv.Sphere(radius=4, center=approach_pos)
-        plotter.add_mesh(
-            sphere,
-            color="#ffaa00",
-            name="tcp_approach",
-            pickable=False,
-            reset_camera=False,
-        )
-        self._tcp_viz_actors.append("tcp_approach")
-
-        # Approach → Target 경로선
-        path = pv.PolyData(np.array([approach_pos, origin], dtype=np.float32))
-        path.lines = np.array([2, 0, 1])
-        plotter.add_mesh(
-            path,
-            color="#ffaa00",
-            line_width=3,
-            name="tcp_path",
-            render_lines_as_tubes=True,
-            pickable=False,
-            reset_camera=False,
-        )
-        self._tcp_viz_actors.append("tcp_path")
-
-        plotter.render()
+        grasp_local = np.array([self.grasp_position_cad[0], self.grasp_position_cad[1], self.grasp_position_cad[2], 1.0])
+        return (T_inst @ grasp_local)[:3].astype(np.float32)
 
     def _flip_target_180(self):
         """
@@ -2318,28 +2198,3 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ---------------------------------------------------------
     # 모드 폴링
     # ---------------------------------------------------------
-
-    def _refresh_mode_display(self):
-        if not self.main.robot:
-            self.mode_label.setText("모드: 미연결")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; background-color: #BDBDBD; color: white; border-radius: 3px;")
-            self._current_mode = "?"
-            return
-        try:
-            raw = self.main.robot.read_variable("$MODE_OP")
-            if raw is None:
-                return
-            mode = normalize_robot_mode(raw)
-            self._current_mode = mode
-            self.mode_label.setText(f"모드: {mode}")
-            if is_auto_mode(mode):
-                bg = "#d32f2f"
-            elif mode == "T1":
-                bg = "#388e3c"
-            elif mode == "T2":
-                bg = "#f57c00"
-            else:
-                bg = "#616161"
-            self.mode_label.setStyleSheet(f"padding: 4px 10px; font-weight: bold; background-color: {bg}; color: white; border-radius: 3px;")
-        except Exception:
-            pass

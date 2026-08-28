@@ -971,7 +971,9 @@ Mixin 안에 들어간 메서드 (19개):
 - 진공 그리퍼 / 픽 사이클: `_build_vacuum_row` (진공 ON/OFF/블로우 + 픽 실행/놓기저장/흡착대기 2행 생성), `_make_add_pick_to_seq_button` ("➕ 픽 추가" 버튼 — 탭이 시퀀스 큐 그룹에 배치), `_set_vacuum_ui`, `_vacuum_blow_ui`, `_set_place_to_current`, `_execute_pick_cycle`, `_enqueue_pick`, 단계별 실행기 `_run_cycle`/`_cycle_tick`/`_build_pick_steps`/`_expand_action_to_steps`
 - 기타: `_on_robot_connected`, `_compute_approach_position` (staticmethod)
 
-`_refresh_mode_display` 만 탭별 표시 스타일이 달라서 Mixin 밖에 남았다 (logic은 공통 `is_auto_mode` 사용).
+`_refresh_mode_display` 도 이제 Mixin 공용이다 — 실측해 보니 세 탭이 사실상 같은 코드였다 (bin vs surface 유사도 97%). 통합하며 T2 는 CAD 탭의 주황 경고색을 채택했다 (수동 '고속' 모드라 초록보다 경고가 맞음).
+
+또한 비전 쪽 공통 골격은 [vision_tab_mixin.py](../vision_tab_mixin.py) `VisionTabMixin` 이 소유한다: 캘리브레이션 로드/프로퍼티(`T_calib`·`calib_mode` — main 의 `CalibrationContext` 하나를 읽음), `_capture` 골격(탭은 `_on_capture` 훅), `_switch_view`(탭은 `_view_pages` 선언), `_render_tcp_visualization`(탭은 `_tcp_viz_origin` 훅 — 빈 픽킹은 객체 중심, CAD 매칭은 grasp 점).
 
 이렇게 통합한 덕분에 e-stop 해제 동작 같은 안전 관련 수정도, **버튼 배치 같은 UI 수정도** 한 곳에서 끝나고 두 탭이 자동으로 동일하게 동작 — 이전엔 두 탭이 따로 수정되다 안전 동작과 버튼 배치가 어긋난 적이 있었음.
 

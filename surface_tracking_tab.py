@@ -348,6 +348,8 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
 
         self.view_3d = PointCloudView3D()
         self.view_stack.addWidget(self.view_3d)
+        # 뷰 전환은 VisionTabMixin._switch_view 공용 — 스택 인덱스 순서대로 (버튼, 3D뷰|None)
+        self._view_pages = [(self.btn_view_2d, None), (self.btn_view_3d, self.view_3d)]
 
         splitter.addWidget(self.view_stack)
 
@@ -605,49 +607,12 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
         btn.setVisible(False)
         return btn
 
-    def _switch_view(self, idx: int):
-        self.view_stack.setCurrentIndex(idx)
-        self.btn_view_2d.setChecked(idx == 0)
-        self.btn_view_3d.setChecked(idx == 1)
-        if idx == 1:
-            QTimer.singleShot(0, self.view_3d.refresh_camera)
-
     # ------------------------------------------------------------
     # 캘리브레이션 / 캡처
     # ------------------------------------------------------------
 
-    def _capture(self):
-        if not self.main.camera or not self.main.camera.connected:
-            QMessageBox.warning(self, "오류", "카메라가 연결되지 않았습니다")
-            return
-        if not self.main.camera.is_capture_ready:
-            QMessageBox.warning(self, "오류", "카메라가 캡처 준비되지 않았습니다 (Zivid 는 YML 로드 필요)")
-            return
-
-        self.main.statusBar().showMessage("캡처 중...")
-        QApplication.processEvents()
-
-        frame = self.main.camera.capture()
-        if frame is None:
-            self.main.statusBar().showMessage("캡처 실패")
-            return
-
-        image = self.main.camera.frame_to_2d_image(frame)
-        xyz = self.main.camera.frame_to_point_cloud(frame)
-        normals = self.main.camera.frame_to_normals(frame)
-        if image is None or xyz is None:
-            self.main.statusBar().showMessage("데이터 추출 실패")
-            return
-
-        self.current_image = image
-        self.current_xyz = xyz
-        self.current_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        self.current_normals = normals
-
-        intr_data = self.main.camera.get_intrinsics()
-        if intr_data:
-            self.current_intrinsics = np.array(intr_data["camera_matrix"])
-
+    def _on_capture(self, image, xyz):
+        """캡처 후처리: 경로/끝점 상태 리셋 + 뷰 갱신 (골격은 VisionTabMixin._capture)."""
         # 상태 리셋 (ROI는 사용자가 원하면 캡처 후에도 재사용 가능하니 유지)
         self.line_mask = None
         self.skeleton = None
@@ -1200,26 +1165,3 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ------------------------------------------------------------
     # 모드 표시 (BinPickingTab과 동일)
     # ------------------------------------------------------------
-
-    def _refresh_mode_display(self):
-        if self.main.robot is None:
-            self._current_mode = "?"
-            self.mode_label.setText("모드: 미연결")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #BDBDBD; color: white; border-radius: 3px;")
-            return
-        try:
-            m = self.main.robot.read_variable("$MODE_OP")
-            if m:
-                self._current_mode = normalize_robot_mode(m)
-        except Exception:
-            return
-
-        if is_auto_mode(self._current_mode):
-            self.mode_label.setText(f"⚠ {self._current_mode} (자동 운용)")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #D32F2F; color: white; border-radius: 3px;")
-        elif "T1" in self._current_mode or "T2" in self._current_mode:
-            self.mode_label.setText(f"{self._current_mode} (수동)")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #2E7D32; color: white; border-radius: 3px;")
-        else:
-            self.mode_label.setText(f"모드: {self._current_mode}")
-            self.mode_label.setStyleSheet("padding: 4px 10px; font-weight: bold; " "background-color: #757575; color: white; border-radius: 3px;")

@@ -18,8 +18,8 @@ btn_set_home, btn_move_place, btn_set_place, btn_add_obj_to_seq, btn_add_home_to
 
 빌더가 만들지 않아 **탭이 직접 준비해야 하는** 것: self.main (.robot, .home_pose,
 .statusBar()), self.target_pose, self.selected_idx, self.user_queue, self._current_mode.
-또한 각 탭 고유의 self._refresh_mode_display() 와 self._execute_move() 를 호출한다
-(MRO상 탭 구현이 사용됨).
+또한 탭 고유의 self._execute_move() 를 호출한다 (MRO상 탭 구현이 사용됨).
+_refresh_mode_display 는 세 탭이 사실상 같은 코드여서 이 믹스인으로 통합했다.
 """
 
 import time
@@ -148,6 +148,39 @@ class RobotControlMixin:
                 self.main.statusBar().showMessage("▶ 잠시 후 사이클 재개...")
             else:
                 self._cycle_abort("사용자가 재개를 취소함")
+
+    def _refresh_mode_display(self):
+        """현재 로봇 모드를 라벨에 표시 (탭 타이머가 2초마다 호출).
+
+        모드별 색: AUT/EXT 빨강(자동 운용 경고), T1 초록(수동 저속),
+        T2 주황(수동 고속 — 250mm/s 제한이 풀리므로 경고색), 그 외 회색.
+        """
+        style = "padding: 4px 10px; font-weight: bold; color: white; border-radius: 3px; background-color: %s;"
+        if self.main.robot is None:
+            self._current_mode = "?"
+            self.mode_label.setText("모드: 미연결")
+            self.mode_label.setStyleSheet(style % "#BDBDBD")
+            return
+        try:
+            m = self.main.robot.read_variable("$MODE_OP")
+            if m:
+                self._current_mode = normalize_robot_mode(m)
+        except Exception:
+            return
+
+        mode = self._current_mode
+        if is_auto_mode(mode):
+            self.mode_label.setText(f"⚠ {mode} (자동 운용)")
+            self.mode_label.setStyleSheet(style % "#D32F2F")
+        elif "T1" in mode:
+            self.mode_label.setText(f"{mode} (수동)")
+            self.mode_label.setStyleSheet(style % "#2E7D32")
+        elif "T2" in mode:
+            self.mode_label.setText(f"{mode} (수동 고속)")
+            self.mode_label.setStyleSheet(style % "#F57C00")
+        else:
+            self.mode_label.setText(f"모드: {mode}")
+            self.mode_label.setStyleSheet(style % "#757575")
 
     def _on_robot_connected(self):
         """로봇 연결 시 main이 호출. Home/진공 관련 버튼 활성화."""
