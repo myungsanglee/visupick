@@ -39,3 +39,4 @@ pyrealsense2>=2.54
 # 로 opencv 를 contrib 하나로 되돌릴 것.
 # 주의 3: SAM3 pyproject 가 런타임 의존성 일부를 누락함 → 아래를 별도 설치해야 import 됨:
 #   pip install einops pycocotools psutil hydra-core omegaconf timm huggingface_hub ftfy iopath
+pytest  # 순수 모듈(calibration/opening_analysis/cad_registration/line_tracking) 테스트용

@@ -16,7 +16,7 @@ pip install -r requirements.txt
 python main.py                 # 유일한 진입점 — GUI 실행
 ```
 
-**테스트 스위트, 린터, 빌드 단계가 없다.** 검증은 GUI를 통한 수동 확인이다 (실제 로봇 + 카메라 필요, 또는 SDK 스텁). `pytest`/`make`/CI가 있다고 가정하지 말 것.
+**순수 모듈에는 pytest 테스트가 있다** — `venv/bin/python -m pytest tests/ -q` (34개, 하드웨어 불필요). 대상: `calibration.py`(변환 왕복·CalibrationContext), `opening_analysis.py`(합성 OBB·격자), `cad_registration.py`(합성 장면 정합·자세 변환), `line_tracking.py`(합성 선). **순수 모듈을 수정하면 반드시 pytest 를 돌린다.** GUI/로봇/카메라 쪽은 여전히 수동 확인이다 (실제 하드웨어 또는 SDK 스텁) — 그쪽엔 CI/빌드 단계가 없다고 가정할 것.
 
 ## 아키텍처 — 큰 그림
 
