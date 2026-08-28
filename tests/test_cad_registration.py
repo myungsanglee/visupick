@@ -68,3 +68,20 @@ class TestSuggestRotation:
 
         R = tcp_to_homogeneous({"x": 0, "y": 0, "z": 0, "a": abc[0], "b": abc[1], "c": abc[2]})[:3, :3]
         assert np.allclose(R[:, 2], [0, 0, -1], atol=1e-6)
+
+
+class TestLoadCadModel:
+    """모듈 추출 때 Path import 누락으로 호출 시점에 NameError 가 났던 회귀 방지.
+    (import 검증으로는 안 잡힘 — 함수 본문에서만 쓰는 이름이라 실제 호출이 필요)"""
+
+    def test_load_stl(self, tmp_path):
+        mesh = o3d.geometry.TriangleMesh.create_box(30, 20, 10)
+        mesh.compute_vertex_normals()
+        p = str(tmp_path / "box.stl")
+        o3d.io.write_triangle_mesh(p, mesh)
+        pcd, loaded_mesh = cr.load_cad_model(p, n_sample_points=1500)
+        assert pcd is not None and len(pcd.points) == 1500
+        assert loaded_mesh is not None
+
+    def test_missing_file_returns_none(self):
+        assert cr.load_cad_model("/no/such/file.stl") is None
