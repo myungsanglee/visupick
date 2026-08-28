@@ -573,8 +573,21 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._init_ui()
 
     def _init_ui(self):
+        """탭 전체 UI 조립 — 실제 위젯 생성은 구역별 _build_* 메서드가 담당한다.
+        (예전에는 이 메서드 하나가 334줄이었다. 배치 순서는 그대로.)"""
         layout = QVBoxLayout(self)
+        layout.addWidget(self._build_detect_row())  # 상단: RF-DETR 검출/캡처 컨트롤
+        layout.addWidget(self._build_sam3_row())  # 2행: SAM3 텍스트 프롬프트 검출
+        layout.addWidget(self._build_opening_row())  # 3행: 여는 방향 추정 (방식/조정값)
+        layout.addWidget(self._build_main_splitter())  # 중앙: 뷰 스택 + 정보 패널
 
+        # 모드 폴링 타이머
+        self._mode_timer = QTimer(self)
+        self._mode_timer.timeout.connect(self._refresh_mode_display)
+        self._mode_timer.start(2000)
+
+    def _build_detect_row(self) -> QWidget:
+        """상단 컨트롤 행 — 캘리브레이션 로드, 캡처, RF-DETR 검출, Conf, 뷰 전환."""
         # === 상단: 컨트롤 행 ===
         top_row = QHBoxLayout()
 
@@ -639,8 +652,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         top_widget = QWidget()
         top_widget.setLayout(top_row)
         top_widget.setFixedHeight(top_widget.sizeHint().height())
-        layout.addWidget(top_widget)
+        return top_widget
 
+    def _build_sam3_row(self) -> QWidget:
+        """2행 — SAM3 텍스트 프롬프트 검출 (검출기 학습 없이 명사구로 분할)."""
         # === 2행: SAM3 텍스트 프롬프트 검출 (검출기 없이 텍스트만으로 분할) ===
         sam3_row = QHBoxLayout()
         sam3_row.addWidget(QLabel("SAM3 텍스트:"))
@@ -665,8 +680,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         sam3_widget = QWidget()
         sam3_widget.setLayout(sam3_row)
         sam3_widget.setFixedHeight(sam3_widget.sizeHint().height())
-        layout.addWidget(sam3_widget)
+        return sam3_widget
 
+    def _build_opening_row(self) -> QWidget:
+        """3행 — 여는 방향(클램셸 힌지/뚜껑) 추정: 방식 선택 + 방식별 조정값."""
         # === 3행: 여는 방향(클램셸 힌지/뚜껑) 추정 — 방식 선택 + 조정값 ===
         op_row = QHBoxLayout()
         op_row.addWidget(QLabel("여는 방향 방식:"))
@@ -773,8 +790,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         op_widget = QWidget()
         op_widget.setLayout(op_row)
         op_widget.setFixedHeight(op_widget.sizeHint().height())
-        layout.addWidget(op_widget)
+        return op_widget
 
+    def _build_main_splitter(self) -> QSplitter:
+        """중앙 스플리터 — [2D/3D 뷰 스택 | 검출 테이블·선택 포즈·로봇 제어·시퀀스·연속 픽]."""
         # === 중앙: 2D/3D 스택 + 정보 패널 ===
         splitter = QSplitter(Qt.Horizontal)
 
@@ -900,12 +919,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         splitter.setSizes([850, 400])
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
-
-        # 모드 표시 자동 갱신 (2초마다)
-        self._mode_timer = QTimer(self)
-        self._mode_timer.timeout.connect(self._refresh_mode_display)
-        self._mode_timer.start(2000)
+        return splitter
 
     @staticmethod
     def _labeled_widget(label_text: str, widget) -> QWidget:

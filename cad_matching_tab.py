@@ -592,11 +592,35 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ---------------------------------------------------------
 
     def _init_ui(self):
+        """탭 전체 UI 조립 — 실제 위젯 생성은 구역별 _build_* 메서드가 담당한다.
+
+        (예전에는 이 메서드 하나가 595줄이었다 — 구역별 메서드로 분해해
+        수정할 부분을 이름으로 찾아갈 수 있게 했다. 배치 순서는 그대로.)
+        """
         layout = QVBoxLayout(self)
+        layout.addLayout(self._build_load_row())  # 상단 1행: 데이터 로드 + 캡처 + 알고리즘
+        layout.addLayout(self._build_match_param_row())  # 상단 2행: 매칭 파라미터
+        layout.addLayout(self._build_dbscan_row())  # 상단 3행: DBSCAN 옵션
+        self._build_ppf_params_panel()  # PPF 파라미터 (왼쪽 스크롤 패널에 들어감)
+        layout.addLayout(self._build_grasp_row())  # 상단 4행: Grasp 설정
+        self._update_grasp_summary()
 
-        # === 최소 상단: 필수 버튼만 (로드, 캡처, 알고리즘) ===
-        header_layout = QHBoxLayout()
+        # 진행 표시
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
 
+        # splitter(이미지/3D 뷰)가 남는 세로 공간을 전부 흡수하도록 stretch=1.
+        # 이게 없으면 전체화면 시 여분 세로 공간이 상단 행들로 분산돼 이미지가 작아진다.
+        layout.addWidget(self._build_main_splitter(), stretch=1)
+
+        # 모드 폴링 타이머
+        self._mode_timer = QTimer(self)
+        self._mode_timer.timeout.connect(self._refresh_mode_display)
+        self._mode_timer.start(2000)
+
+    def _build_load_row(self) -> QHBoxLayout:
+        """상단 1행 — CAD/캘리브레이션 로드, 캡처, ROI, 미리보기, 알고리즘 선택, 뷰 전환 버튼."""
         # === 상단 1행: 데이터 로드 + 캡처 ===
         top1 = QHBoxLayout()
 
@@ -678,9 +702,10 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.btn_view_cluster.clicked.connect(lambda: self._switch_view(3))
         self.btn_view_cluster.setToolTip("DBSCAN 클러스터 미리보기 전용 3D 뷰. 다른 뷰와 분리됨.")
         top1.addWidget(self.btn_view_cluster)
+        return top1
 
-        layout.addLayout(top1)
-
+    def _build_match_param_row(self) -> QHBoxLayout:
+        """상단 2행 — Voxel/ICP/인스턴스 수/fitness 등 매칭 파라미터."""
         # === 상단 2행: 매칭 파라미터 ===
         top2 = QHBoxLayout()
         top2.addWidget(QLabel("Voxel(mm):"))
@@ -791,8 +816,10 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         top2.addWidget(self.cull_visible_check)
 
         top2.addStretch()
-        layout.addLayout(top2)
+        return top2
 
+    def _build_dbscan_row(self) -> QHBoxLayout:
+        """상단 3행 — DBSCAN 클러스터별 매칭 옵션 (eps/min_points/미리보기)."""
         # === 상단 3행: DBSCAN 클러스터링 옵션 ===
         top3 = QHBoxLayout()
         self.use_dbscan = QCheckBox("DBSCAN 클러스터별 매칭")
@@ -880,8 +907,11 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         top3.addWidget(self.plane_dist_spin)
 
         top3.addStretch()
-        layout.addLayout(top3)
+        return top3
 
+    def _build_ppf_params_panel(self) -> None:
+        """PPF 학습/매칭 파라미터 패널(self.ppf_params_widget) 생성.
+        레이아웃 배치는 _build_main_splitter 의 왼쪽 스크롤 영역이 담당한다."""
         # === 상단 3-1행: PPF 파라미터 (PPF 선택 시에만 표시) ===
         self.ppf_params_widget = QWidget()
         ppf_params_layout = QVBoxLayout(self.ppf_params_widget)
@@ -1045,6 +1075,8 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.ppf_params_widget.setVisible(False)  # 초기엔 숨김
         # (PPF 파라미터는 나중에 왼쪽 패널로 이동)
 
+    def _build_grasp_row(self) -> QHBoxLayout:
+        """상단 4행 — Grasp 3D 설정 버튼 + 요약 라벨."""
         # === 상단 4행: Grasp 설정 (3D 창에서 위치·회전 모두 조정) ===
         top4 = QHBoxLayout()
         self.btn_grasp_3d = QPushButton("🎯 Grasp 3D 설정")
@@ -1060,9 +1092,10 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.grasp_summary_label.setStyleSheet("color: #555; font-family: monospace;")
         top4.addWidget(self.grasp_summary_label)
         top4.addStretch()
-        layout.addLayout(top4)
-        self._update_grasp_summary()
+        return top4
 
+    def _build_main_splitter(self) -> QSplitter:
+        """중앙 스플리터 — [PPF 파라미터 스크롤 | 2D/3D/CAD/클러스터 뷰 스택 | 정보 패널]."""
         # === 왼쪽 패널: PPF 파라미터만 (스크롤 가능) ===
         ppf_layout = QVBoxLayout()
         ppf_layout.addWidget(self.ppf_params_widget)
@@ -1077,12 +1110,6 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.ppf_scroll.setMaximumWidth(450)
         self.ppf_scroll.setVisible(False)  # 초기: PPF 선택 시에만 표시
 
-        # 진행 표시
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        layout.addWidget(self.progress)
-
-        # === 레이아웃: 뷰 + 정보 + (PPF 선택 시 왼쪽 패널) ===
         splitter = QSplitter(Qt.Horizontal)
 
         # 좌: PPF 파라미터 스크롤 (PPF 선택 시에만 표시)
@@ -1174,18 +1201,7 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         splitter.setStretchFactor(0, 0)  # 좌: PPF 고정 너비
         splitter.setStretchFactor(1, 3)  # 중: 카메라 확대
         splitter.setStretchFactor(2, 1)  # 우: 정보
-        # splitter(이미지/3D 뷰)가 남는 세로 공간을 전부 흡수하도록 stretch=1.
-        # 이게 없으면 전체화면 시 여분 세로 공간이 상단 행들(top1~4)로 분산돼
-        # 이미지 영역이 작아진다.
-        layout.addWidget(splitter, stretch=1)
-
-        # 스페이스바 = 비상정지 (탭이 활성일 때만 동작)
-        from PySide6.QtGui import QShortcut, QKeySequence
-
-        # 모드 폴링 타이머
-        self._mode_timer = QTimer(self)
-        self._mode_timer.timeout.connect(self._refresh_mode_display)
-        self._mode_timer.start(2000)
+        return splitter
 
     def _update_grasp_summary(self):
         """상단 요약 라벨에 현재 grasp 위치/회전 표시 (3D 창 밖에서도 값 확인용)."""

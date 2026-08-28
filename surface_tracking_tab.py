@@ -279,7 +279,19 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ------------------------------------------------------------
 
     def _init_ui(self):
+        """탭 전체 UI 조립 — 실제 위젯 생성은 구역별 _build_* 메서드가 담당한다.
+        (예전에는 이 메서드 하나가 308줄이었다. 배치 순서는 그대로.)"""
         layout = QVBoxLayout(self)
+        layout.addWidget(self._build_top_row())  # 상단: 캘리브레이션/캡처/검출/뷰 전환
+        layout.addWidget(self._build_main_splitter())  # 중앙: 뷰 스택 + 정보 패널
+
+        # 모드 표시 주기 갱신
+        self._mode_timer = QTimer(self)
+        self._mode_timer.timeout.connect(self._refresh_mode_display)
+        self._mode_timer.start(2000)
+
+    def _build_top_row(self) -> QWidget:
+        """상단 컨트롤 행 — 캘리브레이션 로드, 캡처, 선 검출, 경로 계산, 뷰 전환."""
 
         # 상단 컨트롤
         top_row = QHBoxLayout()
@@ -335,28 +347,10 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
         top_widget = QWidget()
         top_widget.setLayout(top_row)
         top_widget.setFixedHeight(top_widget.sizeHint().height())
-        layout.addWidget(top_widget)
+        return top_widget
 
-        # 중앙 splitter
-        splitter = QSplitter(Qt.Horizontal)
-
-        self.view_stack = QStackedWidget()
-        self.view_2d = ClickPointImageLabel()
-        self.view_2d.pointClicked.connect(self._on_image_click)
-        self.view_2d.roiChanged.connect(self._on_roi_dragged)
-        self.view_stack.addWidget(self.view_2d)
-
-        self.view_3d = PointCloudView3D()
-        self.view_stack.addWidget(self.view_3d)
-        # 뷰 전환은 VisionTabMixin._switch_view 공용 — 스택 인덱스 순서대로 (버튼, 3D뷰|None)
-        self._view_pages = [(self.btn_view_2d, None), (self.btn_view_3d, self.view_3d)]
-
-        splitter.addWidget(self.view_stack)
-
-        # 우측 정보 패널
-        info_widget = QWidget()
-        info_layout = QVBoxLayout(info_widget)
-
+    def _build_line_param_group(self) -> QGroupBox:
+        """선 검출 파라미터 그룹 — 색상 모드/적응 임계/HSV 하한/모폴로지."""
         # 검출 파라미터
         det_group = QGroupBox("선 검출 파라미터")
         det_layout = QVBoxLayout(det_group)
@@ -427,9 +421,10 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
         morph_row.addWidget(self.morph_spin)
         morph_row.addStretch()
         det_layout.addLayout(morph_row)
+        return det_group
 
-        info_layout.addWidget(det_group)
-        # 시작 시 모드별 파라미터 활성화 토글
+    def _build_endpoint_group(self) -> QGroupBox:
+        """끝점 그룹 — 시작/끝 클릭 상태와 ROI 안내."""
         self._on_color_mode_changed(self.color_combo.currentIndex())
 
         # 끝점 표시
@@ -443,8 +438,10 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.roi_label.setStyleSheet("color: #888;")
         pt_layout.addWidget(self.roi_label)
         pt_layout.addWidget(QLabel("· 짧게 클릭 → 시작점/끝점 설정\n· 드래그 → 검출 ROI 사각형"))
-        info_layout.addWidget(pt_group)
+        return pt_group
 
+    def _build_path_group(self) -> QGroupBox:
+        """경로 sampling 그룹 — 간격(mm)/법선 오프셋/개수 + 경로 정보."""
         # 경로 sampling 파라미터
         path_group = QGroupBox("경로 sampling")
         path_layout = QVBoxLayout(path_group)
@@ -486,9 +483,10 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.path_info_label = QLabel("경로점: 0개")
         self.path_info_label.setStyleSheet("font-weight: bold; color: #0066cc;")
         path_layout.addWidget(self.path_info_label)
+        return path_group
 
-        info_layout.addWidget(path_group)
-
+    def _build_exec_group(self) -> QGroupBox:
+        """실행 제어 그룹 — 속도/Z 한계/시작·정지/Home/진공/비상정지 (공용 하위 빌더 재사용)."""
         # 실행 제어
         exec_group = QGroupBox("실행 제어")
         exec_layout = QVBoxLayout(exec_group)
@@ -551,8 +549,37 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
 
         # 큐 비우기 / 비상정지 / 비상정지 해제 (RobotControlMixin 공용 빌더)
         self._build_safety_rows(exec_layout)
+        return exec_group
 
-        info_layout.addWidget(exec_group)
+    def _build_main_splitter(self) -> QSplitter:
+        """중앙 스플리터 — [2D/3D 뷰 스택 | 정보 패널(검출·끝점·경로·실행)]."""
+        # 중앙 splitter
+        splitter = QSplitter(Qt.Horizontal)
+
+        self.view_stack = QStackedWidget()
+        self.view_2d = ClickPointImageLabel()
+        self.view_2d.pointClicked.connect(self._on_image_click)
+        self.view_2d.roiChanged.connect(self._on_roi_dragged)
+        self.view_stack.addWidget(self.view_2d)
+
+        self.view_3d = PointCloudView3D()
+        self.view_stack.addWidget(self.view_3d)
+        # 뷰 전환은 VisionTabMixin._switch_view 공용 — 스택 인덱스 순서대로 (버튼, 3D뷰|None)
+        self._view_pages = [(self.btn_view_2d, None), (self.btn_view_3d, self.view_3d)]
+
+        splitter.addWidget(self.view_stack)
+
+        # 우측 정보 패널
+        info_widget = QWidget()
+        info_layout = QVBoxLayout(info_widget)
+
+        # 우측 정보 패널 (그룹별 빌더 조립)
+        info_widget = QWidget()
+        info_layout = QVBoxLayout(info_widget)
+        info_layout.addWidget(self._build_line_param_group())
+        info_layout.addWidget(self._build_endpoint_group())
+        info_layout.addWidget(self._build_path_group())
+        info_layout.addWidget(self._build_exec_group())
         info_layout.addStretch()
 
         # Mixin이 참조하지만 SurfaceTracking 에서는 안 쓰는 위젯들 (호환용 hidden).
@@ -578,14 +605,7 @@ class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
         splitter.setSizes([850, 400])
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
-
-        # Space = 비상정지
-
-        # 모드 표시 주기 갱신
-        self._mode_timer = QTimer(self)
-        self._mode_timer.timeout.connect(self._refresh_mode_display)
-        self._mode_timer.start(2000)
+        return splitter
 
     def _make_hidden_checkbox(self, checked: bool):
         from PySide6.QtWidgets import QCheckBox
