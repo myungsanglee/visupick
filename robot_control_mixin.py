@@ -88,31 +88,66 @@ class RobotControlMixin:
             logger.warning("비상정지 트리거")
         except Exception as e:
             logger.error(f"비상정지 오류: {e}")
-        # 실행 중인 픽/시퀀스 사이클도 중단 (남은 스텝 전송 방지)
+        # 실행 중인 픽/시퀀스 사이클은 **일시정지** — 상태를 보존해 두고,
+        # 비상정지 해제 때 이어서 할지 물어본다 (_cycle_pause 참고).
+        # 연속 픽 루프는 사이클의 on_done/on_abort 콜백으로 이어지므로 건드리지 않는다.
         if self._cycle_is_running():
-            self._cycle_abort("비상정지로 사이클 중단")
-        # 연속 픽(자동 반복) 루프도 즉시 종료 — 사이클이 안 돌고 있던 순간
-        # (캡처/검출 중)에 눌렸을 수도 있으므로 별도로 확인한다.
-        if getattr(self, "_auto_running", False):
+            self._cycle_pause("비상정지")
+        elif getattr(self, "_auto_running", False):
+            # 사이클 밖(캡처/검출 단계)에서 눌린 경우 — 로봇은 정지 상태이고
+            # 보존할 모션 상태가 없으므로 루프만 종료한다 (재시작은 ▶ 버튼으로).
             self._auto_stop("비상정지")
 
     def _emergency_stop_release(self):
         """
-        비상정지 해제 (robo_scram=FALSE만). 큐는 그대로 유지.
+        비상정지 해제 (robo_scram=FALSE) + 일시정지된 사이클 재개 질문.
 
         안전성: KRL의 robo_scram_DEF가 RESUME으로 현재 진행 중이던 모션을
         자동 취소하므로, 해제 직후 멈췄던 모션이 그대로 재개되지는 않는다.
-        큐의 다음 슬롯은 정상 흐름으로 실행됨 — 큐를 비우고 싶으면 별도의
-        '큐 비우기' 버튼을 사용 (UI 일관성 + 사용자 선택권).
+
+        - 사이클 밖에서의 비상정지: 큐는 유지 — 다음 슬롯은 정상 흐름으로 실행됨.
+          큐를 비우고 싶으면 '큐 비우기' 버튼 (사용자 선택권).
+        - 사이클 도중의 비상정지: _cycle_pause 가 이미 큐를 비워 뒀으므로 해제해도
+          로봇은 정지 유지. 여기서 재개 여부를 물어 Yes 면 미완료 스텝부터 다시
+          보낸다 (연속 픽이었다면 반복도 계속).
         """
         if self.main.robot is None:
             return
         try:
             self.main.robot.emergency_stop_release()
-            self.main.statusBar().showMessage("비상정지 해제됨 (큐는 유지 - 비우려면 '큐 비우기' 버튼)")
+            if getattr(self, "_cycle_paused", False):
+                # 일시정지 중에는 이미 큐를 비워 놨으므로 "큐 유지" 안내가 사실과 다름
+                self.main.statusBar().showMessage("비상정지 해제됨")
+            else:
+                self.main.statusBar().showMessage("비상정지 해제됨 (큐는 유지 - 비우려면 '큐 비우기' 버튼)")
             logger.info("비상정지 해제")
         except Exception as e:
             logger.error(f"비상정지 해제 오류: {e}")
+            return
+
+        # 일시정지된 사이클이 있으면 재개 여부를 묻는다.
+        # 해제를 먼저 한 이유: 일시정지 때 KRL 큐를 비워 놨으므로 해제해도 로봇은
+        # 안 움직이고, KRL 이 RESUME 으로 중단된 모션을 정리하고 다음 슬롯 대기
+        # 상태로 돌아갈 시간을 다이얼로그가 떠 있는 동안 충분히 벌 수 있다.
+        if getattr(self, "_cycle_paused", False):
+            total = len(getattr(self, "_cycle_steps", []) or [])
+            ret = QMessageBox.question(
+                self,
+                "사이클 재개",
+                f"비상정지로 일시정지된 사이클이 있습니다.\n"
+                f"(스텝 {self._cycle_idx + 1}/{total}부터 — 완료된 스텝은 다시 하지 않음)\n\n"
+                f"이어서 진행하시겠습니까?\n\n"
+                f"[Yes] 미완료 스텝부터 재개 (연속 픽이었다면 반복도 계속)\n"
+                f"[No] 사이클 종료 (로봇은 현재 위치에 정지 유지)",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ret == QMessageBox.Yes:
+                # KRL 이 중단 모션을 정리할 짧은 여유 후 재개 (해제 직후 연타 대비)
+                QTimer.singleShot(500, self._cycle_resume)
+                self.main.statusBar().showMessage("▶ 잠시 후 사이클 재개...")
+            else:
+                self._cycle_abort("사용자가 재개를 취소함")
 
     def _on_robot_connected(self):
         """로봇 연결 시 main이 호출. Home/진공 관련 버튼 활성화."""
@@ -557,8 +592,12 @@ class RobotControlMixin:
             return
         self._cycle_steps = list(steps)
         self._cycle_idx = 0
-        self._cycle_pending_slots: List[int] = []
+        # (slot, step_idx) 쌍 — 비상정지 일시정지 때 "어느 스텝까지 물리적으로
+        # 완료됐는지"를 역추적해 미완료 스텝부터 재개하기 위해 스텝 번호도 기록한다.
+        self._cycle_pending_slots: List[Tuple[int, int]] = []
         self._cycle_dwell_until = 0.0
+        self._cycle_paused = False
+        self._cycle_dwell_remaining = 0.0
         self._cycle_done_msg = done_msg
         # 완료/중단 콜백 — 연속 픽 루프가 다음 사이클을 이어가거나 즉시 멈추는 데 쓴다.
         self._cycle_on_done = on_done
@@ -575,6 +614,7 @@ class RobotControlMixin:
         if timer is not None:
             timer.stop()
         self._cycle_active = False
+        self._cycle_paused = False
         self._cycle_pending_slots = []
         self.main.statusBar().showMessage(f"⚠ {msg}")
         logger.warning(f"사이클 중단: {msg}")
@@ -585,6 +625,66 @@ class RobotControlMixin:
         self._cycle_on_abort = None
         if cb is not None:
             cb(msg)
+
+    def _cycle_pause(self, msg: str):
+        """비상정지용 사이클 일시정지 — 상태를 버리지 않고 보존해 해제 후 재개할 수 있게 한다.
+
+        예전에는 비상정지가 사이클을 완전 폐기(_cycle_abort)했는데, KRL 큐에 이미
+        배치된 모션은 해제 후 그대로 소진되므로 "정지 전 작업만 이어서 하고 그 다음이
+        없는" 반쪽 동작이 됐다. 지금은:
+          1. 미완료 첫 모션의 스텝으로 _cycle_idx 를 되감고 (완료된 스텝은 다시 안 함),
+          2. KRL 큐를 비워 해제 순간 멋대로 이어지지 않게 한 뒤,
+          3. 해제 버튼에서 재개 여부를 물어 그 스텝부터 다시 보낸다.
+        되감은 모션의 재전송은 안전하다 — 목표가 절대좌표라 멈춘 지점에서 같은
+        목표로 다시 가는 것뿐이다. 진공/dwell 스텝은 pending 이 빈 뒤에만 실행되는
+        기존 규칙 덕에 되감기 구간에 끼어 있을 수 없다.
+        """
+        if getattr(self, "_cycle_paused", False):
+            return  # 이미 일시정지 상태 (비상정지 연타)
+        timer = getattr(self, "_cycle_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._cycle_paused = True
+
+        robot = self.main.robot
+        # 미완료 첫 슬롯의 스텝으로 되감기 (KRL 은 인덱스 순서로 소비하므로
+        # 첫 번째 미완료 이후는 전부 미완료다)
+        resume_idx = self._cycle_idx
+        if robot is not None:
+            for slot, step_idx in self._cycle_pending_slots:
+                val = robot.read_variable(f"robo_motion_type[{slot}]")
+                if val is None or val.strip() != "0":
+                    resume_idx = step_idx
+                    break
+        self._cycle_idx = resume_idx
+        self._cycle_pending_slots = []
+        # dwell 도중이었다면 남은 시간을 기억해 재개 때 다시 잰다
+        now = time.time()
+        self._cycle_dwell_remaining = max(0.0, self._cycle_dwell_until - now) if self._cycle_dwell_until else 0.0
+        self._cycle_dwell_until = 0.0
+        # KRL 큐의 잔여 슬롯 제거 — 비상정지 해제 순간 로봇이 멋대로 움직이지 않게
+        if robot is not None:
+            try:
+                robot.clear_queue()
+            except Exception as e:
+                logger.warning(f"일시정지 중 큐 비우기 실패: {e}")
+        self.main.statusBar().showMessage(f"⏸ {msg} — 사이클 일시정지 (스텝 {resume_idx + 1}/{len(self._cycle_steps)}부터 재개 가능)")
+        logger.warning(f"사이클 일시정지: {msg} (재개 스텝 {resume_idx})")
+
+    def _cycle_resume(self):
+        """일시정지된 사이클 재개 — 되감아 둔 스텝부터 다시 전송."""
+        if not getattr(self, "_cycle_paused", False):
+            return
+        if self.main.robot is None:
+            self._cycle_abort("로봇 미연결 — 재개 불가")
+            return
+        self._cycle_paused = False
+        if self._cycle_dwell_remaining > 0:
+            self._cycle_dwell_until = time.time() + self._cycle_dwell_remaining
+            self._cycle_dwell_remaining = 0.0
+        self._cycle_timer.start(80)
+        self.main.statusBar().showMessage(f"▶ 사이클 재개 (스텝 {self._cycle_idx + 1}/{len(self._cycle_steps)})")
+        logger.info(f"사이클 재개: 스텝 {self._cycle_idx}")
 
     def _cycle_tick(self):
         """사이클 상태 머신 1틱.
@@ -605,7 +705,7 @@ class RobotControlMixin:
         try:
             # 1) 보낸 모션들의 물리적 완료 확인 (순차 실행이므로 앞에서부터 0이 됨)
             while self._cycle_pending_slots:
-                val = robot.read_variable(f"robo_motion_type[{self._cycle_pending_slots[0]}]")
+                val = robot.read_variable(f"robo_motion_type[{self._cycle_pending_slots[0][0]}]")
                 if val is None or val.strip() != "0":
                     return  # 아직 이동 중 — 다음 틱에 재확인
                 self._cycle_pending_slots.pop(0)
@@ -631,7 +731,7 @@ class RobotControlMixin:
                     slot = fn(p["x"], p["y"], p["z"], p["a"], p["b"], p["c"])
                     if slot is None:
                         return  # KRL 큐 가득 — 이미 보낸 것 완료 후 재시도
-                    self._cycle_pending_slots.append(slot)
+                    self._cycle_pending_slots.append((slot, self._cycle_idx))
                     self._cycle_idx += 1
                     # 계속 루프: 다음도 move/status 면 이어서 배치 전송
 
@@ -645,7 +745,7 @@ class RobotControlMixin:
                     slot = robot.add_move_axis(ax["a1"], ax["a2"], ax["a3"], ax["a4"], ax["a5"], ax["a6"])
                     if slot is None:
                         return  # KRL 큐 가득 — 재시도
-                    self._cycle_pending_slots.append(slot)
+                    self._cycle_pending_slots.append((slot, self._cycle_idx))
                     self._cycle_idx += 1
 
                 elif kind in ("vacuum", "blow", "dwell"):

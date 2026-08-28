@@ -493,7 +493,10 @@ def _effective_speed(self, requested):
 
 ### 6.3 비상정지 해제 동작
 
-`emergency_stop_release()` 는 `robo_scram=FALSE` 만 쓴다. KRL 의 `robo_scram_DEF` 안에 `RESUME` 이 있어서 현재 모션이 자동 취소되므로 큐의 다음 슬롯이 그대로 재개되지는 않는다. **큐를 비우려면 별도의 "큐 비우기" 버튼**을 사용 — UI 일관성 + 사용자 선택권 보장.
+`emergency_stop_release()` 는 `robo_scram=FALSE` 만 쓴다. KRL 의 `robo_scram_DEF` 안에 `RESUME` 이 있어서 현재 모션이 자동 취소되므로 큐의 다음 슬롯이 그대로 재개되지는 않는다.
+
+- **사이클 밖에서의 비상정지**: 큐는 유지 — 비우려면 별도의 "큐 비우기" 버튼 (사용자 선택권).
+- **픽/시퀀스 사이클 도중의 비상정지**: `_cycle_pause` 가 미완료 스텝을 계산해 두고 **KRL 큐를 즉시 비운다** (해제 순간 잔여 모션이 멋대로 실행되는 것 방지). 해제 버튼이 재개 여부를 물어, Yes 면 미완료 스텝부터 다시 전송한다 ([bin_picking.md](bin_picking.md) "비상정지 = 일시정지" 절).
 
 ---
 
