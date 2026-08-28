@@ -51,6 +51,7 @@ from kuka_robot import normalize_robot_mode, is_auto_mode
 from image_view import DraggableImageLabel
 from pointcloud_view import PointCloudView3D
 from robot_control_mixin import RobotControlMixin
+from vision_tab_mixin import VisionTabMixin
 
 logger = logging.getLogger(__name__)
 
@@ -505,7 +506,7 @@ class GraspPointDialog(QDialog):
 # ============================================================
 
 
-class CADMatchingTab(RobotControlMixin, QWidget):
+class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
     """
     CAD 기반 6D pose estimation 탭
 
@@ -572,8 +573,7 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         self.user_queue = []
 
         # 캘리브레이션
-        self.T_calib = None
-        self.calib_mode = None
+        # T_calib/calib_mode 는 VisionTabMixin 프로퍼티 (main.calib 소유)
 
         # 매칭 결과
         self.instances: List[Dict] = []  # [{transformation, fitness, rmse}]
@@ -1424,33 +1424,13 @@ class CADMatchingTab(RobotControlMixin, QWidget):
         a, b, c = self.grasp_rotation_abc_deg
         self.main.statusBar().showMessage(f"Grasp 설정: ({x:.1f}, {y:.1f}, {z:.1f})mm, 회전 A{a:.1f}° B{b:.1f}° C{c:.1f}°")
 
-    def _load_calibration(self):
-        import json
-
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "캘리브레이션 결과 (JSON)",
-            "data",
-            "JSON (*.json)",
-            options=QFileDialog.Option.DontUseNativeDialog,
-        )
-        if not path:
-            return
-
-        try:
-            with open(path) as f:
-                result = json.load(f)
-            self.T_calib = np.array(result["transformation_matrix"])
-            self.calib_mode = result.get("mode", "eye_to_hand")
-            self.calib_label.setText(f"{Path(path).name} [{self.calib_mode}]")
-            self.calib_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
-            self.main.statusBar().showMessage(f"캘리브레이션 로드: {self.calib_mode}")
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"로드 실패:\n{e}")
-
     # ---------------------------------------------------------
     # 캡처
     # ---------------------------------------------------------
+
+    def _update_calib_label(self, name: str):
+        self.calib_label.setText(f"{name} [{self.calib_mode}]")
+        self.calib_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
 
     def _capture(self):
         if not self.main.camera or not self.main.camera.connected:
@@ -2173,15 +2153,11 @@ class CADMatchingTab(RobotControlMixin, QWidget):
 
         # 회전: 베이스 좌표계 target 자세 → 카메라 좌표계
         R_target_base = tcp_to_homogeneous(self.target_pose)[:3, :3]
-        if self.calib_mode == "eye_to_hand":
-            R_in_cam = self.T_calib[:3, :3].T @ R_target_base
-        elif self.calib_mode == "eye_in_hand":
-            if self.main.robot is None:
-                plotter.render()
-                return
-            cur_tcp = self.main.robot.get_tcp_position()
-            T_g2b = tcp_to_homogeneous(cur_tcp)
-            R_in_cam = self.T_calib[:3, :3].T @ T_g2b[:3, :3].T @ R_target_base
+        # cam→base 회전의 전치 = base→cam (모드 분기는 CalibrationContext 소유)
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        T_c2b = self.main.calib.T_cam_to_base(tcp)
+        if T_c2b is not None:
+            R_in_cam = T_c2b[:3, :3].T @ R_target_base
         else:
             plotter.render()
             return

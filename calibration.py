@@ -770,3 +770,81 @@ def load_calibration_result(path: str) -> Optional[np.ndarray]:
     except Exception as e:
         logger.error(f"Calibration 결과 로드 실패: {e}")
         return None
+
+
+class CalibrationContext:
+    """핸드아이 캘리브레이션 결과(4×4 변환 + 모드)와 좌표 변환을 **한 곳에서** 소유.
+
+    예전에는 탭 4개(빈 픽킹·CAD 매칭·표면 추적·검증)가 각자 T_calib/calib_mode 를
+    로드해 들고 있었고, eye_to_hand/eye_in_hand 분기가 파일 곳곳에 복사돼 있었다.
+    캘리브레이션을 다시 하면 탭마다 다시 로드해야 했고, 분기 하나를 고치면 여러 벌을
+    고쳐야 했다. 이 클래스는 main(VisuPickApp)이 하나만 소유하고, 탭은
+    VisionTabMixin 의 T_calib/calib_mode 프로퍼티로 읽기만 한다.
+
+    좌표계 규약 (docs/hand_eye_calibration.md):
+      - eye_to_hand: 카메라 고정. T = base←cam 이라 그대로 곱하면 된다.
+      - eye_in_hand: 카메라가 그리퍼에 부착. T = gripper←cam 이므로 현재 로봇
+        TCP(base←gripper)를 곱해야 base 좌표가 된다 → tcp 인자가 필수.
+    Qt 무의존 — 순수 numpy 라 단독 테스트 가능.
+    """
+
+    def __init__(self):
+        self.T: Optional[np.ndarray] = None  # 4×4 (eye_to_hand: base←cam / eye_in_hand: gripper←cam)
+        self.mode: Optional[str] = None  # "eye_to_hand" | "eye_in_hand"
+        self.path: Optional[str] = None  # 로드한 파일 경로 (표시용)
+
+    @property
+    def loaded(self) -> bool:
+        return self.T is not None
+
+    def load(self, path: str) -> str:
+        """JSON 결과 파일 로드. 성공 시 파일 이름 반환, 실패 시 예외 (UI 가 다이얼로그 표시)."""
+        with open(path) as f:
+            result = json.load(f)
+        self.T = np.array(result["transformation_matrix"], dtype=float)
+        if self.T.shape != (4, 4):
+            self.T = None
+            raise ValueError(f"transformation_matrix 형상이 4×4 가 아님: {self.T}")
+        self.mode = result.get("mode", "eye_to_hand")
+        self.path = path
+        logger.info(f"캘리브레이션 로드: {path} [{self.mode}]")
+        return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+    def T_cam_to_base(self, tcp: Optional[Dict[str, float]] = None) -> Optional[np.ndarray]:
+        """cam→base 4×4 변환. eye_in_hand 는 현재 TCP 가 필요하다 (없으면 None)."""
+        if self.T is None:
+            return None
+        if self.mode == "eye_to_hand":
+            return self.T
+        if self.mode == "eye_in_hand":
+            if tcp is None:
+                return None
+            return tcp_to_homogeneous(tcp) @ self.T
+        return None
+
+    def cam_to_base(self, point_cam, normal_cam=None, tcp: Optional[Dict[str, float]] = None):
+        """카메라 좌표계 점(과 선택적 법선) → base. (point_base, normal_base) 또는 (None, None)."""
+        M = self.T_cam_to_base(tcp)
+        if M is None:
+            return None, None
+        p = np.asarray(point_cam, dtype=float)
+        pb = (M @ np.array([p[0], p[1], p[2], 1.0]))[:3]
+        nb = M[:3, :3] @ np.asarray(normal_cam, dtype=float) if normal_cam is not None else None
+        return pb, nb
+
+    def cam_to_base_points(self, pts_cam: np.ndarray, tcp: Optional[Dict[str, float]] = None) -> Optional[np.ndarray]:
+        """카메라 좌표계 점들 (N,3) → base (N,3)."""
+        M = self.T_cam_to_base(tcp)
+        if M is None:
+            return None
+        pts = np.asarray(pts_cam, dtype=float)
+        return (M @ np.hstack([pts, np.ones((len(pts), 1))]).T).T[:, :3]
+
+    def base_to_cam_points(self, pts_base: np.ndarray, tcp: Optional[Dict[str, float]] = None) -> Optional[np.ndarray]:
+        """base 좌표계 점들 (N,3) → 카메라 (N,3). 3D 뷰(카메라 좌표계)에 base 도형을 그릴 때 사용."""
+        M = self.T_cam_to_base(tcp)
+        if M is None:
+            return None
+        Minv = np.linalg.inv(M)
+        pts = np.asarray(pts_base, dtype=float)
+        return (Minv @ np.hstack([pts, np.ones((len(pts), 1))]).T).T[:, :3]

@@ -19,7 +19,6 @@ Surface Tracking 탭
 
 import logging
 import json
-from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
 import numpy as np
@@ -50,6 +49,7 @@ import pyvista as pv
 from calibration import tcp_to_homogeneous, compute_approach_pose, estimate_normal_at_pixel
 from kuka_robot import normalize_robot_mode, is_auto_mode
 from robot_control_mixin import RobotControlMixin
+from vision_tab_mixin import VisionTabMixin
 from pointcloud_view import PointCloudView3D  # 공유 3D 뷰 모듈
 from image_view import ZoomableImageLabel
 
@@ -218,7 +218,7 @@ class ClickPointImageLabel(ZoomableImageLabel):
 from line_tracking import COLOR_HSV_RANGES, detect_line, trace_path_on_skeleton, sample_path_by_3d_distance
 
 
-class SurfaceTrackingTab(RobotControlMixin, QWidget):
+class SurfaceTrackingTab(VisionTabMixin, RobotControlMixin, QWidget):
     """
     매직펜으로 그린 검은 선을 따라 로봇 툴이 표면 법선 방향으로 정렬한 채
     이동하는 시나리오를 생성/실행.
@@ -254,8 +254,7 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         self.path_points: List[Dict] = []  # 각 sample 에 대해 robot base 좌표계 TCP 자세
 
         # 캘리브레이션
-        self.T_calib = None
-        self.calib_mode = None
+        # T_calib/calib_mode 는 VisionTabMixin 프로퍼티 (main.calib 소유)
 
         # 실행 상태
         self._motion_running = False
@@ -617,26 +616,6 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
     # 캘리브레이션 / 캡처
     # ------------------------------------------------------------
 
-    def _load_calibration(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "캘리브레이션 파일 선택",
-            "data",
-            "JSON Files (*.json)",
-            options=QFileDialog.Option.DontUseNativeDialog,
-        )
-        if not path:
-            return
-        try:
-            with open(path) as f:
-                result = json.load(f)
-            self.T_calib = np.array(result["transformation_matrix"])
-            self.calib_mode = result.get("mode", "eye_to_hand")
-            self.calib_label.setText(f"{Path(path).name} [{self.calib_mode}]")
-            self.main.statusBar().showMessage(f"캘리브레이션 로드: {self.calib_mode}")
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"로드 실패:\n{e}")
-
     def _capture(self):
         if not self.main.camera or not self.main.camera.connected:
             QMessageBox.warning(self, "오류", "카메라가 연결되지 않았습니다")
@@ -928,24 +907,14 @@ class SurfaceTrackingTab(RobotControlMixin, QWidget):
         cam_points = np.array(cam_points)
         cam_normals = np.array(cam_normals)
 
-        # 4) 카메라 → base 변환
-        if self.calib_mode == "eye_to_hand":
-            R_c2b = self.T_calib[:3, :3]
-            base_points = (self.T_calib @ np.hstack([cam_points, np.ones((len(cam_points), 1))]).T).T[:, :3]
-            base_normals = (R_c2b @ cam_normals.T).T
-        elif self.calib_mode == "eye_in_hand":
-            if self.main.robot is None:
-                QMessageBox.warning(self, "오류", "Eye-in-Hand 모드는 로봇 연결 필요")
-                return
-            cur_tcp = self.main.robot.get_tcp_position()
-            T_g2b = tcp_to_homogeneous(cur_tcp)
-            T_c2b = T_g2b @ self.T_calib
-            R_c2b = T_c2b[:3, :3]
-            base_points = (T_c2b @ np.hstack([cam_points, np.ones((len(cam_points), 1))]).T).T[:, :3]
-            base_normals = (R_c2b @ cam_normals.T).T
-        else:
-            QMessageBox.critical(self, "오류", f"알 수 없는 모드: {self.calib_mode}")
+        # 4) 카메라 → base 변환 (모드 분기는 CalibrationContext 가 소유)
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        T_c2b = self.main.calib.T_cam_to_base(tcp)
+        if T_c2b is None:
+            QMessageBox.warning(self, "오류", "카메라→base 변환 불가 (Eye-in-Hand 는 로봇 연결 필요)")
             return
+        base_points = self.main.calib.cam_to_base_points(cam_points, tcp=tcp)
+        base_normals = (T_c2b[:3, :3] @ cam_normals.T).T
 
         # 5) 각 점에서 Tool +Z = -normal 자세 + offset
         cur_tcp = None

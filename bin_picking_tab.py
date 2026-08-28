@@ -12,7 +12,6 @@ import time
 import logging
 import numpy as np
 import cv2
-from pathlib import Path
 from typing import Optional, List, Dict
 
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer
@@ -64,6 +63,7 @@ OPENING_DEBUG = os.environ.get("VISUPICK_OPENING_DEBUG", "0") == "1"
 from calibration import tcp_to_homogeneous
 from kuka_robot import normalize_robot_mode, is_auto_mode
 from robot_control_mixin import RobotControlMixin
+from vision_tab_mixin import VisionTabMixin
 from image_view import DraggableImageLabel
 from pointcloud_view import PointCloudView3D
 import opening_analysis as oa
@@ -469,7 +469,7 @@ class GraspConfigDialog(QDialog):
 # ============================================================
 
 
-class BinPickingTab(RobotControlMixin, QWidget):
+class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
     """
     Bin Picking 통합 탭
     - 캡처 → 객체 탐지 → 포즈 계산 → 로봇 좌표 변환
@@ -509,8 +509,7 @@ class BinPickingTab(RobotControlMixin, QWidget):
         self.selected_idx = None
         self.target_pose = None  # 선택된 객체의 로봇 base 좌표계 자세
 
-        self.T_calib = None
-        self.calib_mode = None
+        # T_calib/calib_mode 는 VisionTabMixin 프로퍼티 (main.calib 소유)
 
         # 연속 픽(자동 반복) 상태
         self._auto_running = False
@@ -935,27 +934,6 @@ class BinPickingTab(RobotControlMixin, QWidget):
             from PySide6.QtCore import QTimer
 
             QTimer.singleShot(0, self.view_3d.refresh_camera)
-
-    def _load_calibration(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "캘리브레이션 파일 선택",
-            "data",
-            "JSON Files (*.json)",
-            options=QFileDialog.Option.DontUseNativeDialog,
-        )
-        if not path:
-            return
-        try:
-            with open(path) as f:
-                result = json.load(f)
-            self.T_calib = np.array(result["transformation_matrix"])
-            self.calib_mode = result.get("mode", "eye_to_hand")
-            self.calib_label.setText(f"{Path(path).name} [{self.calib_mode}]")
-            self.main.statusBar().showMessage(f"캘리브레이션 로드: {self.calib_mode}")
-            self._refresh_bin_box_views()  # base→cam 변환 가능해짐 → 2D/3D 표시
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"로드 실패:\n{e}")
 
     def _capture(self):
         if not self.main.camera or not self.main.camera.connected:
@@ -1836,24 +1814,10 @@ class BinPickingTab(RobotControlMixin, QWidget):
         return np.asarray(out, dtype=float)
 
     def _base_to_cam_points(self, pts_base) -> Optional[np.ndarray]:
-        """base 좌표 점들 (N,3) → 카메라 좌표계. 3D 뷰가 카메라 좌표계라 표시용."""
-        if self.T_calib is None:
-            return None
-        if self.calib_mode == "eye_to_hand":
-            T = self.T_calib  # cam → base
-        elif self.calib_mode == "eye_in_hand":
-            if not self.main.robot:
-                return None
-            T = tcp_to_homogeneous(self.main.robot.get_tcp_position()) @ self.T_calib
-        else:
-            return None
-        try:
-            T_inv = np.linalg.inv(T)  # base → cam
-        except np.linalg.LinAlgError:
-            return None
+        """base 좌표 점들 (N,3) → 카메라 좌표계. 3D 뷰가 카메라 좌표계라 표시용 (CalibrationContext 위임)."""
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
         pts = np.asarray(pts_base, dtype=float).reshape(-1, 3)
-        h = np.hstack([pts, np.ones((len(pts), 1))])
-        return (T_inv @ h.T).T[:, :3]
+        return self.main.calib.base_to_cam_points(pts, tcp=tcp)
 
     def _render_bin_box(self):
         """3D 뷰에 Bin Box(노랑) + 파지 허용 영역(초록) 표시. 미설정이면 지움."""
@@ -1896,16 +1860,11 @@ class BinPickingTab(RobotControlMixin, QWidget):
         valid = region[~np.any(np.isnan(region), axis=1)]
         if len(valid) < 50:
             return None
-        # 카메라 → base
-        if self.calib_mode == "eye_to_hand":
-            T = self.T_calib
-        elif self.calib_mode == "eye_in_hand":
-            if not self.main.robot:
-                return None
-            T = tcp_to_homogeneous(self.main.robot.get_tcp_position()) @ self.T_calib
-        else:
+        # 카메라 → base (모드 분기는 CalibrationContext 가 소유)
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        base_pts = self.main.calib.cam_to_base_points(valid, tcp=tcp)
+        if base_pts is None:
             return None
-        base_pts = (T @ np.hstack([valid, np.ones((len(valid), 1))]).T).T[:, :3]
         xy = base_pts[:, :2].astype(np.float32)
         (cx, cy), (sx, sy), ang = cv2.minAreaRect(xy.reshape(-1, 1, 2))
         if sx < 1 or sy < 1:
@@ -2032,23 +1991,14 @@ class BinPickingTab(RobotControlMixin, QWidget):
             if self.selected_idx is not None:  # 선택 중이면 새 설정으로 즉시 재계산
                 self._select_object(self.selected_idx)
 
+    def _on_calibration_loaded(self):
+        self._refresh_bin_box_views()  # base→cam 변환 가능해짐 → Bin Box 2D/3D 표시
+
     def _cam_to_base(self, center_cam, normal_cam):
-        """카메라 좌표계 점/법선 → 로봇 base. (center_base, normal_base) 또는 (None,None)."""
-        if self.T_calib is None:
-            return None, None
-        p_h = np.array([center_cam[0], center_cam[1], center_cam[2], 1.0])
-        if self.calib_mode == "eye_to_hand":
-            cb = (self.T_calib @ p_h)[:3]
-            nb = self.T_calib[:3, :3] @ normal_cam
-        elif self.calib_mode == "eye_in_hand":
-            if not self.main.robot:
-                return None, None
-            T = tcp_to_homogeneous(self.main.robot.get_tcp_position())
-            cb = (T @ self.T_calib @ p_h)[:3]
-            nb = T[:3, :3] @ self.T_calib[:3, :3] @ normal_cam
-        else:
-            return None, None
-        return cb, nb
+        """카메라 좌표계 점/법선 → 로봇 base. (center_base, normal_base) 또는 (None,None).
+        변환 로직은 CalibrationContext 가 소유 — eye_in_hand 에 필요한 현재 TCP 만 여기서 공급."""
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        return self.main.calib.cam_to_base(center_cam, normal_cam, tcp=tcp)
 
     def _pixel_to_base_on_plane(self, u, v, z_plane):
         """이미지 픽셀 (u,v) → 카메라 광선 → base 평면 Z=z_plane 과의 교점(base XYZ). 깊이 불사용.
@@ -2061,13 +2011,9 @@ class BinPickingTab(RobotControlMixin, QWidget):
         fx, fy = float(intr[0, 0]), float(intr[1, 1])
         cx_i, cy_i = float(intr[0, 2]), float(intr[1, 2])
         ray_cam = np.array([(u - cx_i) / fx, (v - cy_i) / fy, 1.0])
-        if self.calib_mode == "eye_to_hand":
-            T = self.T_calib
-        elif self.calib_mode == "eye_in_hand":
-            if not self.main.robot:
-                return None
-            T = tcp_to_homogeneous(self.main.robot.get_tcp_position()) @ self.T_calib
-        else:
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        T = self.main.calib.T_cam_to_base(tcp)
+        if T is None:
             return None
         O = T[:3, 3]
         d = T[:3, :3] @ ray_cam
@@ -2265,17 +2211,11 @@ class BinPickingTab(RobotControlMixin, QWidget):
 
         # 회전: 베이스 좌표계의 target 자세 → 카메라 좌표계 자세
         R_target_base = tcp_to_homogeneous(self.target_pose)[:3, :3]
-        if self.calib_mode == "eye_to_hand":
-            # T_cam2base의 회전 부분 역(전치) = base→cam
-            R_in_cam = self.T_calib[:3, :3].T @ R_target_base
-        elif self.calib_mode == "eye_in_hand":
-            if self.main.robot is None:
-                plotter.render()
-                return
-            cur_tcp = self.main.robot.get_tcp_position()
-            T_g2b = tcp_to_homogeneous(cur_tcp)
-            # T_target_cam = R_cam2gripper.T @ R_gripper2base.T @ R_target_base
-            R_in_cam = self.T_calib[:3, :3].T @ T_g2b[:3, :3].T @ R_target_base
+        # cam→base 회전의 전치 = base→cam (모드 분기는 CalibrationContext 소유)
+        tcp = self.main.robot.get_tcp_position() if self.main.robot else None
+        T_c2b = self.main.calib.T_cam_to_base(tcp)
+        if T_c2b is not None:
+            R_in_cam = T_c2b[:3, :3].T @ R_target_base
         else:
             plotter.render()
             return

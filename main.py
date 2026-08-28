@@ -42,13 +42,14 @@ from kuka_robot import KUKARobot
 from base_camera import BaseCamera
 from camera_factory import create_camera, list_available_camera_names, get_settings_file_filter
 from image_view import ZoomableImageLabel
+from vision_tab_mixin import VisionTabMixin
 from bin_picking_tab import BinPickingTab
 from cad_matching_tab import CADMatchingTab
 from surface_tracking_tab import SurfaceTrackingTab
 from calibration import (
+    CalibrationContext,
     compute_hand_eye,
     save_calibration_result,
-    tcp_to_homogeneous,
     estimate_normal_at_pixel,
     compute_approach_pose,
 )
@@ -680,15 +681,14 @@ class DataCollectionTab(QWidget, ImageViewerMixin):
         self.main.statusBar().showMessage(f"캘리브레이션 완료 (비교: '{best_name}' 채택)")
 
 
-class VerificationTab(QWidget, ImageViewerMixin):
+class VerificationTab(VisionTabMixin, QWidget, ImageViewerMixin):
     """탭 2: 캘리브레이션 검증 (체커보드 0번 코너 → 로봇 타겟 위치 계산)"""
 
     def __init__(self, main_window):
         super().__init__()
         self.main = main_window
 
-        self.T_calib = None  # 로드된 캘리브레이션 변환 행렬
-        self.calib_mode = None  # "eye_to_hand" or "eye_in_hand"
+        # T_calib/calib_mode 는 VisionTabMixin 프로퍼티 (main.calib 소유)
         self.corner_cam = None  # 체커보드 0번 코너의 카메라 좌표 (3D, mm)
         self.normal_cam = None  # 체커보드 평면 법선 (카메라 좌표계)
         self.current_tcp = None  # 현재 로봇 TCP
@@ -849,27 +849,10 @@ class VerificationTab(QWidget, ImageViewerMixin):
         sc_c.setContext(Qt.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._capture)
 
-    def _load_calibration(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "캘리브레이션 파일 선택",
-            "data",
-            "JSON Files (*.json)",
-            options=QFileDialog.Option.DontUseNativeDialog,
-        )
-        if not path:
-            return
-        try:
-            with open(path) as f:
-                result = json.load(f)
-            self.T_calib = np.array(result["transformation_matrix"])
-            self.calib_mode = result.get("mode", "eye_to_hand")
-            self.calib_label.setText(Path(path).name)
-            self.calib_mode_label.setText(f"[{self.calib_mode}]")
-            self.main.statusBar().showMessage(f"캘리브레이션 로드: {Path(path).name} ({self.calib_mode})")
-            logger.info(f"캘리브레이션 행렬:\n{self.T_calib}")
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"캘리브레이션 로드 실패:\n{e}")
+    def _update_calib_label(self, name: str):
+        # 검증 탭은 파일명과 모드 라벨이 분리돼 있다
+        self.calib_label.setText(name)
+        self.calib_mode_label.setText(f"[{self.calib_mode}]")
 
     def _update_tcp(self):
         if not self.main.robot:
@@ -976,33 +959,12 @@ class VerificationTab(QWidget, ImageViewerMixin):
             QMessageBox.warning(self, "오류", "로봇 TCP 값이 없습니다 (로봇 연결 확인)")
             return
 
-        # 코너를 동차 좌표로
-        point_cam = np.array([self.corner_cam[0], self.corner_cam[1], self.corner_cam[2], 1.0])
-
-        # 법선 벡터 (없으면 0벡터)
+        # 카메라 → base 변환 (모드 분기는 CalibrationContext 가 소유,
+        # eye_in_hand 에 필요한 TCP 는 이 탭이 방금 읽어 둔 current_tcp 사용)
         normal_cam = self.normal_cam if self.normal_cam is not None else None
-
-        if self.calib_mode == "eye_to_hand":
-            # T_cam2base: 카메라 → base
-            point_base = (self.T_calib @ point_cam)[:3]
-            # 법선은 방향이므로 회전 부분만 적용
-            if normal_cam is not None:
-                normal_base = self.T_calib[:3, :3] @ normal_cam
-            else:
-                normal_base = None
-        elif self.calib_mode == "eye_in_hand":
-            # T_cam2gripper @ point_cam = point_gripper, 그 다음 gripper→base
-            T_gripper2base = tcp_to_homogeneous(self.current_tcp)
-            point_gripper_h = self.T_calib @ point_cam
-            point_base = (T_gripper2base @ point_gripper_h)[:3]
-            if normal_cam is not None:
-                # 카메라 → gripper → base (회전만)
-                normal_gripper = self.T_calib[:3, :3] @ normal_cam
-                normal_base = T_gripper2base[:3, :3] @ normal_gripper
-            else:
-                normal_base = None
-        else:
-            QMessageBox.critical(self, "오류", f"알 수 없는 모드: {self.calib_mode}")
+        point_base, normal_base = self.main.calib.cam_to_base(self.corner_cam, normal_cam, tcp=self.current_tcp)
+        if point_base is None:
+            QMessageBox.critical(self, "오류", f"카메라→base 변환 실패 (모드: {self.calib_mode})")
             return
 
         # === 타겟 위치 (회전은 현재 TCP 유지) ===
@@ -1039,6 +1001,8 @@ class VisuPickApp(QMainWindow):
 
         self.robot = None
         self.camera = None
+        # 캘리브레이션 상태는 여기 하나만 존재 — 탭들은 VisionTabMixin 프로퍼티로 읽는다
+        self.calib = CalibrationContext()
         # 티칭 위치 (탭 공용). 파일로 유지되므로 앱을 껐다 켜도 살아남는다.
         #   home_pose  — Home 복귀 위치
         #   place_pose — 픽 사이클이 물체를 내려놓는 위치
@@ -1389,6 +1353,18 @@ class VisuPickApp(QMainWindow):
                 )
         except Exception as e:
             logger.warning(f"티칭 위치 저장 실패: {e}")
+
+    def _broadcast_calibration_loaded(self, name: str):
+        """캘리브레이션이 어느 탭에서 로드되든 모든 탭의 라벨/후처리를 갱신한다.
+        (상태는 self.calib 하나뿐이므로 데이터는 이미 공유 — 여기서는 UI 만 맞춘다.)"""
+        for tab in (getattr(self, t, None) for t in ("bin_picking_tab", "cad_matching_tab", "surface_tracking_tab", "verification_tab")):
+            if tab is None:
+                continue
+            try:
+                tab._update_calib_label(name)
+                tab._on_calibration_loaded()
+            except Exception as e:
+                logger.warning(f"캘리브레이션 방송 중 탭 갱신 실패: {e}")
 
     def _connect_robot(self):
         """로봇 연결 / 해제 토글 (카메라와 동일한 패턴).
