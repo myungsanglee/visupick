@@ -1044,6 +1044,11 @@ class VisuPickApp(QMainWindow):
         #   place_pose — 픽 사이클이 물체를 내려놓는 위치
         self.home_pose = None
         self.place_pose = None
+        # 관절 좌표 티칭 (A1~A6). Cartesian 포즈와 달리 관절값은 같은 자세를 만드는
+        # 해가 하나뿐이라, Home/놓기 복귀를 관절 PTP 로 하면 손목(A6) 감김 방향이
+        # 완전히 결정적이 된다 — 진공 호스 꼬임 방지의 핵심 (docs/bin_picking.md 티칭 절).
+        self.home_axis = None
+        self.place_axis = None
         self._teach_pose_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teach_poses.json")
         self._load_teach_poses()
 
@@ -1329,6 +1334,12 @@ class VisuPickApp(QMainWindow):
         6개 필수 키가 모두 숫자여야 통과하고, 그 밖의 키(s/t/e1~e6)는 있어도 그만이다."""
         return isinstance(pose, dict) and all(isinstance(pose.get(k), (int, float)) for k in self.POSE_KEYS)
 
+    AXIS_KEYS = ("a1", "a2", "a3", "a4", "a5", "a6")
+
+    def _valid_axis(self, axis) -> bool:
+        """관절 티칭값 형식 검사 — a1~a6 이 모두 숫자여야 관절 PTP 에 쓸 수 있다."""
+        return isinstance(axis, dict) and all(isinstance(axis.get(k), (int, float)) for k in self.AXIS_KEYS)
+
     def _load_teach_poses(self):
         """앱 시작 시 저장된 Home / 놓기 위치 복원. 파일이 없으면 조용히 넘어간다
         (로봇 연결 시점에 현재 TCP 로 초기화된다)."""
@@ -1337,16 +1348,28 @@ class VisuPickApp(QMainWindow):
                 return
             with open(self._teach_pose_path) as f:
                 data = json.load(f)
-            for key, attr in (("home_pose", "home_pose"), ("place_pose", "place_pose")):
+            for key in ("home_pose", "place_pose"):
                 pose = data.get(key)
                 if pose is None:
                     continue
                 if self._valid_pose(pose):
                     # 필수 6개 키 외의 값(s/t/e1~e6)도 그대로 살려 둔다
-                    setattr(self, attr, {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in pose.items()})
+                    setattr(self, key, {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in pose.items()})
                 else:
                     logger.warning(f"티칭 위치 '{key}' 형식이 올바르지 않아 무시함: {pose}")
-            logger.info(f"티칭 위치 로드: {self._teach_pose_path} (home={self.home_pose is not None}, place={self.place_pose is not None})")
+            for key in ("home_axis", "place_axis"):
+                axis = data.get(key)
+                if axis is None:
+                    continue
+                if self._valid_axis(axis):
+                    setattr(self, key, {k: float(axis[k]) for k in self.AXIS_KEYS})
+                else:
+                    logger.warning(f"관절 티칭 '{key}' 형식이 올바르지 않아 무시함: {axis}")
+            logger.info(
+                f"티칭 위치 로드: {self._teach_pose_path} "
+                f"(home={self.home_pose is not None}, place={self.place_pose is not None}, "
+                f"home_axis={self.home_axis is not None}, place_axis={self.place_axis is not None})"
+            )
         except Exception as e:
             logger.warning(f"티칭 위치 로드 실패: {e}")
 
@@ -1354,7 +1377,16 @@ class VisuPickApp(QMainWindow):
         """Home / 놓기 위치를 파일에 기록. 재설정 버튼과 로봇 최초 연결에서 호출한다."""
         try:
             with open(self._teach_pose_path, "w") as f:
-                json.dump({"home_pose": self.home_pose, "place_pose": self.place_pose}, f, indent=2)
+                json.dump(
+                    {
+                        "home_pose": self.home_pose,
+                        "place_pose": self.place_pose,
+                        "home_axis": self.home_axis,
+                        "place_axis": self.place_axis,
+                    },
+                    f,
+                    indent=2,
+                )
         except Exception as e:
             logger.warning(f"티칭 위치 저장 실패: {e}")
 
@@ -1399,16 +1431,30 @@ class VisuPickApp(QMainWindow):
                 taught = []
                 if self.home_pose is None or self.place_pose is None:
                     cur = self.robot.get_tcp_position()
+                    cur_axis = self.robot.get_axis_position()  # 관절값도 같이 티칭 (A6 감김 리셋용)
                     if cur:
                         if self.home_pose is None:
                             self.home_pose = cur
+                            self.home_axis = dict(cur_axis) if cur_axis else None
                             taught.append("Home")
                         if self.place_pose is None:
                             self.place_pose = dict(cur)  # 같은 dict 를 공유하면 한쪽 수정이 다른 쪽에 번진다
+                            self.place_axis = dict(cur_axis) if cur_axis else None
                             taught.append("놓기")
                         self._save_teach_poses()
                     else:
                         logger.warning("현재 TCP 를 읽지 못해 티칭 위치를 초기화하지 못했습니다")
+                # 구버전 teach_poses.json (관절값 없음) 감지 — 자동으로 채우면 안 된다:
+                # 지금 로봇이 그 티칭 지점에 서 있다는 보장이 없어서, 현재 관절값을
+                # 넣으면 엉뚱한 자세가 "Home"이 된다. 재티칭을 안내만 한다.
+                missing_axis = [n for n, a in (("Home", self.home_axis), ("놓기", self.place_axis)) if a is None]
+                if not taught and missing_axis:
+                    logger.warning(
+                        f"{'/'.join(missing_axis)} 위치에 관절 티칭값이 없음 — 해당 재설정 버튼으로 다시 티칭하면 관절 복귀(호스 꼬임 방지)가 활성화됩니다"
+                    )
+                    self.statusBar().showMessage(
+                        f"⚠ {'/'.join(missing_axis)} 위치를 재티칭하세요 — 관절값이 없어 Cartesian 복귀로 동작 중 (호스 꼬임 방지 비활성)"
+                    )
                 if taught:
                     logger.info(f"{'/'.join(taught)} 위치를 현재 TCP 로 초기화: {self.home_pose}")
                     pose_msg = f"{'/'.join(taught)} 위치를 현재 TCP 로 설정"

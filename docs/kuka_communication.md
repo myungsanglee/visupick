@@ -508,6 +508,8 @@ class CADMatchingTab(RobotControlMixin, QWidget): ...
 
 로 Mixin 을 상속. MRO 가 `RobotControlMixin → QWidget` 순이라 Mixin 메서드가 우선 적용되고, 탭별로 다른 `_refresh_mode_display` 같은 메서드는 각 탭 클래스에 그대로 남아 있어 자연스럽게 해결된다.
 
+**관절(E6AXIS) 모션 경로가 실사용된다**: Home / 놓기 위치는 관절 각도로도 티칭되어(`teach_poses.json` 의 `home_axis`/`place_axis`), 복귀 모션이 `add_move_axis()` → `robo_motion_mode=FALSE` → KRL `robo_move_AXIS()` 의 `PTP robo_E6AXIS[slot]` 로 실행된다. Cartesian FRAME 과 달리 관절 목표는 해가 하나뿐이라 A6 감김이 결정적 — 진공 호스 꼬임 방지의 핵심이다 ([bin_picking.md](bin_picking.md) "관절 좌표 티칭" 절).
+
 Mixin 은 메서드뿐 아니라 **`로봇 이동 제어` / `시퀀스 큐` 패널의 레이아웃까지** 소유한다 (`_build_move_group()` / `_build_seq_group()`). 각 탭의 `_init_ui` 는 두 줄만 부르면 된다. 표면 추적 탭은 그룹 구성이 달라 하위 빌더(`_build_home_row` / `_build_vacuum_row` / `_build_safety_rows`)만 골라 쓴다.
 
 이 구조의 이점:

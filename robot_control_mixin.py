@@ -499,6 +499,7 @@ class RobotControlMixin:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
             return
         cur = self.main.robot.get_tcp_position()
+        cur_axis = self.main.robot.get_axis_position()  # 관절값도 티칭 — 놓기 이동을 관절 PTP 로 (±180° A 부호 문제 제거)
         if cur is None:
             QMessageBox.critical(self, "오류", "현재 TCP 위치를 읽지 못했습니다")
             return
@@ -520,6 +521,9 @@ class RobotControlMixin:
             return
 
         self.main.place_pose = cur
+        self.main.place_axis = dict(cur_axis) if cur_axis else None
+        if cur_axis is None:
+            logger.warning("관절값($AXIS_ACT)을 읽지 못해 놓기 위치는 Cartesian 으로만 저장됨 (관절 복귀 비활성)")
         self.main._save_teach_poses()  # 앱을 껐다 켜도 유지되도록 teach_poses.json 에 기록
         QMessageBox.information(
             self,
@@ -537,7 +541,7 @@ class RobotControlMixin:
     # 진공 ON/OFF 를 삽입한다. (모든 모션을 한꺼번에 던지는 기존 방식으로는
     # 그리퍼 동작을 끼워넣을 수 없음)
     #
-    # 스텝 형식: ("status", 문구) / ("move", "ptp"|"lin", pose_dict)
+    # 스텝 형식: ("status", 문구) / ("move", "ptp"|"lin", pose_dict) / ("move_axis", axis_dict)
     #            / ("vacuum", bool) / ("blow", 초) / ("dwell", 초)
     # ============================================================
 
@@ -631,6 +635,19 @@ class RobotControlMixin:
                     self._cycle_idx += 1
                     # 계속 루프: 다음도 move/status 면 이어서 배치 전송
 
+                elif kind == "move_axis":
+                    # 관절 PTP — 티칭된 관절값으로 정확히 복귀 (해가 하나뿐이라
+                    # A6 감김 방향이 결정적 = 호스 꼬임 리셋). Home/놓기 스텝 전용.
+                    _, ax = step
+                    cur_ax = robot.get_axis_position()  # 검증용: 감김 풀림을 숫자로 기록
+                    if cur_ax:
+                        logger.info(f"사이클 관절 이동: A6 {cur_ax['a6']:.1f}° → {ax['a6']:.1f}° (Δ {ax['a6'] - cur_ax['a6']:+.1f}°)")
+                    slot = robot.add_move_axis(ax["a1"], ax["a2"], ax["a3"], ax["a4"], ax["a5"], ax["a6"])
+                    if slot is None:
+                        return  # KRL 큐 가득 — 재시도
+                    self._cycle_pending_slots.append(slot)
+                    self._cycle_idx += 1
+
                 elif kind in ("vacuum", "blow", "dwell"):
                     # ★ 그리퍼/대기 스텝은 모든 모션의 물리적 완료가 선행 조건
                     if self._cycle_pending_slots:
@@ -688,6 +705,11 @@ class RobotControlMixin:
         app_pose.update(x=ax, y=ay, z=az)
         pre = f"{label} " if label else ""
 
+        # 놓기/Home 은 관절 티칭값이 있으면 관절 PTP 로 (호스 꼬임 방지 — _move_to_taught 와 같은 이유).
+        # 호출자가 넘기는 place/home 은 항상 main 의 티칭 포즈이므로 대응 관절값도 main 에서 가져온다.
+        place_axis = getattr(self.main, "place_axis", None)
+        home_axis = getattr(self.main, "home_axis", None)
+
         steps: List[Tuple] = [
             ("status", f"{pre}① Approach 이동 (PTP)..."),
             ("move", "ptp", app_pose),
@@ -700,18 +722,32 @@ class RobotControlMixin:
             ("move", "lin", app_pose),
         ]
         if place is not None:
+            if place_axis is not None:
+                steps += [
+                    ("status", f"{pre}⑤ 놓기 위치로 이동 (관절 PTP)..."),
+                    ("move_axis", dict(place_axis)),
+                ]
+            else:
+                steps += [
+                    ("status", f"{pre}⑤ 놓기 위치로 이동 (PTP)..."),
+                    ("move", "ptp", dict(place)),
+                ]
             steps += [
-                ("status", f"{pre}⑤ 놓기 위치로 이동 (PTP)..."),
-                ("move", "ptp", dict(place)),
                 ("status", f"{pre}⑥ 놓기 — 진공 OFF + 블로우..."),
                 ("vacuum", False),
                 ("blow", 0.4),
             ]
         if home is not None:
-            steps += [
-                ("status", f"{pre}Home 복귀..."),
-                ("move", "ptp", dict(home)),
-            ]
+            if home_axis is not None:
+                steps += [
+                    ("status", f"{pre}Home 복귀 (관절 PTP)..."),
+                    ("move_axis", dict(home_axis)),
+                ]
+            else:
+                steps += [
+                    ("status", f"{pre}Home 복귀..."),
+                    ("move", "ptp", dict(home)),
+                ]
         return steps
 
     def _execute_pick_cycle(self):
@@ -820,6 +856,7 @@ class RobotControlMixin:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
             return
         cur = self.main.robot.get_tcp_position()
+        cur_axis = self.main.robot.get_axis_position()  # 관절값도 티칭 — Home 복귀를 관절 PTP 로 (A6 감김 리셋)
         if cur is None:
             QMessageBox.critical(self, "오류", "현재 TCP 위치를 읽지 못했습니다")
             return
@@ -837,50 +874,82 @@ class RobotControlMixin:
             return
 
         self.main.home_pose = cur
+        self.main.home_axis = dict(cur_axis) if cur_axis else None
+        if cur_axis is None:
+            logger.warning("관절값($AXIS_ACT)을 읽지 못해 Home 은 Cartesian 으로만 저장됨 (관절 복귀 비활성)")
         self.main._save_teach_poses()  # 앱을 껐다 켜도 유지되도록 teach_poses.json 에 기록
         self.btn_move_home.setEnabled(True)
         self.btn_add_home_to_seq.setEnabled(True)
         self.main.statusBar().showMessage(f"📍 Home 재설정됨: X={cur['x']:.1f}, Y={cur['y']:.1f}, Z={cur['z']:.1f}")
         logger.info(f"Home 재설정: {cur}")
 
-    def _move_to_home(self):
-        """저장된 Home 위치로 PTP 이동 (먼 거리 복귀라 관절 공간 이동이 빠르고 안전)."""
+    @staticmethod
+    def _axis_str(axis: Dict[str, float]) -> str:
+        return ", ".join(f"A{i} {axis[f'a{i}']:.1f}°" for i in range(1, 7))
+
+    def _move_to_taught(self, title: str, icon: str, pose: Dict[str, float], axis: Optional[Dict[str, float]]):
+        """티칭 위치(Home/놓기)로 이동 — 관절값이 있으면 관절 PTP, 없으면 Cartesian PTP.
+
+        관절 PTP 를 우선하는 이유 (진공 호스 꼬임 방지): Cartesian 목표는 같은 자세를
+        만드는 관절 해가 여러 개라 로봇이 A6 를 감는 쪽을 고를 수 있지만, 관절 목표는
+        해가 하나뿐이라 티칭 당시의 감김 상태로 정확히 복귀한다 = 누적이 매번 리셋된다.
+        Z 안전 검증은 티칭된 Cartesian z 로 동일하게 수행한다 (관절 목표여도 도착점의
+        높이는 티칭 때의 z 그대로이므로).
+        """
         if self.main.robot is None:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
             return
-        if self.main.home_pose is None:
-            QMessageBox.warning(self, "오류", "Home 위치가 저장되지 않았습니다")
-            return
-
-        h = self.main.home_pose
-        if not self._validate_z(h["z"]):
+        if not self._validate_z(pose["z"]):
             return
         speed = self._effective_speed(self.speed_spin.value())
+
+        if axis is not None:
+            mode_line = "PTP (관절 좌표 복귀 — A6 감김 리셋, 호스 꼬임 방지)"
+            target_str = "  " + self._axis_str(axis) + f"\n  (티칭 시 TCP: X {pose['x']:.1f}, Y {pose['y']:.1f}, Z {pose['z']:.1f})"
+        else:
+            mode_line = "PTP (Cartesian — 관절 티칭값 없음, 재티칭하면 관절 복귀 활성화)"
+            target_str = (
+                f"  X: {pose['x']:.2f}\n  Y: {pose['y']:.2f}\n  Z: {pose['z']:.2f}\n"
+                f"  A: {pose['a']:.2f}\n  B: {pose['b']:.2f}\n  C: {pose['c']:.2f}"
+            )
         msg = (
-            f"🏠 Home 위치로 이동\n\n"
-            f"방식: PTP (관절)\n"
+            f"{icon} {title}로 이동\n\n"
+            f"방식: {mode_line}\n"
             f"속도: {speed}%" + (" (AUT 50% 상한 적용)" if self._is_aut_mode() else "") + "\n\n"
-            f"목표:\n"
-            f"  X: {h['x']:.2f}\n  Y: {h['y']:.2f}\n  Z: {h['z']:.2f}\n"
-            f"  A: {h['a']:.2f}\n  B: {h['b']:.2f}\n  C: {h['c']:.2f}\n\n"
+            f"목표:\n{target_str}\n\n"
             f"진행하시겠습니까?"
         )
-        ret = QMessageBox.question(self, "Home 이동 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        ret = QMessageBox.question(self, f"{title} 이동 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
 
         try:
             self.main.robot.set_speed(speed)
-            slot = self.main.robot.add_move_ptp(h["x"], h["y"], h["z"], h["a"], h["b"], h["c"])
+            if axis is not None:
+                # 검증용 로그: 현재 A6 → 목표 A6 (감김이 풀리는 방향/양을 숫자로 확인)
+                cur_ax = self.main.robot.get_axis_position()
+                if cur_ax:
+                    logger.info(f"{title} 관절 복귀: A6 {cur_ax['a6']:.1f}° → {axis['a6']:.1f}° (Δ {axis['a6'] - cur_ax['a6']:+.1f}°)")
+                slot = self.main.robot.add_move_axis(axis["a1"], axis["a2"], axis["a3"], axis["a4"], axis["a5"], axis["a6"])
+            else:
+                slot = self.main.robot.add_move_ptp(pose["x"], pose["y"], pose["z"], pose["a"], pose["b"], pose["c"])
             if slot is None:
-                QMessageBox.critical(self, "오류", "Home 이동 명령 큐에 추가 실패")
+                QMessageBox.critical(self, "오류", f"{title} 이동 명령 큐에 추가 실패")
                 return
-            self.main.statusBar().showMessage(f"🏠 Home 이동 명령 큐에 추가됨 (slot={slot})")
+            kind = "관절" if axis is not None else "Cartesian"
+            self.main.statusBar().showMessage(f"{icon} {title} 이동 명령 큐에 추가됨 (slot={slot}, {kind} PTP)")
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"Home 이동 실패:\n{e}")
+            QMessageBox.critical(self, "오류", f"{title} 이동 실패:\n{e}")
+
+    def _move_to_home(self):
+        """저장된 Home 위치로 이동 — 관절 티칭값이 있으면 관절 PTP (_move_to_taught 참고)."""
+        if self.main.home_pose is None:
+            QMessageBox.warning(self, "오류", "Home 위치가 저장되지 않았습니다")
+            return
+        self._move_to_taught("Home", "🏠", self.main.home_pose, getattr(self.main, "home_axis", None))
 
     def _move_to_place(self):
-        """저장된 놓기(Place) 위치로 PTP 이동. Home 이동과 같은 패턴 (확인 다이얼로그 + Z 검증)."""
+        """저장된 놓기(Place) 위치로 이동 — 관절 티칭값이 있으면 관절 PTP (_move_to_taught 참고)."""
         if self.main.robot is None:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
             return
@@ -893,31 +962,7 @@ class RobotControlMixin:
             )
             return
 
-        if not self._validate_z(place["z"]):
-            return
-        speed = self._effective_speed(self.speed_spin.value())
-        msg = (
-            f"📦 놓기 위치로 이동\n\n"
-            f"방식: PTP (관절)\n"
-            f"속도: {speed}%" + (" (AUT 50% 상한 적용)" if self._is_aut_mode() else "") + "\n\n"
-            f"목표:\n"
-            f"  X: {place['x']:.2f}\n  Y: {place['y']:.2f}\n  Z: {place['z']:.2f}\n"
-            f"  A: {place['a']:.2f}\n  B: {place['b']:.2f}\n  C: {place['c']:.2f}\n\n"
-            f"진행하시겠습니까?"
-        )
-        ret = QMessageBox.question(self, "놓기 위치 이동 확인", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if ret != QMessageBox.Yes:
-            return
-
-        try:
-            self.main.robot.set_speed(speed)
-            slot = self.main.robot.add_move_ptp(place["x"], place["y"], place["z"], place["a"], place["b"], place["c"])
-            if slot is None:
-                QMessageBox.critical(self, "오류", "놓기 위치 이동 명령 큐에 추가 실패")
-                return
-            self.main.statusBar().showMessage(f"📦 놓기 위치 이동 명령 큐에 추가됨 (slot={slot})")
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"놓기 위치 이동 실패:\n{e}")
+        self._move_to_taught("놓기 위치", "📦", place, getattr(self.main, "place_axis", None))
 
     def _clear_motion_queue(self):
         """KRL 큐의 모든 슬롯을 0으로 리셋 (대기 중인 이동 취소)."""
@@ -983,10 +1028,13 @@ class RobotControlMixin:
         if self.main.home_pose is None:
             QMessageBox.warning(self, "오류", "Home 위치가 저장되지 않았습니다")
             return
+        home_axis = getattr(self.main, "home_axis", None)
         action = {
             "type": "home",
             "label": "🏠 Home 이동",
             "target": dict(self.main.home_pose),
+            # 추가 시점의 관절값 스냅샷 (target 과 같은 원칙) — 있으면 관절 PTP 로 실행
+            "axis": dict(home_axis) if home_axis else None,
         }
         self.user_queue.append(action)
         self._refresh_action_list()
@@ -1097,7 +1145,10 @@ class RobotControlMixin:
         a_type = action["type"]
 
         if a_type == "home":
-            return [("move", "ptp", dict(target))]  # Home 복귀는 PTP 로 통일
+            axis = action.get("axis")
+            if axis:
+                return [("move_axis", dict(axis))]  # 관절 티칭값 있음 → A6 감김 리셋 복귀
+            return [("move", "ptp", dict(target))]  # 구버전 액션/관절값 없음 → Cartesian PTP
 
         if a_type == "object_move":
             is_lin = action.get("is_lin", True)
