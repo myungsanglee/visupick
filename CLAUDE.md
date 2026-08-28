@@ -36,7 +36,12 @@ python main.py                 # 유일한 진입점 — GUI 실행
 
 **공유 뷰 위젯은 중립 모듈에 있다 (탭이 탭을 import 하지 않게):** 2D 이미지 라벨은 [image_view.py](image_view.py)(`ZoomableImageLabel` 베이스 + `DraggableImageLabel` 드래그-ROI), 3D 포인트클라우드 뷰는 [pointcloud_view.py](pointcloud_view.py)(`PointCloudView3D`). 세 탭이 모두 여기서 import 한다 (CAD 탭은 `PointCloudView3D`를 scene/CAD/cluster 3개 인스턴스로 씀). 뷰를 고칠 땐 탭이 아니라 이 모듈을 고친다. (표면 추적 탭 전용 `ClickPointImageLabel`은 아직 그 탭에 로컬.)
 
-**여는 방향/OBB 분석은 순수 CV 모듈** ([opening_analysis.py](opening_analysis.py)) — Qt 독립이라 앱 없이 단독 테스트/튜닝 가능. `obb_from_mask`, `opening_weight_map`, `opening_from_weight`(seam/brightness 공통), `opening_from_grid`(투명 케이스 내부 격자 비대칭, 권장), `debug_show_*`(개발용 cv2.imshow). 탭의 `_detect_obb`/`_detect_opening`은 위젯 값을 읽어 이 함수들을 호출하는 UI 래퍼. 알고리즘 상세는 [docs/bin_picking.md](docs/bin_picking.md) §3.3/§3.4.
+**알고리즘은 순수 모듈, 탭은 UI 래퍼** — Qt 독립이라 앱 없이 단독 테스트/튜닝 가능:
+- [opening_analysis.py](opening_analysis.py): 여는 방향/OBB 분석.
+- [cad_registration.py](cad_registration.py): CAD 정합 전체 (FPFH+RANSAC/FGR 전역 정합, ICP 정밀화, 멀티 인스턴스, PPF 학습·매칭, 평면 제거, DBSCAN, `object_pose_to_tcp`). CAD 탭은 위젯 값을 읽어 호출만 한다.
+- [line_tracking.py](line_tracking.py): 표면 추적 선 검출 (`detect_line`/`trace_path_on_skeleton`/`sample_path_by_3d_distance`).
+
+[opening_analysis.py](opening_analysis.py) 상세: `obb_from_mask`, `opening_weight_map`, `opening_from_weight`(seam/brightness 공통), `opening_from_grid`(투명 케이스 내부 격자 비대칭, 권장), `debug_show_*`(개발용 cv2.imshow). 탭의 `_detect_obb`/`_detect_opening`은 위젯 값을 읽어 이 함수들을 호출하는 UI 래퍼. 알고리즘 상세는 [docs/bin_picking.md](docs/bin_picking.md) §3.3/§3.4.
 
 **KUKA 통신은 2계층** ([kuka_robot.py](kuka_robot.py)):
 - `C3BridgeClient` — **TCP 포트 7000** 위의 저수준 C3Bridge / KukaVarProxy 프로토콜 (`read_variable` / `write_variable` / `send_motion`).

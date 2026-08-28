@@ -1,6 +1,6 @@
 # CAD 기반 6D Pose Matching
 
-이 문서는 본 프로그램의 **CAD 매칭 탭**(`cad_matching_tab.py`)이 어떻게 객체의 6D 자세를 추정하고 로봇이 그것을 잡으러 가게 만드는지 학습 목적으로 정리한다. 사용법이 아니라 알고리즘의 원리와 본 시스템의 설계 결정에 초점을 둔다.
+이 문서는 본 프로그램의 **CAD 매칭 탭**(UI: `cad_matching_tab.py`, 알고리즘: `cad_registration.py` — 순수 모듈로 분리되어 Qt 없이 단독 실행/튜닝 가능)이 어떻게 객체의 6D 자세를 추정하고 로봇이 그것을 잡으러 가게 만드는지 학습 목적으로 정리한다. 사용법이 아니라 알고리즘의 원리와 본 시스템의 설계 결정에 초점을 둔다.
 
 전제: hand-eye calibration이 끝나 `T_cam2base` (또는 `T_cam2gripper`)가 있고, Zivid 3D 카메라가 mm 단위 절대 좌표를 제공한다. 기초는 [hand_eye_calibration.md](hand_eye_calibration.md) 참고.
 
@@ -136,7 +136,7 @@ Drost et al. 2010 "Model Globally, Match Locally" 알고리즘. 본 시스템은
 
 **비용**: 학습 단계에서 점쌍 N² 처리. 본 시스템은 학습 시 자동 다운샘플(`max_points_for_train=2500`)로 시간 폭주 방지.
 
-자세한 PPF 원리: 본 시스템에 통합된 [`train_ppf_detector`](../cad_matching_tab.py), [`ppf_match_per_cluster`](../cad_matching_tab.py) 참고.
+자세한 PPF 원리: 본 시스템에 통합된 [`train_ppf_detector`](../cad_registration.py), [`ppf_match_per_cluster`](../cad_registration.py) 참고.
 
 ### 3.3 PPF 전체장면 (DBSCAN 없음) — 상용 방식, 권장
 
@@ -147,7 +147,7 @@ PPF voting 은 원래 **전체 장면에 한 번** 돌려 다중 인스턴스를
 
 상용 프로그램(Photoneo, Pickit, MVTec HALCON `find_surface_model` 등)은 분할 없이 **CAD 로드 → 전체 장면에서 곧바로 다중 인스턴스**를 찾는다 — 이게 표면 기반 PPF 의 본래 강점이다. 국소 점쌍 voting 이라 물체가 부분만 보여도 그 조각의 점쌍이 자세에 투표하기 때문.
 
-본 시스템의 [`ppf_match_whole_scene`](../cad_matching_tab.py)(UI 알고리즘 = "PPF 전체장면"):
+본 시스템의 [`ppf_match_whole_scene`](../cad_registration.py)(UI 알고리즘 = "PPF 전체장면"):
 
 1. (선택) 장면 **voxel 다운샘플**(`scene_voxel`, UI voxel 값) → normal 추정·정렬 → `detector.match()` **1회** → voting 후보 다수.
 2. **pre-ICP NMS**: raw voting 자세로 **먼저** 중복 제거 → 서로 다른 인스턴스 후보만 ICP (ICP 횟수 급감 = 속도↑, 놓침 위험 낮음).
@@ -172,7 +172,7 @@ PPF voting 은 원래 **전체 장면에 한 번** 돌려 다중 인스턴스를
 
 ### 4.1 작업대 평면 제거
 
-ROI 안의 scene 포인트클라우드에서 **RANSAC plane fitting** 으로 가장 큰 평면 (작업대 표면) 검출 → 해당 inlier 점들 제거. [`remove_table_plane`](../cad_matching_tab.py) 가 Open3D `segment_plane` 으로 한 번에 처리.
+ROI 안의 scene 포인트클라우드에서 **RANSAC plane fitting** 으로 가장 큰 평면 (작업대 표면) 검출 → 해당 inlier 점들 제거. [`remove_table_plane`](../cad_registration.py) 가 Open3D `segment_plane` 으로 한 번에 처리.
 
 이게 없으면 작업대 점들이 한 거대 클러스터를 만들어 그 안에 객체가 묻힌다.
 
@@ -232,7 +232,7 @@ bin picking 탭은 객체 중심을 잡지만, CAD 매칭 탭은 **CAD 좌표계
 - **구 드래그 / X·Y·Z 스핀박스** → 위치 미세조정 ("원점", "객체 중심" 버튼 포함)
 - **A·B·C 스핀박스** → Tool 좌표계 기준 회전 보정 (6.3절)
 - **삼각대 화살표** (노랑 = Tool+Z 접근 방향, 빨강 = +X, 초록 = +Y) 가 **현재 A/B/C 값을 실시간 반영** — 적용 시 실제 로봇 자세와 어긋나지 않도록 같은 수학을 공유한다
-- **"표면 법선으로 회전 자동"** 체크 시, 마커를 옮길 때마다 그 면에 수직으로 접근하도록 A/B/C 를 자동 계산 ([`suggest_rotation_from_normal`](../cad_matching_tab.py) — 잡기 축 정렬 자세와 "Tool+Z = -법선" 자세의 차이 회전을 KUKA ZYX 로 분해)
+- **"표면 법선으로 회전 자동"** 체크 시, 마커를 옮길 때마다 그 면에 수직으로 접근하도록 A/B/C 를 자동 계산 ([`suggest_rotation_from_normal`](../cad_registration.py) — 잡기 축 정렬 자세와 "Tool+Z = -법선" 자세의 차이 회전을 KUKA ZYX 로 분해)
 
 ### 6.2 왜 grasp 값을 CAD 좌표계로 저장하나
 
@@ -266,7 +266,7 @@ PPF 모드로 전환 시 잡기 축은 **유지**하지만 cull 옵션만 자동
 
 ### 6.5 6D pose → TCP 자세 변환
 
-[`object_pose_to_tcp`](../cad_matching_tab.py) 가 모든 보정을 한 번에 처리:
+[`object_pose_to_tcp`](../cad_registration.py) 가 모든 보정을 한 번에 처리:
 
 ```python
 def object_pose_to_tcp(T_object_cam, T_calib, calib_mode, current_tcp,
@@ -294,7 +294,7 @@ def object_pose_to_tcp(T_object_cam, T_calib, calib_mode, current_tcp,
 
 ## 7. 클러스터당 후보 1개 출력 — 시각/시퀀스 일관성
 
-PPF 는 voting 결과로 상위 N 개 후보를 내는데, 거의 동일한 자세가 여러 개 나와 3D 뷰에 겹쳐 보이는 문제가 있다. [`ppf_match_per_cluster`](../cad_matching_tab.py) 의 `n_show_per_cluster=1` 로 **클러스터당 best 1개만** 인스턴스로 출력 — fitness 기준 정렬 후 최상위 채택.
+PPF 는 voting 결과로 상위 N 개 후보를 내는데, 거의 동일한 자세가 여러 개 나와 3D 뷰에 겹쳐 보이는 문제가 있다. [`ppf_match_per_cluster`](../cad_registration.py) 의 `n_show_per_cluster=1` 로 **클러스터당 best 1개만** 인스턴스로 출력 — fitness 기준 정렬 후 최상위 채택.
 
 진단 로그(다이얼로그)엔 상위 5 개의 votes 가 모두 표시되어 voting 다양성/품질 확인 가능:
 ```

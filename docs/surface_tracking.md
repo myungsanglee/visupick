@@ -25,10 +25,10 @@
 [surface_tracking_tab.py](../surface_tracking_tab.py) 모듈 docstring의 9단계:
 
 1. **캡처** — RGB + XYZ + 법선 맵 (`_capture`, [surface_tracking_tab.py:882](../surface_tracking_tab.py#L882)).
-2. **검은 선 검출** → 1픽셀 두께 skeleton (`detect_line`, [:241](../surface_tracking_tab.py#L241)).
+2. **검은 선 검출** → 1픽셀 두께 skeleton (`detect_line`, [line_tracking.py](../line_tracking.py) — 순수 모듈로 분리).
 3. 사용자가 2D 뷰에서 **시작점/끝점 두 번 클릭** (`_on_image_click`, [:1014](../surface_tracking_tab.py#L1014)).
-4. skeleton 위에서 **BFS 최단 경로** (`trace_path_on_skeleton`, [:332](../surface_tracking_tab.py#L332)).
-5. **누적 3D 거리 기준 mm 간격 샘플링** (`sample_path_by_3d_distance`, [:389](../surface_tracking_tab.py#L389)).
+4. skeleton 위에서 **BFS 최단 경로** (`trace_path_on_skeleton`, [line_tracking.py](../line_tracking.py)).
+5. **누적 3D 거리 기준 mm 간격 샘플링** (`sample_path_by_3d_distance`, [line_tracking.py](../line_tracking.py)).
 6. 각 샘플의 **법선(국소 평면 피팅) → Tool +Z = −법선 자세**.
 7. **offset mm** 만큼 법선 바깥으로 띄움 (표면에서 떨어뜨림).
 8. 카메라 좌표계 → 로봇 base 좌표계 변환.
