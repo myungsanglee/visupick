@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -90,6 +90,38 @@ from cad_registration import (
     suggest_rotation_from_normal,
     _aligned_tool_frame,
 )
+
+
+class MatchWorker(QThread):
+    """CAD 매칭 계산 전용 워커 스레드.
+
+    예전에는 매칭(FPFH/PPF, 1~수십 초)이 UI 스레드에서 돌면서
+    QApplication.processEvents() 로 화면을 억지로 갱신했다 — 그동안 UI 반응성이
+    processEvents 호출 위치에 좌우되고, 비상정지(Space)도 그 사이에만 먹었다.
+    지금은 계산을 이 스레드로 옮기고 진행/결과를 시그널(큐 연결)로 UI 에 전달한다
+    — 매칭 중에도 UI·비상정지가 항상 반응한다.
+
+    함수(fn)는 progress(i, total, msg) 콜백 하나를 받아 결과를 반환하는 순수 계산
+    클로저다. Qt 위젯은 절대 건드리지 않는다 (위젯 값은 시작 전에 UI 스레드에서
+    전부 읽어 클로저에 캡처해 둔다).
+    """
+
+    progressed = Signal(int, int, str)
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn(lambda i, t, m: self.progressed.emit(i, t, m))
+        except Exception as e:
+            logger.exception("매칭 워커 실패")
+            self.failed.emit(str(e))
+            return
+        self.finished_ok.emit(result)
 
 
 class GraspPointDialog(QDialog):
@@ -1730,6 +1762,10 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ---------------------------------------------------------
 
     def _run_matching(self):
+        """매칭 시작 — 검증/장면 준비/위젯 값 읽기는 여기(UI 스레드)서 끝내고,
+        무거운 계산은 MatchWorker 스레드로 보낸다. 결과는 _on_matching_done."""
+        if getattr(self, "_match_worker", None) is not None and self._match_worker.isRunning():
+            return  # 이미 실행 중 (버튼도 비활성이지만 이중 방어)
         if self.cad_pcd is None:
             QMessageBox.warning(self, "오류", "CAD 모델을 먼저 로드하세요")
             return
@@ -1746,7 +1782,7 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
             QMessageBox.warning(self, "오류", "ROI 안에 유효한 3D 포인트가 부족합니다")
             return
 
-        # 작업대 평면 제거 (옵션)
+        # 작업대 평면 제거 (옵션) — 빠른 전처리라 UI 스레드에서 수행
         plane_msg = "작업대 평면 제거 사용 안 함"
         if self.remove_plane_check.isChecked():
             scene_no_plane, _plane_model, plane_n = remove_table_plane(scene, distance_threshold=float(self.plane_dist_spin.value()))
@@ -1775,109 +1811,146 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
             else:
                 cull_msg = "CAD cull 사용 안 함"
 
-        # 진행 표시
+        # ---- 워커에 넘길 값을 전부 UI 스레드에서 읽는다 (워커는 위젯 접근 금지) ----
+        algo = self.algo_combo.currentText()
+        use_fgr = "(FGR)" in algo
+        params = {
+            "algo": algo,
+            "use_fgr": use_fgr,
+            "voxel": voxel,
+            "max_inst": max_inst,
+            "fit_thr": fit_thr,
+            "ransac_attempts": int(self.ransac_attempts_spin.value()),
+            "use_dbscan": self.use_dbscan.isChecked(),
+            "dbscan_eps": float(self.dbscan_eps.value()),
+            "dbscan_min_pts": int(self.dbscan_min_pts.value()),
+            "ppf_sampling_step": float(self.ppf_sampling_step.value()),
+            "ppf_distance_step": float(self.ppf_distance_step.value()),
+            "ppf_angle_bins": int(self.ppf_angle_bins.value()),
+            "ppf_scene_sample": float(self.ppf_scene_sample.value()),
+            "ppf_scene_distance": float(self.ppf_scene_distance.value()),
+            "ppf_min_votes": int(self.ppf_min_votes.value()),
+            "ppf_top_candidates": int(self.ppf_top_candidates.value()),
+        }
+        # PPF 학습 캐시: 필요 여부를 지금 판정하고, 캐시된 detector 를 클로저에 캡처
+        ppf_cache = (self._ppf_detector, self._ppf_model_data, self._ppf_model_o3d)
+        ppf_need_train = self._ppf_detector is None or self._ppf_cad_path != self.cad_path
+        cad_pcd_full = self.cad_pcd  # 학습용 (rebinding 되어도 클로저 참조는 유지)
+        cad_path_at_start = self.cad_path
+
+        # 진행 표시 + 매칭 관련 버튼 잠금
         self.progress.setVisible(True)
         self.progress.setRange(0, max_inst)
         self.progress.setValue(0)
         self.btn_match.setEnabled(False)
         self.main.statusBar().showMessage(f"매칭 중... scene={len(scene.points)}점, voxel={voxel}mm")
-        QApplication.processEvents()
 
-        def progress_cb(i, total, msg):
-            self.progress.setValue(i)
-            self.main.statusBar().showMessage(msg)
-            QApplication.processEvents()
-
-        t_match0 = time.perf_counter()  # 매칭 소요 시간 측정 시작
-        try:
-            algo = self.algo_combo.currentText()
-            use_fgr = "(FGR)" in algo
-            if algo.startswith("PPF"):
-                # PPF detector 학습 (첫 호출에만 실제 학습, 이후 캐시)
-                if self._ppf_detector is None or self._ppf_cad_path != self.cad_path:
-                    self.main.statusBar().showMessage("PPF 학습 중... (수~수십초 소요)")
-                    QApplication.processEvents()
+        def compute(progress_cb):
+            """워커 스레드에서 실행 — Qt 위젯 접근 없음, 순수 계산만."""
+            new_cache = None
+            if params["algo"].startswith("PPF"):
+                if ppf_need_train:
+                    progress_cb(0, params["max_inst"], "PPF 학습 중... (수~수십초 소요)")
                     detector, model_data, model_o3d = train_ppf_detector(
-                        self.cad_pcd,
-                        relative_sampling_step=float(self.ppf_sampling_step.value()),
-                        relative_distance_step=float(self.ppf_distance_step.value()),
-                        num_angles=int(self.ppf_angle_bins.value()),
+                        cad_pcd_full,
+                        relative_sampling_step=params["ppf_sampling_step"],
+                        relative_distance_step=params["ppf_distance_step"],
+                        num_angles=params["ppf_angle_bins"],
                     )
-                    self._ppf_detector = detector
-                    self._ppf_model_data = model_data
-                    self._ppf_model_o3d = model_o3d
-                    self._ppf_cad_path = self.cad_path
+                    new_cache = (detector, model_data, model_o3d)
                     logger.info(
                         f"PPF 학습 완료: model {len(model_data)}점 "
-                        f"(sampling={float(self.ppf_sampling_step.value())}, "
-                        f"distance={float(self.ppf_distance_step.value())}, "
-                        f"angles={int(self.ppf_angle_bins.value())})"
+                        f"(sampling={params['ppf_sampling_step']}, "
+                        f"distance={params['ppf_distance_step']}, "
+                        f"angles={params['ppf_angle_bins']})"
                     )
+                else:
+                    detector, model_data, model_o3d = ppf_cache
 
-                if "전체장면" in algo:
-                    # 전체 장면 PPF: DBSCAN 없이 1회 voting → NMS 로 다중 인스턴스
+                if "전체장면" in params["algo"]:
                     instances, debug_log = ppf_match_whole_scene(
                         scene,
-                        self._ppf_detector,
-                        self._ppf_model_data,
-                        self._ppf_model_o3d,
-                        relative_scene_sample_step=float(self.ppf_scene_sample.value()),
-                        relative_scene_distance=float(self.ppf_scene_distance.value()),
-                        min_votes=int(self.ppf_min_votes.value()),
-                        n_candidates=max(20, int(self.ppf_top_candidates.value()) * max_inst),
-                        max_instances=max_inst,
-                        fitness_threshold=fit_thr,
-                        scene_voxel=voxel,  # 매칭 전 장면 다운샘플 (voting 속도 지렛대)
+                        detector,
+                        model_data,
+                        model_o3d,
+                        relative_scene_sample_step=params["ppf_scene_sample"],
+                        relative_scene_distance=params["ppf_scene_distance"],
+                        min_votes=params["ppf_min_votes"],
+                        n_candidates=max(20, params["ppf_top_candidates"] * params["max_inst"]),
+                        max_instances=params["max_inst"],
+                        fitness_threshold=params["fit_thr"],
+                        scene_voxel=params["voxel"],  # 매칭 전 장면 다운샘플 (voting 속도 지렛대)
                         progress_cb=progress_cb,
                     )
                 else:
                     # PPF per-cluster: DBSCAN 클러스터링 사용 (꺼져 있으면 단일 클러스터로 강제)
-                    eps = float(self.dbscan_eps.value()) if self.use_dbscan.isChecked() else 1e6
-                    min_pts = int(self.dbscan_min_pts.value()) if self.use_dbscan.isChecked() else 10
+                    eps = params["dbscan_eps"] if params["use_dbscan"] else 1e6
+                    min_pts = params["dbscan_min_pts"] if params["use_dbscan"] else 10
                     instances, debug_log = ppf_match_per_cluster(
                         scene,
-                        self._ppf_detector,
-                        self._ppf_model_data,
-                        self._ppf_model_o3d,
+                        detector,
+                        model_data,
+                        model_o3d,
                         eps=eps,
                         min_points=min_pts,
-                        relative_scene_sample_step=float(self.ppf_scene_sample.value()),
-                        relative_scene_distance=float(self.ppf_scene_distance.value()),
-                        min_votes=int(self.ppf_min_votes.value()),
-                        n_top_candidates=int(self.ppf_top_candidates.value()),
+                        relative_scene_sample_step=params["ppf_scene_sample"],
+                        relative_scene_distance=params["ppf_scene_distance"],
+                        min_votes=params["ppf_min_votes"],
+                        n_top_candidates=params["ppf_top_candidates"],
                         progress_cb=progress_cb,
                     )
-            elif self.use_dbscan.isChecked():
+            elif params["use_dbscan"]:
                 instances, debug_log = cad_match_per_cluster(
                     scene,
                     cad_for_match,
-                    voxel,
-                    eps=float(self.dbscan_eps.value()),
-                    min_points=int(self.dbscan_min_pts.value()),
-                    fitness_threshold=fit_thr,
-                    ransac_attempts=int(self.ransac_attempts_spin.value()),
-                    use_fgr=use_fgr,
+                    params["voxel"],
+                    eps=params["dbscan_eps"],
+                    min_points=params["dbscan_min_pts"],
+                    fitness_threshold=params["fit_thr"],
+                    ransac_attempts=params["ransac_attempts"],
+                    use_fgr=params["use_fgr"],
                     progress_cb=progress_cb,
                 )
             else:
                 instances, debug_log = cad_match_multi_instance(
                     scene,
                     cad_for_match,
-                    voxel,
-                    max_instances=max_inst,
-                    fitness_threshold=fit_thr,
-                    ransac_attempts=int(self.ransac_attempts_spin.value()),
-                    use_fgr=use_fgr,
+                    params["voxel"],
+                    max_instances=params["max_inst"],
+                    fitness_threshold=params["fit_thr"],
+                    ransac_attempts=params["ransac_attempts"],
+                    use_fgr=params["use_fgr"],
                     progress_cb=progress_cb,
                 )
-        except Exception as e:
-            self.progress.setVisible(False)
-            self.btn_match.setEnabled(True)
-            QMessageBox.critical(self, "매칭 오류", f"매칭 중 오류:\n{e}")
-            logger.exception("매칭 실패")
-            return
+            return instances, debug_log, new_cache
 
-        match_ms = (time.perf_counter() - t_match0) * 1000.0  # 매칭 소요 시간(ms)
+        self._match_t0 = time.perf_counter()
+        self._match_ctx = {"voxel": voxel, "plane_msg": plane_msg, "cull_msg": cull_msg, "cad_path": cad_path_at_start}
+        self._match_worker = MatchWorker(compute, self)
+        self._match_worker.progressed.connect(self._on_matching_progress)
+        self._match_worker.finished_ok.connect(self._on_matching_done)
+        self._match_worker.failed.connect(self._on_matching_failed)
+        self._match_worker.start()
+
+    def _on_matching_progress(self, i, total, msg):
+        self.progress.setValue(i)
+        self.main.statusBar().showMessage(msg)
+
+    def _on_matching_failed(self, err: str):
+        self.progress.setVisible(False)
+        self.btn_match.setEnabled(True)
+        QMessageBox.critical(self, "매칭 오류", f"매칭 중 오류:\n{err}")
+
+    def _on_matching_done(self, result):
+        """워커 완료 (UI 스레드) — 결과 반영 + 진단 다이얼로그."""
+        instances, debug_log, new_ppf_cache = result
+        ctx = self._match_ctx
+        match_ms = (time.perf_counter() - self._match_t0) * 1000.0  # 매칭 소요 시간(ms)
+
+        # PPF 학습 캐시 반영 — 매칭 중 CAD 를 새로 로드했으면 캐시가 어긋나므로 버린다
+        if new_ppf_cache is not None and self.cad_path == ctx["cad_path"]:
+            self._ppf_detector, self._ppf_model_data, self._ppf_model_o3d = new_ppf_cache
+            self._ppf_cad_path = ctx["cad_path"]
 
         self.progress.setVisible(False)
         self.btn_match.setEnabled(True)
@@ -1890,7 +1963,8 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._render_instances_3d()
 
         # 진단 로그를 다이얼로그에 표시
-        log_text = plane_msg + "\n" + cull_msg + "\n" + "\n".join(debug_log)
+        voxel = ctx["voxel"]
+        log_text = ctx["plane_msg"] + "\n" + ctx["cull_msg"] + "\n" + "\n".join(debug_log)
         if not instances:
             full_msg = (
                 "매칭된 인스턴스가 없습니다.\n\n"

@@ -345,6 +345,20 @@ UI 의 **"180° 회전"** 버튼:
 
 ---
 
+## 9.5 매칭은 워커 스레드에서 돈다
+
+"매칭 실행"의 무거운 계산(FPFH/PPF, 1~수십 초)은 UI 스레드가 아니라 **`MatchWorker(QThread)`** 에서 실행된다 ([cad_matching_tab.py](../cad_matching_tab.py)).
+
+**왜 바꿨나:** 예전에는 계산이 UI 스레드에서 돌면서 `QApplication.processEvents()` 를 곳곳에 넣어 화면을 억지로 갱신했다. 이 방식은 (1) UI 반응성이 processEvents 를 얼마나 자주 부르느냐에 좌우되고, (2) **비상정지(Space)도 그 사이에만 동작**하는 안전 문제가 있었다. 연속 픽처럼 로봇이 자율로 움직이는 기능이 생기면서 "긴 계산 중에도 항상 반응하는 UI"가 안전 요구사항이 됐다.
+
+**설계 규칙** (스레드 안전의 핵심):
+1. **위젯 값은 시작 전에 UI 스레드에서 전부 읽어** `params` dict 로 클로저에 캡처한다 — 워커는 Qt 위젯을 절대 만지지 않는다.
+2. 진행/결과/오류는 **시그널**(`progressed`/`finished_ok`/`failed`, 큐 연결)로 UI 스레드에 돌아와 처리된다 — `_on_matching_progress` / `_on_matching_done` / `_on_matching_failed`.
+3. 장면은 ROI 크롭이 만든 새 포인트클라우드라 UI 와 공유되지 않고, PPF 학습 캐시는 완료 시점에 **CAD 경로가 그대로일 때만** 반영한다 (매칭 중 새 CAD 를 로드했으면 폐기).
+4. 빠른 전처리(ROI 크롭, 평면 제거)와 검증은 그대로 UI 스레드 — 사용자에게 즉시 경고를 띄워야 하므로.
+
+캡처(카메라 SDK)와 SAM3/RF-DETR 추론은 아직 UI 스레드다 — SDK 스레드 제약과 CUDA 컨텍스트(스레드별 push/pop 필요)가 얽혀 있어 실기 검증 없이 옮기기 위험해서 남겨 뒀다.
+
 ## 10. 안전 + 시퀀스 큐 + Mixin
 
 CAD 매칭 탭의 로봇 제어 / 시퀀스 큐 / 비상정지 / Home 이동 등은 빈 픽킹 탭과 완전히 동일하게 [`RobotControlMixin`](../robot_control_mixin.py) 을 상속해서 처리. 자세한 내용은 [bin_picking.md § 8, § 10.5](bin_picking.md) 와 [kuka_communication.md § 6–7](kuka_communication.md).
