@@ -88,7 +88,9 @@ if self.roi_3d is not None:
 
 ### 3.2 대안 검출 경로 — SAM 3 텍스트 프롬프트 (검출기 불필요)
 
-RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 찾으려면 탭 2행의 **"SAM3 텍스트" 입력 + "SAM3 검출" 버튼**을 쓴다 — Meta 공식 SAM 3(facebookresearch/sam3)의 개념 분할(Promptable Concept Segmentation)로, 명사구(예: `cosmetic case`) 하나만으로 **Grounding DINO 같은 별도 검출기 없이** 모든 인스턴스의 마스크를 만든다.
+RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 찾으려면 탭 2행의 **"SAM3 텍스트" 입력 + "SAM3 검출" 버튼**을 쓴다 — Meta 공식 SAM 3(facebookresearch/sam3)의 개념 분할(Promptable Concept Segmentation)로, 명사구(예: `cosmetic case`)만으로 **Grounding DINO 같은 별도 검출기 없이** 모든 인스턴스의 마스크를 만든다.
+
+**여러 종류를 한 번에**: 쉼표로 구분해 `rectangle, circle` 처럼 적으면 종류마다 검출한다. SAM 3 의 `set_text_prompt` 는 **호출당 명사구 하나**만 받는 API 라서, 예전에는 이 입력이 통째로 하나의 낯선 명사구가 되어 아무것도 못 찾는 버그가 있었다. 지금은 [object_detector.py](../object_detector.py) `Sam3Detector.detect` 가 쉼표를 분리해 개념별로 따로 추론한다 — 무거운 이미지 임베딩(`set_image`)은 한 번만 계산하고 `state` 를 재사용하므로 2종 검출이 1종의 2배가 아니라 ~1.5배 시간이면 끝난다 (실측: 1종 130ms, 2종 385ms — 로드 제외). 같은 물체가 두 개념에 모두 걸리면(`box` 와 `case` 등) bbox IoU ≥ 0.85 기준으로 점수 높은 쪽만 남긴다 (`dedupe_overlaps`). `class_id` 는 프롬프트 순서, `class_name` 은 해당 명사구가 되어 2D 라벨에 어떤 종류로 잡혔는지 표시된다.
 
 - 구현: `object_detector.Sam3Detector` — `sam3.model_builder.build_sam3_image_model` + `Sam3Processor` 로 로드(1회 캐싱), `set_image()` → `set_text_prompt()` → `(masks, boxes, scores)`. 탭 `_detect_sam3()` 는 텍스트/상태표시만 하고 이 검출기를 호출. bf16 텐서를 numpy 로 안전 변환하는 `_to_numpy` 도 이 모듈에 있다.
 - 선택적 의존성: SAM 3 미설치면 버튼만 안내 에러, 앱·다른 기능은 정상. repo 경로는 환경변수 `SAM3_MODEL_DIR`.

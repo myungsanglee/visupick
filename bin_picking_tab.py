@@ -660,11 +660,14 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         sam3_row = QHBoxLayout()
         sam3_row.addWidget(QLabel("SAM3 텍스트:"))
         self.sam3_prompt_input = QLineEdit("rectangular")
-        self.sam3_prompt_input.setPlaceholderText("검출할 객체를 영어 명사구로 (예: cosmetic case, transparent box)")
+        # 주의: 예전 placeholder "(예: cosmetic case, transparent box)" 가 쉼표 나열로
+        # 오해되곤 했다 — 실제로도 이제 쉼표 = 여러 객체 (개념별로 따로 추론)로 동작한다.
+        self.sam3_prompt_input.setPlaceholderText("영어 명사구, 쉼표로 여러 종류 (예: rectangle, circle)")
         self.sam3_prompt_input.setToolTip(
-            "SAM 3 개념 분할 — 이 텍스트에 해당하는 모든 객체를 캡처 이미지에서 찾아\n"
+            "SAM 3 개념 분할 — 텍스트에 해당하는 모든 객체를 캡처 이미지에서 찾아\n"
             "분할 마스크를 만든다. Grounding DINO 없이 SAM 3 하나로 동작.\n"
-            "Conf 값이 점수 임계값으로 함께 적용됨."
+            "쉼표로 여러 종류 검출 가능 (예: rectangle, circle — 종류마다 따로 추론하고\n"
+            "겹치는 결과는 점수 높은 쪽만 남김). Conf 값이 점수 임계값으로 함께 적용됨."
         )
         self.sam3_prompt_input.returnPressed.connect(self._detect_sam3)
         self.sam3_prompt_input.setFixedWidth(400)  # stretch 대신 고정 너비
