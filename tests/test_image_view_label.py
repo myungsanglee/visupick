@@ -83,3 +83,32 @@ class TestDrawOrder:
         region = canvas[y1 - text_h : y1, center[0] + LABEL_OFFSET_X : center[0] + LABEL_OFFSET_X + 150]
         assert not np.all(region == arrow_color, axis=2).any(), "화살표가 라벨 위에 그려짐"
         assert np.all(region == fill, axis=2).any(), "라벨 채움색이 안 보임"
+
+
+class TestCenterDot:
+    """화살표 시작점(=객체 중심)에 원을 그려 중심 위치가 한눈에 보이게 한다."""
+
+    def test_dot_at_arrow_start(self, qapp):
+        from image_view import DraggableImageLabel, CENTER_DOT_R
+
+        v = DraggableImageLabel()
+        v.set_image(np.zeros((300, 600, 3), np.uint8))
+        center, arrow_color = (300, 200), (0, 0, 255)
+        v.set_arrows([(center, (300, 280), arrow_color, 0)])
+        canvas = v._make_overlay_image()
+
+        assert tuple(canvas[center[1], center[0]]) == arrow_color, "중심에 원이 없음"
+        # 흰 테두리 — 어두운 배경/같은 색 객체 위에서도 원이 묻히지 않게
+        assert tuple(canvas[center[1] - CENTER_DOT_R - 2, center[0]]) == (255, 255, 255)  # 흰 테두리 링
+        # 원 바깥은 그대로
+        assert tuple(canvas[center[1] - CENTER_DOT_R - 4, center[0]]) != arrow_color  # 원 바깥
+
+    def test_dot_survives_arrow_tail(self, qapp):
+        """화살표를 먼저, 원을 나중에 그려야 꼬리에 원이 가려지지 않는다."""
+        from image_view import DraggableImageLabel
+
+        v = DraggableImageLabel()
+        v.set_image(np.zeros((300, 600, 3), np.uint8))
+        v.set_arrows([((300, 200), (500, 200), (0, 200, 0), 0)])
+        canvas = v._make_overlay_image()
+        assert tuple(canvas[200, 300]) == (0, 200, 0)

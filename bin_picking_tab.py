@@ -1011,10 +1011,14 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         )
         if self.roi_3d is not None:
             self._apply_roi_to_3d()
-        self._refresh_bin_box_views()  # 3D 는 clear 됐고 2D 도 새 이미지라 Bin Box 재표시
+        bin_box_shown = self._refresh_bin_box_views()  # 3D 는 clear 됐고 2D 도 새 이미지라 Bin Box 재표시
         self.view_3d.reset_view()
 
-        self.main.statusBar().showMessage("캡처 완료")
+        # 저장된 Bin Box 가 있는데 못 그렸으면 그 이유를 알린다. 예전에는 _render_bin_box 가
+        # 띄운 경고가 이 "캡처 완료" 메시지에 곧바로 덮여, 사용자는 Bin Box 가 사라진 것처럼
+        # 보였다 (실제로는 bin_box.json 이 정상 로드됐지만 투영할 캘리브레이션이 없던 것).
+        note = "" if bin_box_shown else "  —  ⚠ 저장된 Bin Box 를 표시하지 못함: 캘리브레이션을 로드하세요"
+        self.main.statusBar().showMessage("캡처 완료" + note)
 
     def _on_roi_dragged(self, x1: int, y1: int, x2: int, y2: int):
         """2D 드래그 = **Bin Box(작업 볼륨) 설정**.
@@ -1941,16 +1945,20 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             pts.append((fx * X / Z + cx_i, fy * Y / Z + cy_i))
         return np.asarray(pts, dtype=float)
 
-    def _refresh_bin_box_views(self):
+    def _refresh_bin_box_views(self) -> bool:
         """Bin Box 를 2D(투영 폴리곤) + 3D(와이어 상자) 양쪽에 표시하고 roi_2d 를 동기화.
 
         roi_2d 는 검출 ROI 필터(§3.1)의 1차 게이트라, 화면에 보이는 Bin Box 와
         필터 영역이 어긋나지 않도록 폴리곤의 바운딩 박스로 갱신한다.
+
+        반환: **표시에 성공했는지**. 저장된 Bin Box 가 있는데 base→cam 투영을 못 하면
+        (캘리브레이션 미로드 / 캡처 전이라 intrinsics 없음) False — 호출 측이 그 이유를
+        사용자에게 알릴 수 있게 한다. Bin Box 자체가 없으면 알릴 게 없으므로 True.
         """
         if not self.bin_box:
             self.view_2d.set_roi_polygon(None)
             self._render_bin_box()
-            return
+            return True
         poly = self._bin_box_image_polygon()
         if poly is not None:
             self.view_2d.set_roi(None)  # 축 정렬 사각형 대신 폴리곤 표시
@@ -1964,6 +1972,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
                     float(np.clip(poly[:, 1].max(), 0, h)),
                 )
         self._render_bin_box()
+        return poly is not None
 
     def _save_bin_box(self):
         try:

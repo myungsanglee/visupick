@@ -30,6 +30,8 @@ from PySide6.QtWidgets import QLabel
 # 겹치지 않을 만큼만 작게 — 크면 라벨이 객체에서 떨어져 나가 어느 객체 것인지 흐려진다.
 LABEL_OFFSET_X = 8
 LABEL_OFFSET_Y = 8
+# 화살표 시작점(객체 중심) 표시용 원의 반지름(px). 중심이 어디인지 한눈에 보이게.
+CENTER_DOT_R = 5
 
 
 class ZoomableImageLabel(QLabel):
@@ -477,6 +479,11 @@ class DraggableImageLabel(ZoomableImageLabel):
             p0 = (int(round(start[0])), int(round(start[1])))
             p1 = (int(round(end[0])), int(round(end[1])))
             cv2.arrowedLine(canvas, p0, p1, arr_color, thickness, tipLength=0.25)
+            # 시작점(= 객체 중심)에 원 — 중심이 어디인지 바로 보이게. 화살표 **뒤에** 그려
+            # 화살표 꼬리에 가려지지 않는다. 흰 테두리는 어두운 배경·같은 색 객체 위에서도
+            # 원이 묻히지 않게 하는 용도.
+            cv2.circle(canvas, p0, CENTER_DOT_R + 2, (255, 255, 255), -1, cv2.LINE_AA)  # 테두리 2px (1px 는 안티앨리어싱에 묻힘)
+            cv2.circle(canvas, p0, CENTER_DOT_R, arr_color, -1, cv2.LINE_AA)
             # 여는 방향 신뢰도는 촉이 아니라 **정보 라벨**(Open:)에 함께 표시한다 —
             # 화살표가 짧으면 촉 라벨이 정보 라벨과 겹쳐 읽기 어려웠다.
 
