@@ -291,7 +291,7 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._overlay_boxes: List[tuple] = []
         # [(mask(H,W) bool, color(BGR), obj_index), ...] — seg 모델일 때만 채워짐
         self._overlay_masks: List[tuple] = []
-        # [(box_pts(4,2) int, color(BGR), obj_index, angle_deg), ...] — OBB 검출 시
+        # [(box_pts(4,2) int, color(BGR), obj_index, angle_deg, open_conf|None), ...] — OBB 검출 시
         self._overlay_obbs: List[tuple] = []
         # [(start(x,y), end(x,y), color(BGR), obj_index), ...] — 여는 방향 화살표
         self._overlay_arrows: List[tuple] = []
@@ -316,7 +316,11 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._refresh()
 
     def set_obbs(self, obbs: List[tuple]):
-        """OBB(회전 사각형) 오버레이. [(box_pts(4,2), color, obj_idx, angle), ...]. 빈 리스트면 스킵."""
+        """OBB(회전 사각형) 오버레이. [(box_pts(4,2), color, obj_idx, angle, open_conf), ...].
+
+        obj_idx 이후는 선택: angle 이 있으면 중심에 정보 라벨(X/Y/Deg[/Open])을 그리고,
+        open_conf(여는 방향 신뢰도)까지 주면 라벨에 Open 항목이 붙는다. 빈 리스트면 스킵.
+        """
         self._overlay_obbs = obbs
         self._refresh()
 
@@ -324,6 +328,25 @@ class DraggableImageLabel(ZoomableImageLabel):
         """여는 방향 화살표 오버레이. [(start(x,y), end(x,y), color, obj_idx), ...]. 빈 리스트면 스킵."""
         self._overlay_arrows = arrows
         self._refresh()
+
+    @staticmethod
+    def _draw_center_label(canvas, text: str, cx: int, cy: int, fill_color):
+        """객체 중심에 정보 라벨을 그린다 — 글자 길이에 맞춘 사각형을 fill_color 로 채우고 흰 글씨.
+
+        라벨이 길어(X/Y/Deg/Open) 이미지 가장자리 객체에서는 화면 밖으로 나갈 수 있으므로
+        캔버스 안으로 밀어 넣는다(잘려서 안 보이는 것보다 살짝 어긋나는 편이 낫다).
+        """
+        font, scale, th_px = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        (tw, th), base = cv2.getTextSize(text, font, scale, th_px)
+        pad = 4
+        bw, bh = tw + 2 * pad, th + base + 2 * pad
+        x0, y0 = cx - bw // 2, cy - bh // 2
+        H, W = canvas.shape[:2]
+        x0 = max(0, min(x0, W - bw))
+        y0 = max(0, min(y0, H - bh))
+        fill = tuple(int(c) for c in fill_color)
+        cv2.rectangle(canvas, (x0, y0), (x0 + bw, y0 + bh), fill, -1)
+        cv2.putText(canvas, text, (x0 + pad, y0 + pad + th), font, scale, (255, 255, 255), th_px, cv2.LINE_AA)
 
     def set_highlight(self, idx: Optional[int]):
         self._highlighted_idx = idx
@@ -407,6 +430,7 @@ class DraggableImageLabel(ZoomableImageLabel):
             box_pts, color = obb[0], obb[1]
             obj_idx = obb[2] if len(obb) > 2 else None
             angle = obb[3] if len(obb) > 3 else None
+            open_conf = obb[4] if len(obb) > 4 else None  # 여는 방향 신뢰도 (없으면 라벨에서 생략)
             if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
                 obb_color, thickness = (0, 255, 0), 3
             elif self._highlighted_idx is not None:
@@ -416,15 +440,21 @@ class DraggableImageLabel(ZoomableImageLabel):
             pts = np.asarray(box_pts, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(canvas, [pts], isClosed=True, color=obb_color, thickness=thickness)
             if angle is not None:
+                # 중심 정보 라벨: 픽셀 좌표 + 각도(+ 여는 방향 신뢰도).
+                # 글자 길이에 맞춘 사각형을 **객체 색으로 채우고 흰 글씨** — 객체가 여럿일 때
+                # 어느 라벨이 어느 객체 것인지 색으로 바로 매칭되게 (bbox/마스크와 같은 색).
                 cx = int(np.mean(pts[:, 0, 0]))
                 cy = int(np.mean(pts[:, 0, 1]))
-                cv2.putText(canvas, f"{angle:.1f}deg", (cx - 20, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, obb_color, 2)
+                label = f"X: {cx:.1f}, Y: {cy:.1f}, Deg: {angle:.1f}"
+                if open_conf is not None:
+                    label += f", Open: {open_conf:.2f}"
+                self._draw_center_label(canvas, label, cx, cy, obb_color)
 
         # 여는 방향 화살표 — 중심 → 여는 쪽(뚜껑 열림). OBB 위 최상단 레이어.
         for arr in self._overlay_arrows:
             start, end, color = arr[0], arr[1], arr[2]
             obj_idx = arr[3] if len(arr) > 3 else None
-            conf = arr[4] if len(arr) > 4 else None  # 여는 방향 신뢰도 (SAM3 conf 와 별개)
+            # arr[4](여는 방향 신뢰도)는 중심 정보 라벨에서 표시하므로 여기선 안 쓴다
             if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
                 arr_color, thickness = (0, 255, 0), 3
             elif self._highlighted_idx is not None:
@@ -434,14 +464,8 @@ class DraggableImageLabel(ZoomableImageLabel):
             p0 = (int(round(start[0])), int(round(start[1])))
             p1 = (int(round(end[0])), int(round(end[1])))
             cv2.arrowedLine(canvas, p0, p1, arr_color, thickness, tipLength=0.25)
-            if conf is not None:
-                # 화살표 촉 옆에 여는 방향 신뢰도 표시 (bbox 의 검출 conf 와 구분되게 "여는:")
-                label = f"open:{conf:.2f}"
-                tx = p1[0] + 6
-                ty = p1[1] + 4
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(canvas, (tx - 2, ty - th - 3), (tx + tw + 2, ty + 3), (0, 0, 0), -1)
-                cv2.putText(canvas, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, arr_color, 2)
+            # 여는 방향 신뢰도는 촉이 아니라 **중심 정보 라벨**(Open:)에 함께 표시한다 —
+            # 화살표가 짧으면 촉 라벨이 중심 라벨과 겹쳐 읽기 어려웠다.
 
         if self._roi_poly is not None and len(self._roi_poly) >= 3:
             # Bin Box 투영 폴리곤 (회전 반영) — 축 정렬 사각형보다 우선

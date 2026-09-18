@@ -1306,7 +1306,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             res.pop("_debug", None)  # 디버그 임시 데이터는 저장 전 제거
             det["opening"] = res
             color = cmap.get(i, (200, 200, 200))
-            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, obb["angle"]))
+            # 중심 정보 라벨(X/Y/Deg/Open)에 쓰이도록 여는 방향 신뢰도를 함께 넘긴다
+            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, obb["angle"], res["confidence"]))
             cx, cy = obb["center"]
             dx, dy = res["dir"]
             end = (cx + dx * res["half_len"], cy + dy * res["half_len"])
