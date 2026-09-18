@@ -489,20 +489,59 @@ def opening_from_hinge(
         "scores": [float(x) for x in scores],
     }
     if debug:
-        debug_show_hinge(layers, warp_mask, slices, scores, order, metric)
+        debug_show_hinge(layers, warp_mask, slices, scores, order, metric, conf)
     return result
 
 
-def debug_show_hinge(layers, warp_mask, slices, scores, hinge, metric):
-    """warp 위에 네 띠와 점수를 그려 보여준다 (힌지=빨강, 여는 쪽=초록)."""
-    base = layers[0] if len(layers) == 1 else cv2.merge(layers[:3])
-    vis = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR) if base.ndim == 2 else base.copy()
-    vis[warp_mask == 0] = (vis[warp_mask == 0] * 0.35).astype(vis.dtype)
-    names = ["위", "오른", "아래", "왼"]
-    opp = (hinge + 2) % 4
-    for i, (rs, cs) in enumerate(slices):
-        color = (0, 0, 255) if i == hinge else ((0, 220, 0) if i == opp else (200, 200, 200))
-        cv2.rectangle(vis, (cs.start, rs.start), (cs.stop - 1, rs.stop - 1), color, 2)
-        cv2.putText(vis, f"{names[i]} {scores[i]:.3f}", (cs.start + 3, rs.start + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
-    cv2.imshow(f"hinge[{metric}] 빨강=힌지 초록=여는쪽", vis)
-    cv2.waitKey(1)
+def debug_show_hinge(layers, warp_mask, slices, scores, hinge, metric, conf):
+    """[개발용] 힌지 방식 중간 단계를 cv2.imshow 로 표시 — 어느 변이 왜 뽑혔는지 눈으로 확인.
+
+    왼쪽: OBB 로 똑바로 세운 케이스(warp) 위에 네 띠를 그린 것.
+          빨강 = 힌지로 고른 변, 초록 = 그 맞은편(여는 쪽), 회색 = 나머지.
+          마스크 밖(OBB 모서리 중 객체가 아닌 부분)은 어둡게 — 점수 계산에서 빠진 영역.
+    오른쪽: 네 변의 '투명함 점수' 막대. 1등과 2등의 격차가 곧 confidence 다.
+
+    글자는 **ASCII 만** 쓴다 — cv2.putText 는 한글을 못 그려서 깨진다 (T/R/B/L =
+    위/오른쪽/아래/왼쪽, canonical warp 기준). 다른 디버그 창과 같이 아무 키나
+    누르면 다음 객체로 넘어간다.
+    """
+    try:
+        # layers 는 호출부가 넘긴 rgb 의 채널(R,G,B) — cv2 는 BGR 로 그리므로 뒤집어 합친다.
+        # (점수 계산은 채널 순서와 무관하지만, 디버그 화면 색이 실제와 달라 보이면 헷갈린다.)
+        base = layers[0] if len(layers) == 1 else cv2.merge(layers[2::-1])
+        vis = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR) if base.ndim == 2 else base.copy()
+        vis[warp_mask == 0] = (vis[warp_mask == 0] * 0.35).astype(vis.dtype)
+
+        names = ["T", "R", "B", "L"]  # Top / Right / Bottom / Left (warp 기준)
+        opp = (hinge + 2) % 4
+        for i, (rs, cs) in enumerate(slices):
+            color = (0, 0, 255) if i == hinge else ((0, 220, 0) if i == opp else (190, 190, 190))
+            cv2.rectangle(vis, (cs.start, rs.start), (cs.stop - 1, rs.stop - 1), color, 1)
+            cv2.putText(vis, names[i], (cs.start + 3, rs.start + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+
+        # 작은 케이스도 읽히도록 확대 (다른 디버그 창과 같은 방식)
+        scale = max(1, int(round(360 / max(vis.shape[0], 1))))
+        vis = cv2.resize(vis, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+
+        # 점수 막대 — 상관값은 음수도 나오므로 [min,max] 로 정규화해 길이를 잡는다
+        bh, bw = vis.shape[0], 260
+        bars = np.full((bh, bw, 3), 30, np.uint8)
+        lo, hi = float(min(scores)), float(max(scores))
+        span = (hi - lo) or 1.0
+        for i, sc in enumerate(scores):
+            y = 46 + i * 34
+            color = (0, 0, 255) if i == hinge else ((0, 220, 0) if i == opp else (190, 190, 190))
+            cv2.rectangle(bars, (44, y), (44 + int((sc - lo) / span * 150), y + 18), color, -1)
+            cv2.putText(bars, names[i], (8, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(bars, f"{sc:+.3f}", (200, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
+        cv2.putText(bars, f"metric={metric}", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(bars, f"conf={conf:.2f}", (8, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(bars, f"hinge={names[hinge]} -> open={names[opp]}", (8, bh - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 220), 1)
+
+        montage = cv2.hconcat([vis, np.zeros((bh, 6, 3), np.uint8), bars])
+        win = "hinge debug: red=hinge, green=open (press any key -> next)"
+        cv2.imshow(win, montage)
+        cv2.waitKey(0)
+        cv2.destroyWindow(win)
+    except Exception as e:
+        logger.warning(f"힌지 디버그 시각화 실패: {e}")

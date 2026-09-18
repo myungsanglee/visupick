@@ -41,7 +41,7 @@ python main.py                 # 유일한 진입점 — GUI 실행
 - [cad_registration.py](cad_registration.py): CAD 정합 전체 (FPFH+RANSAC/FGR 전역 정합, ICP 정밀화, 멀티 인스턴스, PPF 학습·매칭, 평면 제거, DBSCAN, `object_pose_to_tcp`). CAD 탭은 위젯 값을 읽어 호출만 한다.
 - [line_tracking.py](line_tracking.py): 표면 추적 선 검출 (`detect_line`/`trace_path_on_skeleton`/`sample_path_by_3d_distance`).
 
-[opening_analysis.py](opening_analysis.py) 상세: `obb_from_mask`, `opening_weight_map`, `opening_from_weight`(seam/brightness 공통), `opening_from_grid`(투명 케이스 내부 격자 비대칭 — 가로로 긴 케이스), `opening_from_hinge`(투명한 변=힌지를 네 변 중에서 골라 반대쪽을 여는 방향으로 — **정사각형 케이스**처럼 경우의 수가 4가지일 때. 나머지 셋은 여는 축이 OBB 단축 고정이라 못 쓴다), `debug_show_*`(개발용 cv2.imshow). 탭의 `_detect_obb`/`_detect_opening`은 위젯 값을 읽어 이 함수들을 호출하는 UI 래퍼이고, **방식별 분기는 탭의 `_compute_opening()` 한 곳**에만 둔다 (일괄 계산과 연속 픽 자동 선택이 같은 경로를 쓰도록 — 예전에 갈라져서 버그가 났다). 알고리즘 상세는 [docs/bin_picking.md](docs/bin_picking.md) §3.3/§3.4.
+[opening_analysis.py](opening_analysis.py) 상세: `obb_from_mask`, `opening_weight_map`, `opening_from_weight`(seam/brightness 공통), `opening_from_grid`(투명 케이스 내부 격자 비대칭 — 가로로 긴 케이스), `opening_from_hinge`(투명한 변=힌지를 네 변 중에서 골라 반대쪽을 여는 방향으로 — **정사각형 케이스**처럼 경우의 수가 4가지일 때. 나머지 셋은 여는 축이 OBB 단축 고정이라 못 쓴다), `debug_show_*`(개발용 cv2.imshow — `VISUPICK_OPENING_DEBUG=1 python main.py` 로 켜면 '여는 방향' 계산 과정을 객체별로 띄운다. **cv2.putText 는 한글을 못 그리므로 디버그 창 글자는 ASCII 로 쓸 것**). 탭의 `_detect_obb`/`_detect_opening`은 위젯 값을 읽어 이 함수들을 호출하는 UI 래퍼이고, **방식별 분기는 탭의 `_compute_opening()` 한 곳**에만 둔다 (일괄 계산과 연속 픽 자동 선택이 같은 경로를 쓰도록 — 예전에 갈라져서 버그가 났다). 알고리즘 상세는 [docs/bin_picking.md](docs/bin_picking.md) §3.3/§3.4.
 
 **KUKA 통신은 2계층** ([kuka_robot.py](kuka_robot.py)):
 - `C3BridgeClient` — **TCP 포트 7000** 위의 저수준 C3Bridge / KukaVarProxy 프로토콜 (`read_variable` / `write_variable` / `send_motion`).
