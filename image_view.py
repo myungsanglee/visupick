@@ -26,6 +26,11 @@ from PySide6.QtCore import Qt, QPoint, QRect, Signal
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import QLabel
 
+# 객체 정보 라벨을 기준점(객체 중심 = 화살표 시작점)에서 띄우는 간격(px).
+# 겹치지 않을 만큼만 작게 — 크면 라벨이 객체에서 떨어져 나가 어느 객체 것인지 흐려진다.
+LABEL_OFFSET_X = 8
+LABEL_OFFSET_Y = 8
+
 
 class ZoomableImageLabel(QLabel):
     """줌·팬 가능한 이미지 뷰. 다음 오버라이드 훅으로 확장."""
@@ -330,17 +335,23 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._refresh()
 
     @staticmethod
-    def _draw_center_label(canvas, text: str, cx: int, cy: int, fill_color):
-        """객체 중심에 정보 라벨을 그린다 — 글자 길이에 맞춘 사각형을 fill_color 로 채우고 흰 글씨.
+    def _draw_info_label(canvas, text: str, ax: int, ay: int, fill_color):
+        """객체 정보 라벨 — 글자 길이에 맞춘 사각형을 fill_color 로 채우고 흰 글씨.
 
-        라벨이 길어(X/Y/Deg/Open) 이미지 가장자리 객체에서는 화면 밖으로 나갈 수 있으므로
+        기준점 (ax, ay) = 객체 중심(=화살표 시작점). 라벨의 **왼쪽 아래 모서리**를 그
+        지점에서 살짝 오른쪽·위로 띄워 놓는다. 중심에 딱 맞추면 화살표 시작점과 겹쳐
+        글씨를 가리기 때문 — 라벨이 중심 오른쪽 위에 떠 있으면 화살표가 어느 방향으로
+        나가든(아래/왼쪽이 흔함) 시작점이 보인다.
+
+        라벨이 길어(X/Y/Deg/Open) 가장자리 객체에서는 화면 밖으로 나갈 수 있으므로
         캔버스 안으로 밀어 넣는다(잘려서 안 보이는 것보다 살짝 어긋나는 편이 낫다).
         """
         font, scale, th_px = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
         (tw, th), base = cv2.getTextSize(text, font, scale, th_px)
         pad = 4
         bw, bh = tw + 2 * pad, th + base + 2 * pad
-        x0, y0 = cx - bw // 2, cy - bh // 2
+        x0 = ax + LABEL_OFFSET_X  # 왼쪽 모서리를 기준점 오른쪽으로
+        y0 = ay - LABEL_OFFSET_Y - bh  # 아래 모서리를 기준점 위로 → top = 아래 − 높이
         H, W = canvas.shape[:2]
         x0 = max(0, min(x0, W - bw))
         y0 = max(0, min(y0, H - bh))
@@ -426,6 +437,7 @@ class DraggableImageLabel(ZoomableImageLabel):
                 cv2.putText(canvas, full_label, (ix1 + 2, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         # OBB(회전 사각형) — bbox 위 레이어. minAreaRect 결과.
+        pending_labels = []  # 정보 라벨은 화살표까지 다 그린 뒤 최상단에 올린다
         for obb in self._overlay_obbs:
             box_pts, color = obb[0], obb[1]
             obj_idx = obb[2] if len(obb) > 2 else None
@@ -448,7 +460,8 @@ class DraggableImageLabel(ZoomableImageLabel):
                 label = f"X: {cx:.1f}, Y: {cy:.1f}, Deg: {angle:.1f}"
                 if open_conf is not None:
                     label += f", Open: {open_conf:.2f}"
-                self._draw_center_label(canvas, label, cx, cy, obb_color)
+                # 화살표보다 **나중에** 그려야 화살표가 글씨를 덮지 않는다 → 여기선 모으기만
+                pending_labels.append((label, cx, cy, obb_color))
 
         # 여는 방향 화살표 — 중심 → 여는 쪽(뚜껑 열림). OBB 위 최상단 레이어.
         for arr in self._overlay_arrows:
@@ -464,8 +477,12 @@ class DraggableImageLabel(ZoomableImageLabel):
             p0 = (int(round(start[0])), int(round(start[1])))
             p1 = (int(round(end[0])), int(round(end[1])))
             cv2.arrowedLine(canvas, p0, p1, arr_color, thickness, tipLength=0.25)
-            # 여는 방향 신뢰도는 촉이 아니라 **중심 정보 라벨**(Open:)에 함께 표시한다 —
-            # 화살표가 짧으면 촉 라벨이 중심 라벨과 겹쳐 읽기 어려웠다.
+            # 여는 방향 신뢰도는 촉이 아니라 **정보 라벨**(Open:)에 함께 표시한다 —
+            # 화살표가 짧으면 촉 라벨이 정보 라벨과 겹쳐 읽기 어려웠다.
+
+        # 정보 라벨 — 화살표까지 다 그린 **뒤** 최상단에 올려 글씨가 가려지지 않게
+        for text, lx, ly, lcolor in pending_labels:
+            self._draw_info_label(canvas, text, lx, ly, lcolor)
 
         if self._roi_poly is not None and len(self._roi_poly) >= 3:
             # Bin Box 투영 폴리곤 (회전 반영) — 축 정렬 사각형보다 우선
