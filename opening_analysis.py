@@ -9,8 +9,9 @@
   - obb_from_mask(mask) → {center, size, angle, box_pts}
   - opening_weight_map(gray, method, thr_pct) → 가중치 맵 (seam/brightness)
   - opening_from_weight(mask, weight, obb, ...) → {dir, angle_deg, confidence, ...}
-  - opening_from_grid(mask, gray, obb, ...)      → 내부 격자 비대칭 (권장, 투명체)
-  - debug_show_opening / debug_show_grid         → 개발용 cv2.imshow 시각화
+  - opening_from_grid(mask, gray, obb, ...)      → 내부 격자 비대칭 (가로로 긴 투명 케이스)
+  - opening_from_hinge(mask, gray, obb, ...)     → 힌지 투명도 4방향 (정사각형 케이스)
+  - debug_show_opening / debug_show_grid / debug_show_hinge → 개발용 cv2.imshow 시각화
 
 자세한 원리는 docs/bin_picking.md §3.3/§3.4 참고.
 """
@@ -336,3 +337,172 @@ def debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf):
         cv2.destroyWindow(win)
     except Exception as e:
         logger.warning(f"격자 디버그 시각화 실패: {e}")
+
+
+# ============================================================
+# 힌지 투명도 방식 (정사각형 케이스 — 4방향 판별)
+# ============================================================
+#
+# 왜 별도 방식인가: 위의 세 방식(seam/brightness/grid)은 **여는 축을 OBB 단축으로
+# 고정**하고 부호(둘 중 어느 긴 변인가)만 정한다. 가로로 긴 케이스는 힌지와 립이
+# 둘 다 긴 변이므로 이게 맞지만, **정사각형 케이스는 네 변 길이가 같아** 단축이
+# 노이즈로 정해진다 — 프레임마다 축이 뒤집히고, 애초에 경우의 수가 4가지라
+# 2택 구조로는 원리적으로 풀 수 없다.
+#
+# 그래서 이 방식은 **네 변을 모두 평가**해 힌지를 고르고, 그 반대쪽을 여는 방향으로
+# 삼는다. 판별 단서는 "힌지가 있는 변만 투명하다"는 제품 특징이다.
+#
+# "투명하다"를 이미지에서 어떻게 재나:
+#   - (bg, 기본) **배경 유사도** — 맑은 플라스틱 너머로는 케이스가 놓인 **바닥이
+#     비쳐 보인다**. 그래서 힌지 쪽 띠의 색 분포가 케이스 바깥(바닥) 분포와 닮는다.
+#     불투명한 나머지 세 변(제품·인쇄·프레임)은 바닥과 다르다.
+#   - (odd) **이질도** — 바닥 색이 케이스 본체와 비슷해 bg 대비가 안 나올 때 쓴다.
+#     "힌지 변만 나머지 세 변과 다르다"는 사실만 쓰므로 투명이 어떻게 보이는지
+#     몰라도 되지만, 인쇄 로고가 있는 변이 대신 튈 수 있다.
+# 두 단서 모두 **점수가 높을수록 힌지**가 되도록 부호를 맞췄다.
+
+
+def _hist_desc(channels: List[np.ndarray], bins: int = 24) -> np.ndarray:
+    """채널별 정규화 히스토그램을 이어붙인 기술자. 평균색 대신 분포를 쓰는 이유는
+    평균이 우연히 같아지는 경우(밝은 점 + 어두운 점 ↔ 중간 회색)를 구분하기 위해."""
+    parts = []
+    for c in channels:
+        h, _ = np.histogram(c, bins=bins, range=(0, 256))
+        total = float(h.sum())
+        parts.append(h / total if total > 0 else h.astype(np.float64))
+    return np.concatenate(parts).astype(np.float64)
+
+
+def _corr(a: np.ndarray, b: np.ndarray) -> float:
+    """두 기술자의 피어슨 상관 (1=동일 분포, 0=무관). 비교용이라 부호만 일관되면 된다."""
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    return float(a.dot(b) / denom) if denom > 1e-12 else 0.0
+
+
+def opening_from_hinge(
+    mask,
+    gray,
+    obb,
+    rgb=None,
+    band_ratio: float = 0.25,
+    metric: str = "bg",
+    debug: bool = False,
+) -> Optional[Dict]:
+    """힌지(투명한 변)를 네 변 중에서 골라, 그 **반대쪽**을 여는 방향으로 반환한다.
+
+    정사각형 케이스처럼 경우의 수가 4가지인 경우를 위한 방식. 절차:
+      1) OBB 로 케이스를 똑바로 세운다(warp). 마스크도 같이 warp 해 실제 객체 픽셀만 쓴다.
+      2) 네 변 안쪽의 **띠(band)** 를 뜬다. 모서리는 두 띠에 겹치므로 잘라낸다
+         (겹치면 인접 변끼리 점수가 섞여 판별력이 떨어진다).
+      3) 띠마다 "투명함 점수"를 매긴다 (metric 참고). 점수 최대 = 힌지.
+      4) 힌지의 **맞은편 변** 바깥 방향이 여는 방향. 원본 좌표계로 역투영해 반환.
+
+    인자:
+      rgb        : (선택) 컬러 이미지. 주면 채널별 히스토그램을 써서 판별력이 크게 오른다
+                   — 투명부는 바닥 '색'까지 닮기 때문. 없으면 gray 만 사용.
+      band_ratio : 변 안쪽 띠 두께 비율(0.05~0.45). 얇으면 노이즈, 두꺼우면 가운데
+                   제품 영역이 섞여 변 사이 차이가 흐려진다.
+      metric     : "bg"(배경 유사도, 기본) | "odd"(나머지 세 변과의 이질도).
+
+    반환: {"dir", "angle_deg", "confidence", "half_len", "axis": "hinge",
+           "hinge_side"(0~3), "scores"[4]} — 실패 시 None.
+    confidence 는 1등과 2등 점수의 **격차를 전체 산포로 정규화한 값**(0~1)이다.
+    4지선다에서 "얼마나 확실히 하나가 튀는가"가 곧 신뢰도이기 때문. 0.15 미만이면
+    네 변이 고만고만하다는 뜻 → 띠 두께나 metric 을 바꿔본다.
+    """
+    band_ratio = float(np.clip(band_ratio, 0.05, 0.45))
+    mask_u8 = (np.asarray(mask) > 0).astype(np.uint8)
+    box = np.asarray(obb["box_pts"], np.float32)
+    Wl = float(np.linalg.norm(box[1] - box[0]))
+    Hl = float(np.linalg.norm(box[2] - box[1]))
+    W, H = int(round(Wl)), int(round(Hl))
+    if W < 16 or H < 16:
+        return None
+
+    # 1) 케이스를 똑바로 세운다 (canonical: 변0=위, 1=오른쪽, 2=아래, 3=왼쪽)
+    dst = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], np.float32)
+    M = cv2.getPerspectiveTransform(box, dst)
+    warp_mask = cv2.warpPerspective(mask_u8, M, (W, H), flags=cv2.INTER_NEAREST)
+    layers = [cv2.warpPerspective(np.asarray(gray), M, (W, H))]
+    if rgb is not None:
+        col = np.asarray(rgb)
+        if col.ndim == 3 and col.shape[2] == 3:
+            layers = [cv2.warpPerspective(col[:, :, c], M, (W, H)) for c in range(3)]
+
+    # 2) 네 변 안쪽 띠 (모서리는 제외 — 두 변에 걸쳐 점수가 섞인다)
+    tw = max(2, int(W * band_ratio))
+    th = max(2, int(H * band_ratio))
+    if W - 2 * tw < 4 or H - 2 * th < 4:
+        return None
+    slices = [
+        (slice(0, th), slice(tw, W - tw)),  # 0: 위
+        (slice(th, H - th), slice(W - tw, W)),  # 1: 오른쪽
+        (slice(H - th, H), slice(tw, W - tw)),  # 2: 아래
+        (slice(th, H - th), slice(0, tw)),  # 3: 왼쪽
+    ]
+    descs = []
+    for rs, cs in slices:
+        sel = warp_mask[rs, cs] > 0
+        if int(sel.sum()) < 30:  # 마스크가 OBB 모서리를 덜 채운 경우 등
+            return None
+        descs.append(_hist_desc([L[rs, cs][sel] for L in layers]))
+
+    # 3) 투명함 점수 (높을수록 힌지)
+    if metric == "odd":
+        # 나머지 세 변과 얼마나 다른가 — 바닥 색이 케이스와 비슷할 때의 대안
+        scores = [1.0 - float(np.mean([_corr(descs[i], descs[j]) for j in range(4) if j != i])) for i in range(4)]
+    else:
+        # 기본: 케이스 바깥(바닥)과 얼마나 닮았는가 = 얼마나 비쳐 보이는가
+        ring_k = max(3, int(min(W, H) * 0.12))
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ring_k + 1, 2 * ring_k + 1))
+        ring = (cv2.dilate(mask_u8, ker) > 0) & (mask_u8 == 0)
+        if int(ring.sum()) < 50:
+            return None
+        src_layers = [np.asarray(gray)] if rgb is None else [np.asarray(rgb)[:, :, c] for c in range(3)]
+        bg = _hist_desc([L[ring] for L in src_layers])
+        scores = [_corr(d, bg) for d in descs]
+
+    order = int(np.argmax(scores))
+    srt = sorted(scores, reverse=True)
+    spread = srt[0] - srt[3]
+    conf = float((srt[0] - srt[1]) / spread) if spread > 1e-9 else 0.0
+
+    # 4) 힌지의 맞은편 변 = 여는 쪽. canonical 중심 → 그 변 중점 방향을 원본으로 되돌린다
+    opp = (order + 2) % 4
+    mids = [(W / 2.0, 0.0), (W - 1.0, H / 2.0), (W / 2.0, H - 1.0), (0.0, H / 2.0)]
+    Minv = cv2.getPerspectiveTransform(dst, box)
+    pts = np.array([[[W / 2.0, H / 2.0]], [list(mids[opp])]], np.float32)
+    o = cv2.perspectiveTransform(pts, Minv)
+    d = o[1, 0] - o[0, 0]
+    nd = float(np.linalg.norm(d))
+    if nd < 1e-6:
+        return None
+    result = {
+        "dir": (float(d[0] / nd), float(d[1] / nd)),
+        "angle_deg": float(np.degrees(np.arctan2(d[1], d[0]))),
+        "confidence": conf,
+        "half_len": nd,
+        "axis": "hinge",
+        "hinge_side": order,
+        "scores": [float(x) for x in scores],
+    }
+    if debug:
+        debug_show_hinge(layers, warp_mask, slices, scores, order, metric)
+    return result
+
+
+def debug_show_hinge(layers, warp_mask, slices, scores, hinge, metric):
+    """warp 위에 네 띠와 점수를 그려 보여준다 (힌지=빨강, 여는 쪽=초록)."""
+    base = layers[0] if len(layers) == 1 else cv2.merge(layers[:3])
+    vis = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR) if base.ndim == 2 else base.copy()
+    vis[warp_mask == 0] = (vis[warp_mask == 0] * 0.35).astype(vis.dtype)
+    names = ["위", "오른", "아래", "왼"]
+    opp = (hinge + 2) % 4
+    for i, (rs, cs) in enumerate(slices):
+        color = (0, 0, 255) if i == hinge else ((0, 220, 0) if i == opp else (200, 200, 200))
+        cv2.rectangle(vis, (cs.start, rs.start), (cs.stop - 1, rs.stop - 1), color, 2)
+        cv2.putText(vis, f"{names[i]} {scores[i]:.3f}", (cs.start + 3, rs.start + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+    cv2.imshow(f"hinge[{metric}] 빨강=힌지 초록=여는쪽", vis)
+    cv2.waitKey(1)

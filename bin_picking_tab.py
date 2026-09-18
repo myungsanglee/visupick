@@ -693,11 +693,15 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.opening_method_combo = QComboBox()
         # userData = 내부 식별자. 내부 격자 비대칭이 가장 강건해서 맨 위 = 기본값.
         self.opening_method_combo.addItem("내부 격자 비대칭", "grid")
+        self.opening_method_combo.addItem("힌지 투명도 (정사각형)", "hinge")
         self.opening_method_combo.addItem("이음선 에지", "seam")
         self.opening_method_combo.addItem("내부 밝기 비대칭", "brightness")
         self.opening_method_combo.setToolTip(
             "내부 격자 비대칭: 투명 케이스 내부 칸 배열이 한쪽으로 치우친 걸 이용 — OBB로\n"
-            "  똑바로 세워 격자 밴드를 찾고 위/아래 여백 크기로 방향 (가장 강건, 권장).\n"
+            "  똑바로 세워 격자 밴드를 찾고 위/아래 여백 크기로 방향 (가로로 긴 케이스 권장).\n"
+            "힌지 투명도: 네 변 중 '투명한 변'을 힌지로 골라 그 반대쪽을 여는 방향으로.\n"
+            "  다른 방식은 여는 축을 OBB 단축으로 고정(2택)이라 정사각형 케이스에는 못 쓴다.\n"
+            "  이 방식만 네 변을 모두 평가하므로 정사각형(경우의 수 4가지)에 쓴다.\n"
             "이음선 에지: 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지 무게중심으로 판별.\n"
             "내부 밝기 비대칭: 투명 케이스 내부(팬/거울/힌지)의 밝기 무게중심으로 판별.\n"
             "모든 방식 여는 축은 OBB 단축으로 고정, 부호(어느 긴 변이 립인지)만 정함."
@@ -756,6 +760,36 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         )
         self.opening_grid_crop_widget = self._labeled_widget("옆벽 크롭%:", self.opening_grid_crop_spin)
         op_row.addWidget(self.opening_grid_crop_widget)
+
+        # 띠 두께% (힌지 방식 전용) — 변 안쪽에서 '투명함'을 재는 띠의 두께
+        op_row.addSpacing(10)
+        self.opening_hinge_band_spin = QSpinBox()
+        self.opening_hinge_band_spin.setRange(5, 45)
+        self.opening_hinge_band_spin.setValue(25)
+        self.opening_hinge_band_spin.setFixedWidth(60)
+        self.opening_hinge_band_spin.setToolTip(
+            "힌지 방식 전용: 네 변 안쪽에서 '투명함'을 재는 띠의 두께(케이스 크기 대비 %).\n"
+            "얇으면 노이즈에 흔들리고, 두꺼우면 가운데 제품 영역이 섞여 변 사이 차이가\n"
+            "흐려진다. 힌지 부분(투명한 띠)의 실제 폭에 맞춘다. (기본 25)"
+        )
+        self.opening_hinge_band_widget = self._labeled_widget("띠 두께%:", self.opening_hinge_band_spin)
+        op_row.addWidget(self.opening_hinge_band_widget)
+
+        # 판정 기준 (힌지 방식 전용)
+        op_row.addSpacing(10)
+        self.opening_hinge_metric_combo = QComboBox()
+        self.opening_hinge_metric_combo.addItem("배경 유사도", "bg")
+        self.opening_hinge_metric_combo.addItem("이질도", "odd")
+        self.opening_hinge_metric_combo.setFixedWidth(110)
+        self.opening_hinge_metric_combo.setToolTip(
+            "힌지 방식 전용: 어느 변이 '투명한가'를 재는 기준.\n"
+            "배경 유사도(기본): 투명하면 바닥이 비쳐 보이므로 케이스 바깥(바닥) 색 분포와\n"
+            "  가장 닮은 변을 힌지로. 물리적 근거가 뚜렷해 기본값.\n"
+            "이질도: 바닥 색이 케이스 본체와 비슷해 위 방식의 대비가 안 나올 때. '힌지 변만\n"
+            "  나머지 셋과 다르다'는 사실만 쓴다 (인쇄 로고가 있는 변이 대신 튈 수 있음)."
+        )
+        self.opening_hinge_metric_widget = self._labeled_widget("판정:", self.opening_hinge_metric_combo)
+        op_row.addWidget(self.opening_hinge_metric_widget)
 
         op_row.addSpacing(10)
         self.opening_invert_chk = QCheckBox("방향 반전")  # 모든 방식 공통
@@ -936,12 +970,15 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
 
     def _update_opening_settings_visibility(self):
         """여는 방향 방식에 따라 관련 있는 조정값만 표시.
-        침식%=이음선/밝기, 에지 임계%=이음선, 격자 임계%·옆벽 크롭%=격자 (반전은 공통)."""
+        침식%=이음선/밝기, 에지 임계%=이음선, 격자 임계%·옆벽 크롭%=격자,
+        띠 두께%·판정=힌지 (반전은 공통)."""
         method = self.opening_method_combo.currentData()
         self.opening_erode_widget.setVisible(method in ("seam", "brightness"))
         self.opening_thr_widget.setVisible(method == "seam")
         self.opening_grid_thr_widget.setVisible(method == "grid")
         self.opening_grid_crop_widget.setVisible(method == "grid")
+        self.opening_hinge_band_widget.setVisible(method == "hinge")
+        self.opening_hinge_metric_widget.setVisible(method == "hinge")
 
     def _on_capture(self, image, xyz):
         """캡처 후처리: 이전 검출/선택 리셋 + 2D/3D 뷰 갱신 (골격은 VisionTabMixin._capture)."""
@@ -1182,6 +1219,41 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             skip = f", 마스크 없음 {n_no_mask}개 건너뜀" if n_no_mask else ""
             self.main.statusBar().showMessage(f"OBB 검출 완료: {n_ok}개{skip}")
 
+    def _opening_weight_map(self, gray, method):
+        """seam/brightness 용 가중치 맵 (이미지 전체에 한 번만). 나머지 방식은 불필요."""
+        return None if method in ("grid", "hinge") else oa.opening_weight_map(gray, method, self.opening_thr_spin.value())
+
+    def _compute_opening(self, mask, obb, gray, method=None, weight=None, debug: bool = False):
+        """현재 UI 설정으로 객체 1개의 여는 방향을 계산 — **방식별 분기는 여기 한 곳**.
+
+        일괄 계산(_detect_opening)과 자동 선택 폴백(_direction_for)이 같은 경로를 쓰게 해
+        둘이 어긋나지 않도록 한다 (예전에는 폴백이 방식과 무관하게 opening_from_weight 를
+        불러, 격자/힌지 방식을 골라 둬도 이음선 계산이 나가는 버그가 있었다).
+        """
+        method = method or self.opening_method_combo.currentData()
+        if method == "hinge":
+            return oa.opening_from_hinge(
+                mask,
+                gray,
+                obb,
+                rgb=self.current_rgb,
+                band_ratio=self.opening_hinge_band_spin.value() / 100.0,
+                metric=self.opening_hinge_metric_combo.currentData(),
+                debug=debug,
+            )
+        if method == "grid":
+            return oa.opening_from_grid(
+                mask,
+                gray,
+                obb,
+                debug=debug,
+                band_thr=self.opening_grid_thr_spin.value() / 100.0,
+                side_crop=self.opening_grid_crop_spin.value() / 100.0,
+            )
+        if weight is None:
+            weight = self._opening_weight_map(gray, method)
+        return oa.opening_from_weight(mask, weight, obb, self.opening_erode_spin.value() / 100.0, debug=debug)
+
     def _detect_opening(self):
         """검출된 각 객체의 여는 방향(힌지 반대편)을 선택한 방식으로 추정.
 
@@ -1198,13 +1270,11 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             return
 
         method = self.opening_method_combo.currentData()
-        erode_ratio = self.opening_erode_spin.value() / 100.0
-        thr_pct = self.opening_thr_spin.value()
         invert = self.opening_invert_chk.isChecked()
 
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else np.asarray(img)
-        # 격자 방식은 객체별 warp 라 전역 weight 맵을 안 쓴다.
-        weight = None if method == "grid" else oa.opening_weight_map(gray, method, thr_pct)
+        # 격자/힌지 방식은 객체별 warp 라 전역 weight 맵을 안 쓴다.
+        weight = self._opening_weight_map(gray, method)
 
         cmap = self._object_color_map()
         obb_overlays = []
@@ -1222,21 +1292,11 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             if obb is None:
                 continue
             det["obb"] = obb
-            if method == "grid":
-                res = oa.opening_from_grid(
-                    mask,
-                    gray,
-                    obb,
-                    debug=OPENING_DEBUG,
-                    band_thr=self.opening_grid_thr_spin.value() / 100.0,
-                    side_crop=self.opening_grid_crop_spin.value() / 100.0,
-                )
-            else:
-                res = oa.opening_from_weight(mask, weight, obb, erode_ratio, debug=OPENING_DEBUG)
+            res = self._compute_opening(mask, obb, gray, method=method, weight=weight, debug=OPENING_DEBUG)
             if res is None:
                 det.pop("opening", None)
                 continue
-            if OPENING_DEBUG and method != "grid":  # 격자는 함수 내부에서 자체 디버그 창을 띄움
+            if OPENING_DEBUG and method in ("seam", "brightness"):  # 격자/힌지는 함수 내부에서 자체 디버그 창
                 oa.debug_show_opening(self.current_rgb, det, obb, weight, res, i)
             if invert:
                 dx, dy = res["dir"]
@@ -1264,6 +1324,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             QMessageBox.warning(self, "여는 방향", msg + "\n\n마스크가 있는 검출(객체 검출 seg / SAM3)이 필요합니다.")
         else:
             warn = f", 신뢰도 낮음 {low_conf}개(비대칭 불충분)" if low_conf else ""
+            if method == "hinge":  # 4지선다라 "얼마나 확실히 하나가 튀었나"가 중요
+                confs = [d["opening"]["confidence"] for d in self.detections if d.get("opening")]
+                if confs:
+                    warn += f", 힌지 판별 격차 {min(confs):.2f}~{max(confs):.2f}"
             self.main.statusBar().showMessage(f"여는 방향 추정 완료({method_name}): {n_ok}개{warn}")
 
     def _apply_detections(self, detections: List[Dict], source: str = "검출", infer_ms: Optional[float] = None):
@@ -2041,8 +2105,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             if mask is None or self.current_rgb is None:
                 return None
             gray = cv2.cvtColor(self.current_rgb, cv2.COLOR_RGB2GRAY) if self.current_rgb.ndim == 3 else self.current_rgb
-            weight = oa.opening_weight_map(gray, self.opening_method_combo.currentData(), self.opening_thr_spin.value())
-            op = oa.opening_from_weight(mask, weight, obb, self.opening_erode_spin.value() / 100.0)
+            op = self._compute_opening(mask, obb, gray)  # 선택된 방식 그대로 (일괄 계산과 동일 경로)
             if op is None:
                 return None
             if self.opening_invert_chk.isChecked():
