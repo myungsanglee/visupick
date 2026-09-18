@@ -1321,7 +1321,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             dx, dy = res["dir"]
             end = (cx + dx * res["half_len"], cy + dy * res["half_len"])
             arrows.append(((cx, cy), end, color, i, res["confidence"]))
-            if res["confidence"] < 0.02:
+            # 저신뢰 임계는 방식마다 스케일이 다르다. 무게중심/격자 방식은 "단축 오프셋 비"
+            # 라 0.02 면 충분히 낮지만, 힌지 방식은 "1·2등 점수의 절대 격차" 라 0.15 미만이
+            # 네 변 고만고만한 상태(= 사실상 찍기)에 해당한다.
+            if res["confidence"] < (0.15 if method == "hinge" else 0.02):
                 low_conf += 1
             n_ok += 1
 

@@ -408,9 +408,10 @@ def opening_from_hinge(
 
     반환: {"dir", "angle_deg", "confidence", "half_len", "axis": "hinge",
            "hinge_side"(0~3), "scores"[4]} — 실패 시 None.
-    confidence 는 1등과 2등 점수의 **격차를 전체 산포로 정규화한 값**(0~1)이다.
-    4지선다에서 "얼마나 확실히 하나가 튀는가"가 곧 신뢰도이기 때문. 0.15 미만이면
-    네 변이 고만고만하다는 뜻 → 띠 두께나 metric 을 바꿔본다.
+    confidence 는 1등과 2등 점수의 **절대 격차**(0~1)다. 4지선다에서는 "얼마나 확실히
+    하나만 튀는가"가 곧 신뢰도이기 때문. **0.15 미만이면 네 변이 고만고만하다는 뜻**이고,
+    가장 흔한 원인은 마스크가 투명한 힌지부를 포함하지 못해 네 띠가 모두 케이스 본체인
+    경우다 (그러면 무엇을 골라도 사실상 찍는 것 — 디버그 뷰에서 막대 길이로 확인).
     """
     band_ratio = float(np.clip(band_ratio, 0.05, 0.45))
     mask_u8 = (np.asarray(mask) > 0).astype(np.uint8)
@@ -466,8 +467,13 @@ def opening_from_hinge(
 
     order = int(np.argmax(scores))
     srt = sorted(scores, reverse=True)
-    spread = srt[0] - srt[3]
-    conf = float((srt[0] - srt[1]) / spread) if spread > 1e-9 else 0.0
+    # 신뢰도 = 1등과 2등의 **절대** 격차. 점수가 상관값(대략 −1~1)이라 절대값이 그대로
+    # 의미를 가진다.
+    #   ※ 예전에는 전체 산포로 나눈 상대 격차를 썼는데, 네 변이 거의 동점일 때도
+    #     (예: 0.115 / 0.092 / 0.092 / 0.091 — 힌지가 마스크 밖이라 신호가 없는 경우)
+    #     비율만 크면 conf 0.96 처럼 높게 나와 "동점인데 확신하는" 위험이 있었다.
+    #     절대 격차로 바꾸면 같은 상황이 0.02 로 떨어져 낮은 신뢰도가 제대로 드러난다.
+    conf = float(np.clip(srt[0] - srt[1], 0.0, 1.0))
 
     # 4) 힌지의 맞은편 변 = 여는 쪽. canonical 중심 → 그 변 중점 방향을 원본으로 되돌린다
     opp = (order + 2) % 4

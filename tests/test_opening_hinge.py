@@ -123,3 +123,42 @@ class TestGuards:
         """0.5 이상을 넣어도 터지지 않고 클램프돼야 한다 (띠가 겹치면 판별 불가)."""
         res = run(*scene(hinge_side="top"), band_ratio=0.9)
         assert res is not None
+
+
+class TestConfidenceIsHonest:
+    """신뢰도는 1·2등의 **절대** 격차여야 한다.
+
+    예전에는 전체 산포로 나눈 상대 격차라, 네 변이 거의 동점이어도(마스크가 투명한
+    힌지부를 못 덮어 신호가 없는 경우) 비율만 크면 conf 가 0.9 를 넘었다 — "동점인데
+    확신하는" 위험. 회귀 방지용.
+    """
+
+    def _no_hinge_scene(self, seed):
+        """마스크가 케이스 본체만 덮어 네 띠가 전부 같은 색 — 판별 근거가 없는 상황."""
+        rng = np.random.default_rng(seed)
+        rgb = np.full((H, W, 3), 0, np.uint8)
+        rgb[:] = FLOOR
+        m = np.zeros((H, W), np.uint8)
+        y0, y1, x0, x1 = 130, 290, 130, 290
+        rgb[y0:y1, x0:x1] = PRODUCT
+        j = rng.integers(-2, 3, size=4)
+        m[y0 + j[0] : y1 + j[1], x0 + j[2] : x1 + j[3]] = 1
+        rgb = np.clip(rgb + rng.normal(0, 4, rgb.shape), 0, 255).astype(np.uint8)
+        return rgb, m.astype(bool)
+
+    @pytest.mark.parametrize("metric", ["bg", "odd"])
+    def test_tied_sides_report_low_confidence(self, metric):
+        for seed in range(6):
+            res = run(*self._no_hinge_scene(seed), metric=metric)
+            if res is None:
+                continue
+            assert res["confidence"] < 0.15, f"근거 없는데 conf={res['confidence']:.2f} (seed={seed})"
+
+    def test_clear_hinge_reports_high_confidence(self):
+        res = run(*scene(hinge_side="top"))
+        assert res["confidence"] > 0.3
+
+    def test_confidence_equals_top_two_gap(self):
+        res = run(*scene(hinge_side="left"))
+        srt = sorted(res["scores"], reverse=True)
+        assert res["confidence"] == pytest.approx(min(1.0, srt[0] - srt[1]), abs=1e-6)
