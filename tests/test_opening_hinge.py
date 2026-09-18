@@ -93,13 +93,7 @@ class TestHingeSideDetection:
         assert dx < -0.9  # 오른쪽이 힌지 → 왼쪽(-x)이 여는 방향
 
 
-class TestMetrics:
-    def test_odd_metric(self):
-        """이질도 방식도 같은 변을 힌지로 골라야 한다."""
-        res = run(*scene(hinge_side="bottom"), metric="odd")
-        assert res is not None
-        assert res["dir"][1] < -0.9  # 아래가 힌지 → 위(-y)
-
+class TestRobustness:
     def test_uniform_case_low_confidence(self):
         """네 변이 똑같으면(투명부 없음) 신뢰도가 낮아야 한다 — 틀린 방향을 확신하지 않게."""
         rgb, mask = scene(hinge_side="top", band=0.0)  # 띠 두께 0 = 균일
@@ -146,10 +140,9 @@ class TestConfidenceIsHonest:
         rgb = np.clip(rgb + rng.normal(0, 4, rgb.shape), 0, 255).astype(np.uint8)
         return rgb, m.astype(bool)
 
-    @pytest.mark.parametrize("metric", ["bg", "odd"])
-    def test_tied_sides_report_low_confidence(self, metric):
+    def test_tied_sides_report_low_confidence(self):
         for seed in range(6):
-            res = run(*self._no_hinge_scene(seed), metric=metric)
+            res = run(*self._no_hinge_scene(seed))
             if res is None:
                 continue
             assert res["confidence"] < 0.15, f"근거 없는데 conf={res['confidence']:.2f} (seed={seed})"

@@ -778,26 +778,6 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.opening_hinge_band_widget = self._labeled_widget("띠 두께%:", self.opening_hinge_band_spin)
         op_row.addWidget(self.opening_hinge_band_widget)
 
-        # 판정 기준 (힌지 방식 전용)
-        op_row.addSpacing(10)
-        self.opening_hinge_metric_combo = QComboBox()
-        self.opening_hinge_metric_combo.addItem("본체 색 대비", "chroma")
-        self.opening_hinge_metric_combo.addItem("배경 유사도", "bg")
-        self.opening_hinge_metric_combo.addItem("이질도", "odd")
-        self.opening_hinge_metric_combo.setFixedWidth(120)
-        self.opening_hinge_metric_combo.setToolTip(
-            "힌지 방식 전용: 어느 변이 '투명한가'를 재는 기준.\n"
-            "본체 색 대비(기본, 권장): 띠의 색이 케이스 본체 색에서 얼마나 벗어났는지를\n"
-            "  Lab 색상면 거리로 잰다. 힌지 쪽은 투명하거나 금속이라 중성(회색)에 가깝고\n"
-            "  나머지는 본체 색 그대로다. 배경을 안 쓰므로 그림자에 덜 속고, '거리'라서\n"
-            "  조금 다름/많이 다름이 구분된다 — 실측 캡처에서 유일하게 안정적이었다.\n"
-            "배경 유사도: 케이스 바깥(바닥) 색 분포와 가장 닮은 변을 힌지로.\n"
-            "이질도: '힌지 변만 나머지 셋과 다르다'는 사실만 쓴다.\n"
-            "  (뒤의 두 방식은 히스토그램 상관이라 색차가 크지 않으면 네 변이 동점이 되기 쉽다)"
-        )
-        self.opening_hinge_metric_widget = self._labeled_widget("판정:", self.opening_hinge_metric_combo)
-        op_row.addWidget(self.opening_hinge_metric_widget)
-
         op_row.addSpacing(10)
         self.opening_invert_chk = QCheckBox("방향 반전")  # 모든 방식 공통
         self.opening_invert_chk.setToolTip("추정된 여는 방향 벡터를 180° 뒤집는다 (부호 규칙이 제품과 반대일 때).")
@@ -978,14 +958,13 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
     def _update_opening_settings_visibility(self):
         """여는 방향 방식에 따라 관련 있는 조정값만 표시.
         침식%=이음선/밝기, 에지 임계%=이음선, 격자 임계%·옆벽 크롭%=격자,
-        띠 두께%·판정=힌지 (반전은 공통)."""
+        띠 두께%=힌지 (반전은 공통)."""
         method = self.opening_method_combo.currentData()
         self.opening_erode_widget.setVisible(method in ("seam", "brightness"))
         self.opening_thr_widget.setVisible(method == "seam")
         self.opening_grid_thr_widget.setVisible(method == "grid")
         self.opening_grid_crop_widget.setVisible(method == "grid")
         self.opening_hinge_band_widget.setVisible(method == "hinge")
-        self.opening_hinge_metric_widget.setVisible(method == "hinge")
 
     def _on_capture(self, image, xyz):
         """캡처 후처리: 이전 검출/선택 리셋 + 2D/3D 뷰 갱신 (골격은 VisionTabMixin._capture)."""
@@ -1252,7 +1231,6 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
                 obb,
                 rgb=self.current_rgb,
                 band_ratio=self.opening_hinge_band_spin.value() / 100.0,
-                metric=self.opening_hinge_metric_combo.currentData(),
                 debug=debug,
             )
         if method == "grid":

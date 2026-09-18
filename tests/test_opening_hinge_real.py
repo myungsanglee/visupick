@@ -44,7 +44,7 @@ class TestRealCapture:
 
         예전 방식(bg/odd)은 같은 사진에서 설정에 따라 위/오른/왼으로 튀었다.
         """
-        res = opening_dir(real_case, band_ratio=band, metric="chroma")
+        res = opening_dir(real_case, band_ratio=band)
         dx, dy = res["dir"]
         assert dy > 0.9, f"band={band}: dir={res['dir']} (아래를 가리켜야 함)"
 
@@ -61,18 +61,13 @@ class TestRealCapture:
         assert srt[0] > srt[1] * 1.5, f"1등이 2등과 비슷함: {[round(x, 2) for x in res['scores']]}"
 
 
-class TestOldMetricsWereUnstable:
-    """예전 기본값(bg)이 이 사진에서 왜 못 쓰는지 기록 — 기본값을 되돌리지 않기 위한 근거."""
+class TestScoreSeparation:
+    """점수가 확실히 갈려야 한다 — 예전 지표(히스토그램 상관)는 이 사진에서 네 변이
+    0.15~0.18 안에 몰려 동점이었고, 그래서 정지 장면인데도 답이 매번 바뀌었다.
+    (그 지표들은 제거됨 — opening_analysis 모듈 상단 '제거된 대안' 주석 참고.)"""
 
-    def test_histogram_metrics_have_tied_scores(self, real_case):
-        """bg/odd 는 네 변 점수가 거의 동점이라 노이즈가 답을 정한다."""
-        for metric in ("bg", "odd"):
-            res = opening_dir(real_case, band_ratio=0.15, metric=metric)
-            spread = max(res["scores"]) - min(res["scores"])
-            assert spread < 0.12, f"{metric}: 예상과 달리 점수가 벌어짐 {res['scores']}"
-
-    def test_chroma_scores_are_well_separated(self, real_case):
-        """반면 chroma 는 같은 사진에서 배수로 갈린다 (띠를 힌지 폭에 맞췄을 때 2.3배)."""
-        res = opening_dir(real_case, band_ratio=0.10, metric="chroma")
+    def test_scores_are_well_separated(self, real_case):
+        """띠를 힌지 폭에 맞추면 1등이 2등의 2배 이상으로 갈린다."""
+        res = opening_dir(real_case, band_ratio=0.10)
         srt = sorted(res["scores"], reverse=True)
         assert srt[0] > 2.0 * srt[1], f"{[round(x, 2) for x in res['scores']]}"

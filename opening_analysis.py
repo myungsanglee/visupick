@@ -352,23 +352,28 @@ def debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf):
 # 그래서 이 방식은 **네 변을 모두 평가**해 힌지를 고르고, 그 반대쪽을 여는 방향으로
 # 삼는다. 판별 단서는 "힌지가 있는 변만 투명하다"는 제품 특징이다.
 #
-# "투명하다"를 이미지에서 어떻게 재나:
-#   - (chroma, 기본) **본체 색 대비** — 띠의 색이 **케이스 본체 색에서 얼마나 벗어났나**를
-#     Lab 색상면(a*b*) 거리로 잰다. 힌지 쪽은 투명하거나(바닥이 비침) 금속이라 **중성(회색)**
-#     에 가깝고, 나머지 세 변은 본체 색(예: 분홍) 그대로다. **배경을 안 쓰므로 그림자에
-#     속지 않고**, 거리라서 "조금 다름"과 "많이 다름"이 구분된다.
-#   - (bg) **배경 유사도** — 맑은 플라스틱 너머로는 케이스가 놓인 **바닥이
-#     비쳐 보인다**. 그래서 힌지 쪽 띠의 색 분포가 케이스 바깥(바닥) 분포와 닮는다.
-#     불투명한 나머지 세 변(제품·인쇄·프레임)은 바닥과 다르다.
-#   - (odd) **이질도** — "힌지 변만 나머지 세 변과 다르다"는 사실만 쓴다.
-#     인쇄 로고가 있는 변이 대신 튈 수 있다.
-# 세 단서 모두 **점수가 높을수록 힌지**가 되도록 부호를 맞췄다.
+# "투명하다"를 이미지에서 어떻게 재나 — **본체 색 대비**:
+#   띠의 색이 **케이스 본체 색에서 얼마나 벗어났나**를 Lab 색상면(a*b*) **거리**로 잰다.
+#   힌지 쪽은 투명하거나(바닥이 비침) 금속이라 **중성(회색)** 에 가깝고, 나머지 세 변은
+#   본체 색(예: 분홍) 그대로다. 점수가 높을수록 힌지.
 #
-# ⚠️ bg / odd 는 히스토그램의 **피어슨 상관**으로 닮은 정도를 재는데, 이 지표는 두 분포가
-#    겹치지 않으면 "얼마나 먼지"와 무관하게 비슷한 값으로 포화된다. 실측(분홍 케이스,
-#    배경 RGB 130/129/128 · 힌지 103/94/96 · 본체 94/68/66)에서 네 변 점수가 0.15~0.18
-#    안에 몰려 사실상 동점이 됐고, 설정을 조금만 바꿔도 답이 뒤집혔다. 같은 사진에서
-#    chroma 는 [7.85, 1.66, 1.56, 2.41] 로 확실히 갈렸다 — 그래서 chroma 가 기본값이다.
+#   밝기(L)를 버리는 이유: 투명부는 배경 색을 보이되 플라스틱이 빛을 먹어 **어두워지므로**,
+#   밝기까지 비교하면 본체와 구별이 안 된다. 게다가 케이스 자체의 요철 그늘·하이라이트가
+#   밝기를 지배해 방향을 잃는다 — 실측에서 L 을 포함하자 왼쪽 음영에 속아 오답이 났다.
+#   배경을 안 쓰는 것도 의도적이다: 그림자는 배경과 색이 같아 "투명"으로 오인되기 쉽다.
+#
+# 제거된 대안 (실측 근거):
+#   - "배경 유사도"(bg): 띠가 케이스 바깥(바닥) 색 분포와 닮은 정도
+#   - "이질도"(odd)   : 띠가 나머지 세 띠와 다른 정도
+#   둘 다 히스토그램의 **피어슨 상관**으로 쟀는데, 이 지표는 두 분포가 겹치지 않으면
+#   "얼마나 먼지"와 무관하게 비슷한 값으로 **포화**된다. 실측(분홍 케이스, 배경 RGB
+#   130/129/128 · 힌지 103/94/96 · 본체 94/68/66)에서 네 변 점수가 0.15~0.18 안에 몰려
+#   사실상 동점이 됐고, 정지 장면인데도 실행마다 답이 바뀌었다. 8회 반복 비교에서 bg 는
+#   실제 제품(0/8)과 검은 케이스(3/8)에서 실패했고, odd 는 합성에선 통했지만 실물에선
+#   설정 따라 답이 튀었다 — 실제 장면은 프레임 요철·인쇄 때문에 "튀는 변"이 여럿이라
+#   "제일 튀는 변 = 힌지" 가정이 깨진다. 본체 색 대비는 세 상황 모두 정답이었고, 색이
+#   없는 케이스(흰·검정)에서는 **낮은 신뢰도로 정직하게 보고**한다 — 틀린 답을 확신하는
+#   것보다 낫다. 무채색 케이스가 실제로 등장하면 그 캡처로 전용 단서를 설계한다.
 
 
 # chroma 방식의 신뢰도 환산: 1·2등 점수 차(Lab a*b* 단위)를 이 값으로 나눠 0~1 로 만든다.
@@ -377,32 +382,12 @@ def debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf):
 HINGE_CONF_LAB_SCALE = 4.0
 
 
-def _hist_desc(channels: List[np.ndarray], bins: int = 24) -> np.ndarray:
-    """채널별 정규화 히스토그램을 이어붙인 기술자. 평균색 대신 분포를 쓰는 이유는
-    평균이 우연히 같아지는 경우(밝은 점 + 어두운 점 ↔ 중간 회색)를 구분하기 위해."""
-    parts = []
-    for c in channels:
-        h, _ = np.histogram(c, bins=bins, range=(0, 256))
-        total = float(h.sum())
-        parts.append(h / total if total > 0 else h.astype(np.float64))
-    return np.concatenate(parts).astype(np.float64)
-
-
-def _corr(a: np.ndarray, b: np.ndarray) -> float:
-    """두 기술자의 피어슨 상관 (1=동일 분포, 0=무관). 비교용이라 부호만 일관되면 된다."""
-    a = a - a.mean()
-    b = b - b.mean()
-    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
-    return float(a.dot(b) / denom) if denom > 1e-12 else 0.0
-
-
 def opening_from_hinge(
     mask,
     gray,
     obb,
     rgb=None,
     band_ratio: float = 0.25,
-    metric: str = "chroma",
     debug: bool = False,
 ) -> Optional[Dict]:
     """힌지(투명한 변)를 네 변 중에서 골라, 그 **반대쪽**을 여는 방향으로 반환한다.
@@ -411,7 +396,7 @@ def opening_from_hinge(
       1) OBB 로 케이스를 똑바로 세운다(warp). 마스크도 같이 warp 해 실제 객체 픽셀만 쓴다.
       2) 네 변 안쪽의 **띠(band)** 를 뜬다. 모서리는 두 띠에 겹치므로 잘라낸다
          (겹치면 인접 변끼리 점수가 섞여 판별력이 떨어진다).
-      3) 띠마다 "투명함 점수"를 매긴다 (metric 참고). 점수 최대 = 힌지.
+      3) 띠마다 "투명함 점수"를 매긴다 (본체 색 대비 — 위 설명 참고). 점수 최대 = 힌지.
       4) 힌지의 **맞은편 변** 바깥 방향이 여는 방향. 원본 좌표계로 역투영해 반환.
 
     인자:
@@ -419,8 +404,6 @@ def opening_from_hinge(
                    — 투명부는 바닥 '색'까지 닮기 때문. 없으면 gray 만 사용.
       band_ratio : 변 안쪽 띠 두께 비율(0.05~0.45). 얇으면 노이즈, 두꺼우면 가운데
                    제품 영역이 섞여 변 사이 차이가 흐려진다.
-      metric     : "chroma"(본체 색 대비, 기본 — 위 설명 참고) | "bg"(배경 유사도)
-                   | "odd"(나머지 세 변과의 이질도).
 
     반환: {"dir", "angle_deg", "confidence", "half_len", "axis": "hinge",
            "hinge_side"(0~3), "scores"[4]} — 실패 시 None.
@@ -442,6 +425,7 @@ def opening_from_hinge(
     dst = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], np.float32)
     M = cv2.getPerspectiveTransform(box, dst)
     warp_mask = cv2.warpPerspective(mask_u8, M, (W, H), flags=cv2.INTER_NEAREST)
+    # 디버그 화면에 띄울 warp 이미지 (점수 계산에는 아래 feat 를 쓴다)
     layers = [cv2.warpPerspective(np.asarray(gray), M, (W, H))]
     if rgb is not None:
         col = np.asarray(rgb)
@@ -461,69 +445,53 @@ def opening_from_hinge(
     ]
     inner = (slice(th, H - th), slice(tw, W - tw))  # 띠를 뺀 안쪽 = 케이스 '본체' 표본
 
-    # 3) 투명함 점수 (높을수록 힌지)
-    if metric == "chroma":
-        # 색상면(Lab a*b*)에서 **본체 색으로부터의 거리**. 배경을 안 쓰므로 그림자에
-        # 속지 않고, '거리' 라서 조금 다름/많이 다름이 구분된다 (상관은 포화된다).
-        if rgb is not None:
-            lab = cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
-            feat = np.stack([cv2.warpPerspective(lab[:, :, c], M, (W, H)) for c in (1, 2)], axis=2)
-        else:
-            # 컬러가 없으면 밝기 편차로 대체 — 은색 힌지처럼 밝기가 다른 경우만 잡힌다
-            feat = cv2.warpPerspective(np.asarray(gray, dtype=np.uint8), M, (W, H)).astype(np.float32)[:, :, None]
-        # 마스크 경계(배경과 섞인 픽셀·그림자 테두리)를 걷어낸다 — 안 걷으면 마스크가
-        # 조금만 커져도 그쪽 띠가 배경색을 머금어 '투명'으로 오인된다.
-        k = max(2, int(round(min(W, H) * 0.04)))
-        eroded = cv2.erode(warp_mask, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
-        if int(eroded.sum()) < 200:
-            eroded = warp_mask  # 너무 작아지면 원본 유지 (작은 객체 안전장치)
-
-        def _pix(sl):
-            sel = eroded[sl] > 0
-            return feat[sl][sel]
-
-        core = _pix(inner)
-        if len(core) < 50:
-            return None
-        body = np.median(core, axis=0)
-        scores = []
-        for sl in slices:
-            p = _pix(sl)
-            if len(p) < 30:
-                return None
-            scores.append(float(np.linalg.norm(p - body, axis=1).mean()))
+    # 3) 투명함 점수 = 색상면(Lab a*b*)에서 **본체 색으로부터의 거리** (높을수록 힌지)
+    if rgb is not None:
+        lab = cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+        feat = np.stack([cv2.warpPerspective(lab[:, :, c], M, (W, H)) for c in (1, 2)], axis=2)
     else:
-        descs = []
-        for rs, cs in slices:
-            sel = warp_mask[rs, cs] > 0
-            if int(sel.sum()) < 30:  # 마스크가 OBB 모서리를 덜 채운 경우 등
-                return None
-            descs.append(_hist_desc([L[rs, cs][sel] for L in layers]))
+        # 컬러가 없으면 밝기 편차로 대체 — 은색 힌지처럼 밝기가 다른 경우만 잡힌다.
+        # 판별력이 크게 떨어지므로 호출부는 되도록 rgb 를 넘긴다.
+        feat = cv2.warpPerspective(np.asarray(gray, dtype=np.uint8), M, (W, H)).astype(np.float32)[:, :, None]
 
-    if metric == "odd":
-        # 나머지 세 변과 얼마나 다른가 — 바닥 색이 케이스와 비슷할 때의 대안
-        scores = [1.0 - float(np.mean([_corr(descs[i], descs[j]) for j in range(4) if j != i])) for i in range(4)]
-    elif metric == "bg":
-        # 기본: 케이스 바깥(바닥)과 얼마나 닮았는가 = 얼마나 비쳐 보이는가
-        ring_k = max(3, int(min(W, H) * 0.12))
-        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ring_k + 1, 2 * ring_k + 1))
-        ring = (cv2.dilate(mask_u8, ker) > 0) & (mask_u8 == 0)
-        if int(ring.sum()) < 50:
+    # 마스크 경계(배경과 섞인 픽셀·그림자 테두리)를 걷어낸다 — 안 걷으면 마스크가
+    # 조금만 커져도 그쪽 띠가 배경색을 머금어 '투명'으로 오인된다. 다만 힌지 띠 자체가
+    # 가장자리에 붙어 있어 많이 깎으면 신호까지 사라지므로 4% 로 제한한다.
+    k = max(2, int(round(min(W, H) * 0.04)))
+    # borderValue=0 이 **필수**: cv2.erode 의 기본 경계값은 최댓값이라 이미지 가장자리가
+    # 깎이지 않는다. warp 마스크는 OBB 를 꽉 채우므로 기본값으로는 침식이 통째로 무효가
+    # 되어(픽셀 수가 그대로), 마스크가 한쪽으로 삐져나와도 걸러내지 못했다.
+    eroded = cv2.erode(
+        warp_mask,
+        np.ones((2 * k + 1, 2 * k + 1), np.uint8),
+        borderType=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    if int(eroded.sum()) < 200:
+        eroded = warp_mask  # 너무 작아지면 원본 유지 (작은 객체 안전장치)
+
+    def _pix(sl):
+        return feat[sl][eroded[sl] > 0]
+
+    core = _pix(inner)
+    if len(core) < 50:
+        return None
+    body = np.median(core, axis=0)  # 본체 색 = 안쪽 중앙값 (인쇄·요철에 덜 흔들리게 median)
+    scores = []
+    for sl in slices:
+        p = _pix(sl)
+        if len(p) < 30:  # 마스크가 OBB 모서리를 덜 채운 경우 등
             return None
-        src_layers = [np.asarray(gray)] if rgb is None else [np.asarray(rgb)[:, :, c] for c in range(3)]
-        bg = _hist_desc([L[ring] for L in src_layers])
-        scores = [_corr(d, bg) for d in descs]
+        scores.append(float(np.linalg.norm(p - body, axis=1).mean()))
 
     order = int(np.argmax(scores))
     srt = sorted(scores, reverse=True)
-    # 신뢰도 = 1등과 2등의 **절대** 격차. 점수가 상관값(대략 −1~1)이라 절대값이 그대로
-    # 의미를 가진다.
+    # 신뢰도 = 1등과 2등의 **절대** 격차를 Lab 색차 단위로 환산한 값.
     #   ※ 예전에는 전체 산포로 나눈 상대 격차를 썼는데, 네 변이 거의 동점일 때도
-    #     (예: 0.115 / 0.092 / 0.092 / 0.091 — 힌지가 마스크 밖이라 신호가 없는 경우)
-    #     비율만 크면 conf 0.96 처럼 높게 나와 "동점인데 확신하는" 위험이 있었다.
-    #     절대 격차로 바꾸면 같은 상황이 0.02 로 떨어져 낮은 신뢰도가 제대로 드러난다.
-    gap = srt[0] - srt[1]
-    conf = float(np.clip(gap / HINGE_CONF_LAB_SCALE if metric == "chroma" else gap, 0.0, 1.0))
+    #     (예: 힌지가 마스크 밖이라 신호가 없는 경우) 비율만 크면 conf 0.96 처럼 높게
+    #     나와 "동점인데 확신하는" 위험이 있었다. 절대 격차는 그 상황을 제대로 0 에
+    #     가깝게 떨어뜨린다.
+    conf = float(np.clip((srt[0] - srt[1]) / HINGE_CONF_LAB_SCALE, 0.0, 1.0))
 
     # 4) 힌지의 맞은편 변 = 여는 쪽. canonical 중심 → 그 변 중점 방향을 원본으로 되돌린다
     opp = (order + 2) % 4
@@ -545,11 +513,11 @@ def opening_from_hinge(
         "scores": [float(x) for x in scores],
     }
     if debug:
-        debug_show_hinge(layers, warp_mask, slices, scores, order, metric, conf)
+        debug_show_hinge(layers, warp_mask, slices, scores, order, conf)
     return result
 
 
-def debug_show_hinge(layers, warp_mask, slices, scores, hinge, metric, conf):
+def debug_show_hinge(layers, warp_mask, slices, scores, hinge, conf):
     """[개발용] 힌지 방식 중간 단계를 cv2.imshow 로 표시 — 어느 변이 왜 뽑혔는지 눈으로 확인.
 
     왼쪽: OBB 로 똑바로 세운 케이스(warp) 위에 네 띠를 그린 것.
@@ -590,7 +558,7 @@ def debug_show_hinge(layers, warp_mask, slices, scores, hinge, metric, conf):
             cv2.rectangle(bars, (44, y), (44 + int((sc - lo) / span * 150), y + 18), color, -1)
             cv2.putText(bars, names[i], (8, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             cv2.putText(bars, f"{sc:+.3f}", (200, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
-        cv2.putText(bars, f"metric={metric}", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(bars, "score = dist. from body color", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         cv2.putText(bars, f"conf={conf:.2f}", (8, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         cv2.putText(bars, f"hinge={names[hinge]} -> open={names[opp]}", (8, bh - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 220), 1)
 
