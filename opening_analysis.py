@@ -353,13 +353,28 @@ def debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf):
 # 삼는다. 판별 단서는 "힌지가 있는 변만 투명하다"는 제품 특징이다.
 #
 # "투명하다"를 이미지에서 어떻게 재나:
-#   - (bg, 기본) **배경 유사도** — 맑은 플라스틱 너머로는 케이스가 놓인 **바닥이
+#   - (chroma, 기본) **본체 색 대비** — 띠의 색이 **케이스 본체 색에서 얼마나 벗어났나**를
+#     Lab 색상면(a*b*) 거리로 잰다. 힌지 쪽은 투명하거나(바닥이 비침) 금속이라 **중성(회색)**
+#     에 가깝고, 나머지 세 변은 본체 색(예: 분홍) 그대로다. **배경을 안 쓰므로 그림자에
+#     속지 않고**, 거리라서 "조금 다름"과 "많이 다름"이 구분된다.
+#   - (bg) **배경 유사도** — 맑은 플라스틱 너머로는 케이스가 놓인 **바닥이
 #     비쳐 보인다**. 그래서 힌지 쪽 띠의 색 분포가 케이스 바깥(바닥) 분포와 닮는다.
 #     불투명한 나머지 세 변(제품·인쇄·프레임)은 바닥과 다르다.
-#   - (odd) **이질도** — 바닥 색이 케이스 본체와 비슷해 bg 대비가 안 나올 때 쓴다.
-#     "힌지 변만 나머지 세 변과 다르다"는 사실만 쓰므로 투명이 어떻게 보이는지
-#     몰라도 되지만, 인쇄 로고가 있는 변이 대신 튈 수 있다.
-# 두 단서 모두 **점수가 높을수록 힌지**가 되도록 부호를 맞췄다.
+#   - (odd) **이질도** — "힌지 변만 나머지 세 변과 다르다"는 사실만 쓴다.
+#     인쇄 로고가 있는 변이 대신 튈 수 있다.
+# 세 단서 모두 **점수가 높을수록 힌지**가 되도록 부호를 맞췄다.
+#
+# ⚠️ bg / odd 는 히스토그램의 **피어슨 상관**으로 닮은 정도를 재는데, 이 지표는 두 분포가
+#    겹치지 않으면 "얼마나 먼지"와 무관하게 비슷한 값으로 포화된다. 실측(분홍 케이스,
+#    배경 RGB 130/129/128 · 힌지 103/94/96 · 본체 94/68/66)에서 네 변 점수가 0.15~0.18
+#    안에 몰려 사실상 동점이 됐고, 설정을 조금만 바꿔도 답이 뒤집혔다. 같은 사진에서
+#    chroma 는 [7.85, 1.66, 1.56, 2.41] 로 확실히 갈렸다 — 그래서 chroma 가 기본값이다.
+
+
+# chroma 방식의 신뢰도 환산: 1·2등 점수 차(Lab a*b* 단위)를 이 값으로 나눠 0~1 로 만든다.
+# Lab 에서 1 단위는 겨우 구분되는 색차, 4~5 단위면 눈에 뚜렷한 차이 — 그 정도 격차면
+# 확신해도 좋다는 뜻. (실측: 띠 두께를 실제 힌지 폭에 맞추면 격차 5.4, 3배 넓게 잡으면 1.1)
+HINGE_CONF_LAB_SCALE = 4.0
 
 
 def _hist_desc(channels: List[np.ndarray], bins: int = 24) -> np.ndarray:
@@ -387,7 +402,7 @@ def opening_from_hinge(
     obb,
     rgb=None,
     band_ratio: float = 0.25,
-    metric: str = "bg",
+    metric: str = "chroma",
     debug: bool = False,
 ) -> Optional[Dict]:
     """힌지(투명한 변)를 네 변 중에서 골라, 그 **반대쪽**을 여는 방향으로 반환한다.
@@ -404,7 +419,8 @@ def opening_from_hinge(
                    — 투명부는 바닥 '색'까지 닮기 때문. 없으면 gray 만 사용.
       band_ratio : 변 안쪽 띠 두께 비율(0.05~0.45). 얇으면 노이즈, 두꺼우면 가운데
                    제품 영역이 섞여 변 사이 차이가 흐려진다.
-      metric     : "bg"(배경 유사도, 기본) | "odd"(나머지 세 변과의 이질도).
+      metric     : "chroma"(본체 색 대비, 기본 — 위 설명 참고) | "bg"(배경 유사도)
+                   | "odd"(나머지 세 변과의 이질도).
 
     반환: {"dir", "angle_deg", "confidence", "half_len", "axis": "hinge",
            "hinge_side"(0~3), "scores"[4]} — 실패 시 None.
@@ -443,18 +459,51 @@ def opening_from_hinge(
         (slice(H - th, H), slice(tw, W - tw)),  # 2: 아래
         (slice(th, H - th), slice(0, tw)),  # 3: 왼쪽
     ]
-    descs = []
-    for rs, cs in slices:
-        sel = warp_mask[rs, cs] > 0
-        if int(sel.sum()) < 30:  # 마스크가 OBB 모서리를 덜 채운 경우 등
-            return None
-        descs.append(_hist_desc([L[rs, cs][sel] for L in layers]))
+    inner = (slice(th, H - th), slice(tw, W - tw))  # 띠를 뺀 안쪽 = 케이스 '본체' 표본
 
     # 3) 투명함 점수 (높을수록 힌지)
+    if metric == "chroma":
+        # 색상면(Lab a*b*)에서 **본체 색으로부터의 거리**. 배경을 안 쓰므로 그림자에
+        # 속지 않고, '거리' 라서 조금 다름/많이 다름이 구분된다 (상관은 포화된다).
+        if rgb is not None:
+            lab = cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+            feat = np.stack([cv2.warpPerspective(lab[:, :, c], M, (W, H)) for c in (1, 2)], axis=2)
+        else:
+            # 컬러가 없으면 밝기 편차로 대체 — 은색 힌지처럼 밝기가 다른 경우만 잡힌다
+            feat = cv2.warpPerspective(np.asarray(gray, dtype=np.uint8), M, (W, H)).astype(np.float32)[:, :, None]
+        # 마스크 경계(배경과 섞인 픽셀·그림자 테두리)를 걷어낸다 — 안 걷으면 마스크가
+        # 조금만 커져도 그쪽 띠가 배경색을 머금어 '투명'으로 오인된다.
+        k = max(2, int(round(min(W, H) * 0.04)))
+        eroded = cv2.erode(warp_mask, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        if int(eroded.sum()) < 200:
+            eroded = warp_mask  # 너무 작아지면 원본 유지 (작은 객체 안전장치)
+
+        def _pix(sl):
+            sel = eroded[sl] > 0
+            return feat[sl][sel]
+
+        core = _pix(inner)
+        if len(core) < 50:
+            return None
+        body = np.median(core, axis=0)
+        scores = []
+        for sl in slices:
+            p = _pix(sl)
+            if len(p) < 30:
+                return None
+            scores.append(float(np.linalg.norm(p - body, axis=1).mean()))
+    else:
+        descs = []
+        for rs, cs in slices:
+            sel = warp_mask[rs, cs] > 0
+            if int(sel.sum()) < 30:  # 마스크가 OBB 모서리를 덜 채운 경우 등
+                return None
+            descs.append(_hist_desc([L[rs, cs][sel] for L in layers]))
+
     if metric == "odd":
         # 나머지 세 변과 얼마나 다른가 — 바닥 색이 케이스와 비슷할 때의 대안
         scores = [1.0 - float(np.mean([_corr(descs[i], descs[j]) for j in range(4) if j != i])) for i in range(4)]
-    else:
+    elif metric == "bg":
         # 기본: 케이스 바깥(바닥)과 얼마나 닮았는가 = 얼마나 비쳐 보이는가
         ring_k = max(3, int(min(W, H) * 0.12))
         ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ring_k + 1, 2 * ring_k + 1))
@@ -473,7 +522,8 @@ def opening_from_hinge(
     #     (예: 0.115 / 0.092 / 0.092 / 0.091 — 힌지가 마스크 밖이라 신호가 없는 경우)
     #     비율만 크면 conf 0.96 처럼 높게 나와 "동점인데 확신하는" 위험이 있었다.
     #     절대 격차로 바꾸면 같은 상황이 0.02 로 떨어져 낮은 신뢰도가 제대로 드러난다.
-    conf = float(np.clip(srt[0] - srt[1], 0.0, 1.0))
+    gap = srt[0] - srt[1]
+    conf = float(np.clip(gap / HINGE_CONF_LAB_SCALE if metric == "chroma" else gap, 0.0, 1.0))
 
     # 4) 힌지의 맞은편 변 = 여는 쪽. canonical 중심 → 그 변 중점 방향을 원본으로 되돌린다
     opp = (order + 2) % 4

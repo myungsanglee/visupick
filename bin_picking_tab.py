@@ -699,7 +699,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.opening_method_combo.setToolTip(
             "내부 격자 비대칭: 투명 케이스 내부 칸 배열이 한쪽으로 치우친 걸 이용 — OBB로\n"
             "  똑바로 세워 격자 밴드를 찾고 위/아래 여백 크기로 방향 (가로로 긴 케이스 권장).\n"
-            "힌지 투명도: 네 변 중 '투명한 변'을 힌지로 골라 그 반대쪽을 여는 방향으로.\n"
+            "힌지 투명도: 네 변 중 '본체 색과 다른 변'(투명/금속 힌지)을 힌지로 골라\n"
+            "  그 반대쪽을 여는 방향으로.\n"
             "  다른 방식은 여는 축을 OBB 단축으로 고정(2택)이라 정사각형 케이스에는 못 쓴다.\n"
             "  이 방식만 네 변을 모두 평가하므로 정사각형(경우의 수 4가지)에 쓴다.\n"
             "이음선 에지: 뚜껑-바닥 이음선(여는 쪽+양옆 U자)의 에지 무게중심으로 판별.\n"
@@ -765,12 +766,14 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         op_row.addSpacing(10)
         self.opening_hinge_band_spin = QSpinBox()
         self.opening_hinge_band_spin.setRange(5, 45)
-        self.opening_hinge_band_spin.setValue(25)
+        self.opening_hinge_band_spin.setValue(15)
         self.opening_hinge_band_spin.setFixedWidth(60)
         self.opening_hinge_band_spin.setToolTip(
             "힌지 방식 전용: 네 변 안쪽에서 '투명함'을 재는 띠의 두께(케이스 크기 대비 %).\n"
             "얇으면 노이즈에 흔들리고, 두꺼우면 가운데 제품 영역이 섞여 변 사이 차이가\n"
-            "흐려진다. 힌지 부분(투명한 띠)의 실제 폭에 맞춘다. (기본 25)"
+            "흐려진다. **힌지부의 실제 폭에 맞추는 것이 가장 효과가 크다** — 실측 캡처에서\n"
+            "힌지 바는 케이스의 약 8%였고, 25%로 두면 신호가 3배 희석돼 신뢰도가\n"
+            "0.73 → 0.11 로 떨어졌다. (기본 15)"
         )
         self.opening_hinge_band_widget = self._labeled_widget("띠 두께%:", self.opening_hinge_band_spin)
         op_row.addWidget(self.opening_hinge_band_widget)
@@ -778,15 +781,19 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         # 판정 기준 (힌지 방식 전용)
         op_row.addSpacing(10)
         self.opening_hinge_metric_combo = QComboBox()
+        self.opening_hinge_metric_combo.addItem("본체 색 대비", "chroma")
         self.opening_hinge_metric_combo.addItem("배경 유사도", "bg")
         self.opening_hinge_metric_combo.addItem("이질도", "odd")
-        self.opening_hinge_metric_combo.setFixedWidth(110)
+        self.opening_hinge_metric_combo.setFixedWidth(120)
         self.opening_hinge_metric_combo.setToolTip(
             "힌지 방식 전용: 어느 변이 '투명한가'를 재는 기준.\n"
-            "배경 유사도(기본): 투명하면 바닥이 비쳐 보이므로 케이스 바깥(바닥) 색 분포와\n"
-            "  가장 닮은 변을 힌지로. 물리적 근거가 뚜렷해 기본값.\n"
-            "이질도: 바닥 색이 케이스 본체와 비슷해 위 방식의 대비가 안 나올 때. '힌지 변만\n"
-            "  나머지 셋과 다르다'는 사실만 쓴다 (인쇄 로고가 있는 변이 대신 튈 수 있음)."
+            "본체 색 대비(기본, 권장): 띠의 색이 케이스 본체 색에서 얼마나 벗어났는지를\n"
+            "  Lab 색상면 거리로 잰다. 힌지 쪽은 투명하거나 금속이라 중성(회색)에 가깝고\n"
+            "  나머지는 본체 색 그대로다. 배경을 안 쓰므로 그림자에 덜 속고, '거리'라서\n"
+            "  조금 다름/많이 다름이 구분된다 — 실측 캡처에서 유일하게 안정적이었다.\n"
+            "배경 유사도: 케이스 바깥(바닥) 색 분포와 가장 닮은 변을 힌지로.\n"
+            "이질도: '힌지 변만 나머지 셋과 다르다'는 사실만 쓴다.\n"
+            "  (뒤의 두 방식은 히스토그램 상관이라 색차가 크지 않으면 네 변이 동점이 되기 쉽다)"
         )
         self.opening_hinge_metric_widget = self._labeled_widget("판정:", self.opening_hinge_metric_combo)
         op_row.addWidget(self.opening_hinge_metric_widget)
