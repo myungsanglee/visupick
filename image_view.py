@@ -439,7 +439,9 @@ class DraggableImageLabel(ZoomableImageLabel):
                 cv2.putText(canvas, full_label, (ix1 + 2, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         # OBB(회전 사각형) — bbox 위 레이어. minAreaRect 결과.
-        pending_labels = []  # 정보 라벨은 화살표까지 다 그린 뒤 최상단에 올린다
+        # 중심 원·정보 라벨은 화살표까지 다 그린 **뒤** 최상단에 올린다 (화살표에 가려지지 않게)
+        pending_dots = []  # [(cx, cy, color), ...]
+        pending_labels = []
         for obb in self._overlay_obbs:
             box_pts, color = obb[0], obb[1]
             obj_idx = obb[2] if len(obb) > 2 else None
@@ -464,6 +466,8 @@ class DraggableImageLabel(ZoomableImageLabel):
                     label += f", Open: {open_conf:.2f}"
                 # 화살표보다 **나중에** 그려야 화살표가 글씨를 덮지 않는다 → 여기선 모으기만
                 pending_labels.append((label, cx, cy, obb_color))
+                # OBB 만 계산한 경우(여는 방향 없음)에도 중심이 보이도록 여기서 원을 모은다
+                pending_dots.append((cx, cy, obb_color))
 
         # 여는 방향 화살표 — 중심 → 여는 쪽(뚜껑 열림). OBB 위 최상단 레이어.
         for arr in self._overlay_arrows:
@@ -479,15 +483,23 @@ class DraggableImageLabel(ZoomableImageLabel):
             p0 = (int(round(start[0])), int(round(start[1])))
             p1 = (int(round(end[0])), int(round(end[1])))
             cv2.arrowedLine(canvas, p0, p1, arr_color, thickness, tipLength=0.25)
-            # 시작점(= 객체 중심)에 원 — 중심이 어디인지 바로 보이게. 화살표 **뒤에** 그려
-            # 화살표 꼬리에 가려지지 않는다. 흰 테두리는 어두운 배경·같은 색 객체 위에서도
-            # 원이 묻히지 않게 하는 용도.
-            cv2.circle(canvas, p0, CENTER_DOT_R + 2, (255, 255, 255), -1, cv2.LINE_AA)  # 테두리 2px (1px 는 안티앨리어싱에 묻힘)
-            cv2.circle(canvas, p0, CENTER_DOT_R, arr_color, -1, cv2.LINE_AA)
+            # 시작점(= 객체 중심) 원. OBB 가 함께 있으면 위에서 이미 같은 점을 모았으므로
+            # 아래 dedupe 가 걸러낸다 (OBB 없이 화살표만 주는 호출도 지원하려고 여기서도 모음).
+            pending_dots.append((p0[0], p0[1], arr_color))
             # 여는 방향 신뢰도는 촉이 아니라 **정보 라벨**(Open:)에 함께 표시한다 —
             # 화살표가 짧으면 촉 라벨이 정보 라벨과 겹쳐 읽기 어려웠다.
 
-        # 정보 라벨 — 화살표까지 다 그린 **뒤** 최상단에 올려 글씨가 가려지지 않게
+        # 중심 원 — 화살표 **뒤에** 그려 꼬리에 가려지지 않게. 흰 테두리는 어두운 배경이나
+        # 같은 색 객체 위에서도 원이 묻히지 않게 하는 용도 (1px 는 안티앨리어싱에 묻힘).
+        drawn = set()
+        for dx, dy, dcolor in pending_dots:
+            if (dx, dy) in drawn:  # OBB·화살표가 같은 중심을 가리키는 경우 한 번만
+                continue
+            drawn.add((dx, dy))
+            cv2.circle(canvas, (dx, dy), CENTER_DOT_R + 2, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(canvas, (dx, dy), CENTER_DOT_R, tuple(int(c) for c in dcolor), -1, cv2.LINE_AA)
+
+        # 정보 라벨 — 최상단 (원 위에 올라가도 오프셋 때문에 겹치지 않는다)
         for text, lx, ly, lcolor in pending_labels:
             self._draw_info_label(canvas, text, lx, ly, lcolor)
 

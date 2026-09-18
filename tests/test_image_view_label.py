@@ -112,3 +112,28 @@ class TestCenterDot:
         v.set_arrows([((300, 200), (500, 200), (0, 200, 0), 0)])
         canvas = v._make_overlay_image()
         assert tuple(canvas[200, 300]) == (0, 200, 0)
+
+    def test_dot_with_obb_only(self, qapp):
+        """'OBB 검출' 버튼처럼 화살표 없이 OBB 만 있어도 중심 원이 나와야 한다."""
+        from image_view import DraggableImageLabel
+
+        v = DraggableImageLabel()
+        v.set_image(np.zeros((300, 600, 3), np.uint8))
+        color = (255, 80, 80)
+        v.set_obbs([(np.array([[250, 150], [350, 150], [350, 250], [250, 250]]), color, 0, 12.3)])
+        v.set_arrows([])
+        canvas = v._make_overlay_image()
+        assert tuple(canvas[200, 300]) == color, "OBB 만 있을 때 중심 원이 없음"
+
+    def test_dot_not_doubled_when_obb_and_arrow_share_center(self, qapp):
+        """OBB·화살표가 같은 중심을 가리켜도 원은 한 번만 (색이 겹쳐 덮이지 않게)."""
+        from image_view import DraggableImageLabel
+
+        v = DraggableImageLabel()
+        v.set_image(np.zeros((300, 600, 3), np.uint8))
+        obb_color, arrow_color = (255, 80, 80), (0, 200, 0)
+        v.set_obbs([(np.array([[250, 150], [350, 150], [350, 250], [250, 250]]), obb_color, 0, 12.3, 0.4)])
+        v.set_arrows([((300, 200), (300, 280), arrow_color, 0)])
+        canvas = v._make_overlay_image()
+        # 먼저 모인 OBB 색이 남아야 한다 (화살표 색으로 덧칠되지 않음)
+        assert tuple(canvas[200, 300]) == obb_color
