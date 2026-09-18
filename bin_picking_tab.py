@@ -1211,7 +1211,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
                 continue
             det["obb"] = obb
             color = cmap.get(i, (200, 200, 200))  # 유효 픽 객체가 아니면 회색
-            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, obb["angle"]))
+            # 여는 방향을 아직 안 구했으므로 각도/신뢰도는 넘기지 않는다 → 라벨엔 중심 좌표만.
+            # (OBB 각도 obb["angle"] 는 minAreaRect 규약상 0~90° 로 접혀 90° 마다 되돌아가고
+            #  경계에서 튀어, 물체가 어느 쪽을 향하는지 알려주지 못한다 — 표시하지 않는다.)
+            obb_overlays.append((np.asarray(obb["box_pts"]), color, i))
             n_ok += 1
 
         self.view_2d.set_obbs(obb_overlays)
@@ -1310,8 +1313,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             res.pop("_debug", None)  # 디버그 임시 데이터는 저장 전 제거
             det["opening"] = res
             color = cmap.get(i, (200, 200, 200))
-            # 중심 정보 라벨(X/Y/Deg/Open)에 쓰이도록 여는 방향 신뢰도를 함께 넘긴다
-            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, obb["angle"], res["confidence"]))
+            # 정보 라벨용: **여는 방향 각도**(이미지 좌표 atan2, −180~180) + 신뢰도.
+            # OBB 각도가 아니라 이 값을 쓴다 — OBB 각도는 0~90° 로 접혀 90° 마다 되돌아가고
+            # 경계에서 튀지만(89°→0.9, 90°→90.0), 여는 방향 각도는 전 범위라 연속이다.
+            obb_overlays.append((np.asarray(obb["box_pts"]), color, i, res["angle_deg"], res["confidence"]))
             cx, cy = obb["center"]
             dx, dy = res["dir"]
             end = (cx + dx * res["half_len"], cy + dy * res["half_len"])

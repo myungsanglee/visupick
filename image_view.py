@@ -298,7 +298,7 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._overlay_boxes: List[tuple] = []
         # [(mask(H,W) bool, color(BGR), obj_index), ...] — seg 모델일 때만 채워짐
         self._overlay_masks: List[tuple] = []
-        # [(box_pts(4,2) int, color(BGR), obj_index, angle_deg, open_conf|None), ...] — OBB 검출 시
+        # [(box_pts(4,2) int, color(BGR), obj_index, open_deg|None, open_conf|None), ...] — OBB 검출 시
         self._overlay_obbs: List[tuple] = []
         # [(start(x,y), end(x,y), color(BGR), obj_index), ...] — 여는 방향 화살표
         self._overlay_arrows: List[tuple] = []
@@ -323,10 +323,12 @@ class DraggableImageLabel(ZoomableImageLabel):
         self._refresh()
 
     def set_obbs(self, obbs: List[tuple]):
-        """OBB(회전 사각형) 오버레이. [(box_pts(4,2), color, obj_idx, angle, open_conf), ...].
+        """OBB(회전 사각형) 오버레이. [(box_pts(4,2), color, obj_idx, open_deg, open_conf), ...].
 
-        obj_idx 이후는 선택: angle 이 있으면 중심에 정보 라벨(X/Y/Deg[/Open])을 그리고,
-        open_conf(여는 방향 신뢰도)까지 주면 라벨에 Open 항목이 붙는다. 빈 리스트면 스킵.
+        중심 원과 정보 라벨(`X: .., Y: ..`)은 항상 그린다. obj_idx 뒤의 두 항목은
+        **여는 방향을 계산했을 때만** 넘기는 값으로, 있으면 라벨에 `Deg`(여는 방향 각도)
+        와 `Open`(신뢰도)이 덧붙는다 — OBB 만 계산한 경우엔 좌표만 나온다.
+        빈 리스트면 스킵.
         """
         self._overlay_obbs = obbs
         self._refresh()
@@ -335,6 +337,22 @@ class DraggableImageLabel(ZoomableImageLabel):
         """여는 방향 화살표 오버레이. [(start(x,y), end(x,y), color, obj_idx), ...]. 빈 리스트면 스킵."""
         self._overlay_arrows = arrows
         self._refresh()
+
+    @staticmethod
+    def _compose_label(cx: float, cy: float, open_deg=None, open_conf=None) -> str:
+        """정보 라벨 문구. 중심 픽셀 좌표는 항상, 여는 방향 각도·신뢰도는 **있을 때만**.
+
+        Deg 는 **여는 방향 각도**다 (OBB 각도가 아님 — 그쪽은 minAreaRect 규약상 0~90° 로
+        접혀 90° 마다 되돌아가고 경계에서 튀므로 방향 정보로 못 쓴다). 이미지 좌표계에서
+        중심 → 여는 쪽 벡터의 atan2 이며, 0°=오른쪽 / +90°=아래 / ±180°=왼쪽 / −90°=위
+        (이미지 y축이 아래를 향하므로 **화면상 시계방향이 +**). 범위 −180~180°.
+        """
+        label = f"X: {cx:.1f}, Y: {cy:.1f}"
+        if open_deg is not None:
+            label += f", Deg: {open_deg:.1f}"
+        if open_conf is not None:
+            label += f", Open: {open_conf:.2f}"
+        return label
 
     @staticmethod
     def _draw_info_label(canvas, text: str, ax: int, ay: int, fill_color):
@@ -445,8 +463,9 @@ class DraggableImageLabel(ZoomableImageLabel):
         for obb in self._overlay_obbs:
             box_pts, color = obb[0], obb[1]
             obj_idx = obb[2] if len(obb) > 2 else None
-            angle = obb[3] if len(obb) > 3 else None
-            open_conf = obb[4] if len(obb) > 4 else None  # 여는 방향 신뢰도 (없으면 라벨에서 생략)
+            # 아래 둘은 **여는 방향을 계산했을 때만** 채워진다 (OBB 만 계산하면 None → 라벨에서 생략).
+            open_deg = obb[3] if len(obb) > 3 else None  # 여는 방향 각도(이미지 좌표, atan2)
+            open_conf = obb[4] if len(obb) > 4 else None  # 여는 방향 신뢰도
             if self._highlighted_idx is not None and obj_idx == self._highlighted_idx:
                 obb_color, thickness = (0, 255, 0), 3
             elif self._highlighted_idx is not None:
@@ -455,19 +474,16 @@ class DraggableImageLabel(ZoomableImageLabel):
                 obb_color, thickness = color, 2
             pts = np.asarray(box_pts, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(canvas, [pts], isClosed=True, color=obb_color, thickness=thickness)
-            if angle is not None:
-                # 중심 정보 라벨: 픽셀 좌표 + 각도(+ 여는 방향 신뢰도).
-                # 글자 길이에 맞춘 사각형을 **객체 색으로 채우고 흰 글씨** — 객체가 여럿일 때
-                # 어느 라벨이 어느 객체 것인지 색으로 바로 매칭되게 (bbox/마스크와 같은 색).
-                cx = int(np.mean(pts[:, 0, 0]))
-                cy = int(np.mean(pts[:, 0, 1]))
-                label = f"X: {cx:.1f}, Y: {cy:.1f}, Deg: {angle:.1f}"
-                if open_conf is not None:
-                    label += f", Open: {open_conf:.2f}"
-                # 화살표보다 **나중에** 그려야 화살표가 글씨를 덮지 않는다 → 여기선 모으기만
-                pending_labels.append((label, cx, cy, obb_color))
-                # OBB 만 계산한 경우(여는 방향 없음)에도 중심이 보이도록 여기서 원을 모은다
-                pending_dots.append((cx, cy, obb_color))
+            # 정보 라벨: 픽셀 좌표(항상) + 여는 방향 각도·신뢰도(계산했을 때만).
+            # 글자 길이에 맞춘 사각형을 **객체 색으로 채우고 흰 글씨** — 객체가 여럿일 때
+            # 어느 라벨이 어느 객체 것인지 색으로 바로 매칭되게 (bbox/마스크와 같은 색).
+            cx = int(np.mean(pts[:, 0, 0]))
+            cy = int(np.mean(pts[:, 0, 1]))
+            label = self._compose_label(cx, cy, open_deg, open_conf)
+            # 화살표보다 **나중에** 그려야 화살표가 글씨를 덮지 않는다 → 여기선 모으기만
+            pending_labels.append((label, cx, cy, obb_color))
+            # OBB 만 계산한 경우(여는 방향 없음)에도 중심이 보이도록 여기서 원을 모은다
+            pending_dots.append((cx, cy, obb_color))
 
         # 여는 방향 화살표 — 중심 → 여는 쪽(뚜껑 열림). OBB 위 최상단 레이어.
         for arr in self._overlay_arrows:

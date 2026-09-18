@@ -137,3 +137,17 @@ class TestCenterDot:
         canvas = v._make_overlay_image()
         # 먼저 모인 OBB 색이 남아야 한다 (화살표 색으로 덧칠되지 않음)
         assert tuple(canvas[200, 300]) == obb_color
+
+
+class TestLabelComposition:
+    """Deg/Open 은 여는 방향을 계산했을 때만 붙고, 중심 좌표는 항상 나온다."""
+
+    def test_obb_only_shows_coords_only(self):
+        assert V._compose_label(412.0, 233.0) == "X: 412.0, Y: 233.0"
+
+    def test_with_opening_adds_deg_and_conf(self):
+        assert V._compose_label(412.0, 233.0, -20.0, 0.42) == "X: 412.0, Y: 233.0, Deg: -20.0, Open: 0.42"
+
+    def test_negative_angle_kept(self):
+        """여는 방향 각도는 −180~180 범위라 음수가 그대로 보여야 한다 (OBB 각도는 0~90 이었음)."""
+        assert "Deg: -175.3" in V._compose_label(1.0, 2.0, -175.3, 0.1)
