@@ -376,10 +376,25 @@ def debug_show_grid(warp, bx, by, lo, hi, prof, thr, conf):
 #   것보다 낫다. 무채색 케이스가 실제로 등장하면 그 캡처로 전용 단서를 설계한다.
 
 
-# chroma 방식의 신뢰도 환산: 1·2등 점수 차(Lab a*b* 단위)를 이 값으로 나눠 0~1 로 만든다.
-# Lab 에서 1 단위는 겨우 구분되는 색차, 4~5 단위면 눈에 뚜렷한 차이 — 그 정도 격차면
-# 확신해도 좋다는 뜻. (실측: 띠 두께를 실제 힌지 폭에 맞추면 격차 5.4, 3배 넓게 잡으면 1.1)
-HINGE_CONF_LAB_SCALE = 4.0
+# 신뢰도 환산: 1·2등 점수 차를 이 값으로 나눠 0~1 로 만든다. 점수는 본체 내부 산포(MAD)
+# 로 정규화돼 있으므로 "격차 1.5 = 본체가 자연히 흔들리는 폭의 1.5배만큼 그 변이 튄다"
+# 는 뜻. 실측에서 근거 있는 경우 1.4~15, 근거 없는 경우 0.1 미만이라 그 사이로 잡았다.
+HINGE_CONF_MARGIN = 1.5
+
+
+def _score_sides(core: np.ndarray, strips: List[np.ndarray], idx: List[int]):
+    """띠 4개의 '본체로부터의 편차' 점수와 1·2등 격차를 돌려준다.
+
+    본체 내부의 자연스러운 산포(MAD)로 나눠 정규화하는 것이 핵심이다. 그래야 채널마다
+    스케일이 달라도 비교할 수 있고, **원래 많이 흔들리는 채널은 자동으로 깎인다** —
+    예컨대 케이스 요철 그늘 때문에 밝기가 들쭉날쭉하면 밝기 쪽 점수가 통째로 눌린다.
+    """
+    body = np.median(core, axis=0)
+    mad = float(np.median(np.linalg.norm(core[:, idx] - body[idx], axis=1)))
+    mad = mad if mad > 1e-6 else 1e-6
+    scores = [float(np.linalg.norm(p[:, idx] - body[idx], axis=1).mean()) / mad for p in strips]
+    srt = sorted(scores, reverse=True)
+    return scores, srt[0] - srt[1]
 
 
 def opening_from_hinge(
@@ -445,14 +460,17 @@ def opening_from_hinge(
     ]
     inner = (slice(th, H - th), slice(tw, W - tw))  # 띠를 뺀 안쪽 = 케이스 '본체' 표본
 
-    # 3) 투명함 점수 = 색상면(Lab a*b*)에서 **본체 색으로부터의 거리** (높을수록 힌지)
+    # 3) 투명함 점수 = 본체로부터의 **Lab 편차**. 색(a*b*)과 밝기(L) 두 벌로 각각 계산해
+    #    **1·2등 격차가 큰 쪽을 채택**한다 (아래 _score_sides 참고).
     if rgb is not None:
         lab = cv2.cvtColor(np.asarray(rgb, dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
-        feat = np.stack([cv2.warpPerspective(lab[:, :, c], M, (W, H)) for c in (1, 2)], axis=2)
+        feat = np.stack([cv2.warpPerspective(lab[:, :, c], M, (W, H)) for c in range(3)], axis=2)
+        feature_sets = (("color", (1, 2)), ("lightness", (0,)))
     else:
-        # 컬러가 없으면 밝기 편차로 대체 — 은색 힌지처럼 밝기가 다른 경우만 잡힌다.
-        # 판별력이 크게 떨어지므로 호출부는 되도록 rgb 를 넘긴다.
+        # 컬러가 없으면 밝기만 — 색으로 갈리는 케이스(분홍 등)는 판별할 수 없으므로
+        # 호출부는 되도록 rgb 를 넘긴다.
         feat = cv2.warpPerspective(np.asarray(gray, dtype=np.uint8), M, (W, H)).astype(np.float32)[:, :, None]
+        feature_sets = (("lightness", (0,)),)
 
     # 마스크 경계(배경과 섞인 픽셀·그림자 테두리)를 걷어낸다 — 안 걷으면 마스크가
     # 조금만 커져도 그쪽 띠가 배경색을 머금어 '투명'으로 오인된다. 다만 힌지 띠 자체가
@@ -476,22 +494,19 @@ def opening_from_hinge(
     core = _pix(inner)
     if len(core) < 50:
         return None
-    body = np.median(core, axis=0)  # 본체 색 = 안쪽 중앙값 (인쇄·요철에 덜 흔들리게 median)
-    scores = []
-    for sl in slices:
-        p = _pix(sl)
-        if len(p) < 30:  # 마스크가 OBB 모서리를 덜 채운 경우 등
-            return None
-        scores.append(float(np.linalg.norm(p - body, axis=1).mean()))
+    strips = [_pix(sl) for sl in slices]
+    if any(len(p) < 30 for p in strips):  # 마스크가 OBB 모서리를 덜 채운 경우 등
+        return None
+
+    best = None  # (격차, 점수들, 특징이름)
+    for name, idx in feature_sets:
+        sc, gap = _score_sides(core, strips, list(idx))
+        if best is None or gap > best[0]:
+            best = (gap, sc, name)
+    gap, scores, feature = best
 
     order = int(np.argmax(scores))
-    srt = sorted(scores, reverse=True)
-    # 신뢰도 = 1등과 2등의 **절대** 격차를 Lab 색차 단위로 환산한 값.
-    #   ※ 예전에는 전체 산포로 나눈 상대 격차를 썼는데, 네 변이 거의 동점일 때도
-    #     (예: 힌지가 마스크 밖이라 신호가 없는 경우) 비율만 크면 conf 0.96 처럼 높게
-    #     나와 "동점인데 확신하는" 위험이 있었다. 절대 격차는 그 상황을 제대로 0 에
-    #     가깝게 떨어뜨린다.
-    conf = float(np.clip((srt[0] - srt[1]) / HINGE_CONF_LAB_SCALE, 0.0, 1.0))
+    conf = float(np.clip(gap / HINGE_CONF_MARGIN, 0.0, 1.0))
 
     # 4) 힌지의 맞은편 변 = 여는 쪽. canonical 중심 → 그 변 중점 방향을 원본으로 되돌린다
     opp = (order + 2) % 4
@@ -511,13 +526,14 @@ def opening_from_hinge(
         "axis": "hinge",
         "hinge_side": order,
         "scores": [float(x) for x in scores],
+        "feature": feature,  # "color"(a*b*) | "lightness"(L) — 어느 단서로 판별했는지
     }
     if debug:
-        debug_show_hinge(layers, warp_mask, slices, scores, order, conf)
+        debug_show_hinge(layers, warp_mask, slices, scores, order, conf, feature)
     return result
 
 
-def debug_show_hinge(layers, warp_mask, slices, scores, hinge, conf):
+def debug_show_hinge(layers, warp_mask, slices, scores, hinge, conf, feature):
     """[개발용] 힌지 방식 중간 단계를 cv2.imshow 로 표시 — 어느 변이 왜 뽑혔는지 눈으로 확인.
 
     왼쪽: OBB 로 똑바로 세운 케이스(warp) 위에 네 띠를 그린 것.
@@ -558,7 +574,7 @@ def debug_show_hinge(layers, warp_mask, slices, scores, hinge, conf):
             cv2.rectangle(bars, (44, y), (44 + int((sc - lo) / span * 150), y + 18), color, -1)
             cv2.putText(bars, names[i], (8, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             cv2.putText(bars, f"{sc:+.3f}", (200, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1)
-        cv2.putText(bars, "score = dist. from body color", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(bars, f"cue = {feature}", (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         cv2.putText(bars, f"conf={conf:.2f}", (8, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         cv2.putText(bars, f"hinge={names[hinge]} -> open={names[opp]}", (8, bh - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 220), 1)
 
