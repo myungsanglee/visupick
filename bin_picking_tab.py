@@ -1442,6 +1442,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
                 return
             # 실시간은 2D 만 쓴다 — 포인트클라우드/법선은 뽑지 않아 프레임 시간을 아낀다
             detections, infer_ms = self._sam3_detect(image)
+            # Bin Box 밖의 검출은 정식 경로와 똑같이 걸러낸다. 포인트클라우드를 안 뽑으므로
+            # 깊이 밴드(2차 게이트)는 자동 생략되고 2D 사각형 게이트만 적용된다.
+            n_raw = len(detections)
+            detections = self._filter_by_roi(detections)
         except (DetectorUnavailable, DetectorError) as e:
             self._live_stop("검출 오류")
             QMessageBox.critical(self, "오류", str(e))
@@ -1466,7 +1470,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.view_2d.set_arrows([])
 
         fps = self._live_frames / max(time.time() - self._live_t0, 1e-6)
-        self.main.statusBar().showMessage(f"▶ 실시간 검출: {len(detections)}개, 추론 {infer_ms:.0f}ms, {fps:.1f} fps  (로봇 이동 잠김)")
+        roi_part = f" (ROI 밖 {n_raw - len(detections)}개 제외)" if n_raw != len(detections) else ""
+        self.main.statusBar().showMessage(f"▶ 실시간 검출: {len(detections)}개{roi_part}, 추론 {infer_ms:.0f}ms, {fps:.1f} fps  (로봇 이동 잠김)")
 
     def _redraw_detection_overlays(self):
         """정식 캡처의 검출 결과를 2D 오버레이에 다시 그린다 (실시간 종료 후 복귀용)."""
@@ -1493,49 +1498,56 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             )
         return None
 
+    def _filter_by_roi(self, detections: List[Dict], xyz=None) -> List[Dict]:
+        """Bin Box(ROI) 밖의 검출을 걸러낸다. 정식 검출과 실시간 미리보기가 공유한다.
+
+        1차 게이트 = 사용자가 그린 2D 사각형(roi_2d) — 깊이와 무관하게 항상 적용.
+          투명 객체(SAM3)는 중심 깊이가 NaN 이라 3D-only 필터로는 못 거르므로
+          반드시 2D 게이트가 필요하다. bbox 가 **전부** 안에 들어와야 통과(부분 걸침 제외).
+        2차(보조) = 중심 픽셀 깊이가 유효하고 roi_3d 가 있으면 깊이 밴드까지 확인
+          (불투명 객체를 깊이로 분리하는 기존 장점 유지). 깊이가 NaN 이면 이 단계는
+          건너뛰어 검출을 버리지 않는다.
+
+        xyz 를 안 넘기면(실시간 미리보기는 속도 때문에 포인트클라우드를 안 뽑는다)
+        2차 게이트는 자동으로 생략되고 2D 게이트만 적용된다.
+        """
+        if self.roi_2d is None:
+            return detections
+        rx1, ry1, rx2, ry2 = self.roi_2d
+        rx_lo, rx_hi = sorted((rx1, rx2))
+        ry_lo, ry_hi = sorted((ry1, ry2))
+        filtered = []
+        for det in detections:
+            bx1, by1, bx2, by2 = det["bbox"]
+            bx_lo, bx_hi = sorted((bx1, bx2))
+            by_lo, by_hi = sorted((by1, by2))
+            if not (rx_lo <= bx_lo and bx_hi <= rx_hi and ry_lo <= by_lo and by_hi <= ry_hi):
+                continue
+            if self.roi_3d is not None and xyz is not None:
+                h, w = xyz.shape[:2]
+                ix = int((bx1 + bx2) / 2.0)
+                iy = int((by1 + by2) / 2.0)
+                if 0 <= ix < w and 0 <= iy < h:
+                    pt = xyz[iy, ix]
+                    if not np.any(np.isnan(pt)):
+                        if not (
+                            self.roi_3d["x_min"] <= pt[0] <= self.roi_3d["x_max"]
+                            and self.roi_3d["y_min"] <= pt[1] <= self.roi_3d["y_max"]
+                            and self.roi_3d["z_min"] <= pt[2] <= self.roi_3d["z_max"]
+                        ):
+                            continue  # 깊이 밴드 밖 → 제외
+            filtered.append(det)
+        if len(filtered) != len(detections):
+            logger.info(f"ROI 필터링(2D bbox 포함{'+3D' if (self.roi_3d and xyz is not None) else ''}): {len(detections)} → {len(filtered)}")
+        return filtered
+
     def _apply_detections(self, detections: List[Dict], source: str = "검출", infer_ms: Optional[float] = None):
         """검출 결과(공통 포맷) → ROI 필터 → 3D 포즈 → 2D/3D/테이블 갱신.
 
         RF-DETR(_detect)와 SAM3(_detect_sam3)가 공유하는 다운스트림.
         detections 각 항목: {bbox[xyxy], confidence, class_id, class_name, (mask HxW bool)}
         """
-        # ROI 필터.
-        # 1차 게이트 = 사용자가 그린 2D 사각형(roi_2d) — 깊이와 무관하게 항상 적용.
-        #   투명 객체(SAM3)는 중심 깊이가 NaN 이라 3D-only 필터로는 못 거르므로
-        #   반드시 2D 게이트가 필요하다.
-        # 2차(보조) = 중심 픽셀 깊이가 유효하고 roi_3d 가 있으면 깊이 밴드까지 확인
-        #   (불투명 객체를 깊이로 분리하는 기존 장점 유지). 깊이가 NaN 이면 이 단계는
-        #   건너뛰어 검출을 버리지 않는다.
-        if self.roi_2d is not None:
-            rx1, ry1, rx2, ry2 = self.roi_2d
-            rx_lo, rx_hi = sorted((rx1, rx2))
-            ry_lo, ry_hi = sorted((ry1, ry2))
-            xyz = self.current_xyz
-            filtered = []
-            for det in detections:
-                bx1, by1, bx2, by2 = det["bbox"]
-                bx_lo, bx_hi = sorted((bx1, bx2))
-                by_lo, by_hi = sorted((by1, by2))
-                # 1차: bbox 전체가 2D ROI 사각형 안에 포함되는가 (부분 걸침은 제외)
-                if not (rx_lo <= bx_lo and bx_hi <= rx_hi and ry_lo <= by_lo and by_hi <= ry_hi):
-                    continue
-                # 2차: 중심 픽셀 깊이가 유효하고 roi_3d 있으면 깊이 밴드까지 확인
-                if self.roi_3d is not None and xyz is not None:
-                    h, w = xyz.shape[:2]
-                    ix = int((bx1 + bx2) / 2.0)
-                    iy = int((by1 + by2) / 2.0)
-                    if 0 <= ix < w and 0 <= iy < h:
-                        pt = xyz[iy, ix]
-                        if not np.any(np.isnan(pt)):
-                            if not (
-                                self.roi_3d["x_min"] <= pt[0] <= self.roi_3d["x_max"]
-                                and self.roi_3d["y_min"] <= pt[1] <= self.roi_3d["y_max"]
-                                and self.roi_3d["z_min"] <= pt[2] <= self.roi_3d["z_max"]
-                            ):
-                                continue  # 깊이 밴드 밖 → 제외
-                filtered.append(det)
-            logger.info(f"ROI 필터링(2D bbox 포함{'+3D' if self.roi_3d else ''}): {len(detections)} → {len(filtered)}")
-            detections = filtered
+        detections = self._filter_by_roi(detections, self.current_xyz)
 
         self.detections = detections
 

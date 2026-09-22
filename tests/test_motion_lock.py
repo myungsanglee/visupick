@@ -176,3 +176,83 @@ class TestLivePreviewIsSideEffectFree:
         live._live_tick()
         assert len(live.view_2d._overlay_boxes) == 1
         assert len(live.view_2d._overlay_masks) == 1
+
+
+class TestLiveRespectsRoi:
+    """실시간 미리보기도 Bin Box(ROI) 밖 검출은 정식 경로와 똑같이 걸러야 한다.
+
+    데모 영상에 작업 영역 밖 물체가 잡히면 안 되기 때문. 포인트클라우드를 안 뽑으므로
+    깊이 밴드(2차 게이트)는 생략되고 2D 사각형 게이트만 적용된다.
+    """
+
+    @pytest.fixture
+    def two_objects(self, tab, monkeypatch):
+        """ROI 안 1개 + 밖 1개를 내놓는 검출기로 교체."""
+        inside = {"bbox": [40.0, 30.0, 120.0, 90.0], "confidence": 0.9, "class_id": 0, "class_name": "in", "mask": None}
+        outside = {"bbox": [130.0, 95.0, 158.0, 118.0], "confidence": 0.8, "class_id": 0, "class_name": "out", "mask": None}
+
+        class Sam3Two:
+            loaded = True
+
+            def detect(self, img, conf, prompt=""):
+                return [dict(inside), dict(outside)], 100.0
+
+        monkeypatch.setattr(tab, "_sam3", Sam3Two())
+        return tab
+
+    def test_outside_roi_is_dropped(self, two_objects, monkeypatch):
+        t = two_objects
+        monkeypatch.setattr(t, "roi_2d", (30.0, 20.0, 125.0, 95.0))
+        monkeypatch.setattr(t, "roi_3d", None)
+        t._toggle_live_sam3()
+        try:
+            t._live_tick()
+            labels = [b[5] for b in t.view_2d._overlay_boxes]  # (x1,y1,x2,y2,color,label,idx)
+            assert len(labels) == 1, f"ROI 밖 검출이 남음: {labels}"
+            assert labels[0].startswith("in")
+        finally:
+            t._toggle_live_sam3()
+
+    def test_no_roi_shows_everything(self, two_objects, monkeypatch):
+        """ROI 가 없으면(빈 박스 미설정) 정식 경로와 마찬가지로 전부 보여준다."""
+        t = two_objects
+        monkeypatch.setattr(t, "roi_2d", None)
+        t._toggle_live_sam3()
+        try:
+            t._live_tick()
+            assert len(t.view_2d._overlay_boxes) == 2
+        finally:
+            t._toggle_live_sam3()
+
+    def test_partial_overlap_excluded(self, two_objects, monkeypatch):
+        """bbox 가 ROI 경계에 걸치면 제외 — 정식 경로와 같은 규칙(전체 포함만 통과)."""
+        t = two_objects
+        monkeypatch.setattr(t, "roi_2d", (30.0, 20.0, 100.0, 95.0))  # 안쪽 객체의 우측이 삐져나감
+        monkeypatch.setattr(t, "roi_3d", None)
+        t._toggle_live_sam3()
+        try:
+            t._live_tick()
+            assert len(t.view_2d._overlay_boxes) == 0
+        finally:
+            t._toggle_live_sam3()
+
+
+class TestRoiFilterShared:
+    """정식 경로와 실시간이 같은 필터를 쓰는지 (규칙이 갈라지지 않게)."""
+
+    def test_same_helper_used(self, tab, monkeypatch):
+        monkeypatch.setattr(tab, "roi_2d", (0.0, 0.0, 100.0, 100.0))
+        monkeypatch.setattr(tab, "roi_3d", None)
+        dets = [
+            {"bbox": [10.0, 10.0, 50.0, 50.0], "confidence": 0.9, "class_id": 0, "class_name": "in", "mask": None},
+            {"bbox": [90.0, 90.0, 140.0, 140.0], "confidence": 0.9, "class_id": 0, "class_name": "out", "mask": None},
+        ]
+        kept = tab._filter_by_roi(dets)
+        assert [d["class_name"] for d in kept] == ["in"]
+
+    def test_depth_gate_skipped_without_xyz(self, tab, monkeypatch):
+        """xyz 를 안 넘기면 깊이 밴드는 건너뛴다 (실시간 경로)."""
+        monkeypatch.setattr(tab, "roi_2d", (0.0, 0.0, 100.0, 100.0))
+        monkeypatch.setattr(tab, "roi_3d", {"x_min": 0, "x_max": 1, "y_min": 0, "y_max": 1, "z_min": 0, "z_max": 1})
+        dets = [{"bbox": [10.0, 10.0, 50.0, 50.0], "confidence": 0.9, "class_id": 0, "class_name": "in", "mask": None}]
+        assert len(tab._filter_by_roi(dets)) == 1  # 깊이로 걸리지 않음
