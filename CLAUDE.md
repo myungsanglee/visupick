@@ -26,7 +26,7 @@ python main.py                 # 유일한 진입점 — GUI 실행
 
 **탭 5개, 믹스인 2개:**
 - [main.py](main.py)에 `DataCollectionTab`과 `VerificationTab`이 정의됨 (둘 다 `ImageViewerMixin` 사용).
-- `BinPickingTab`([bin_picking_tab.py](bin_picking_tab.py)), `CADMatchingTab`([cad_matching_tab.py](cad_matching_tab.py)), `SurfaceTrackingTab`([surface_tracking_tab.py](surface_tracking_tab.py))은 모두 [robot_control_mixin.py](robot_control_mixin.py)의 `RobotControlMixin`을 상속한다. 이 믹스인이 *공유* 로봇 모션 기능을 제공한다: 단일 이동, 시퀀스 큐, Z 안전 한계, AUT 속도 상한, `Space` 키 비상정지.
+- `BinPickingTab`([bin_picking_tab.py](bin_picking_tab.py)), `CADMatchingTab`([cad_matching_tab.py](cad_matching_tab.py)), `SurfaceTrackingTab`([surface_tracking_tab.py](surface_tracking_tab.py))은 모두 [robot_control_mixin.py](robot_control_mixin.py)의 `RobotControlMixin`을 상속한다. 이 믹스인이 *공유* 로봇 모션 기능을 제공한다: 단일 이동, 시퀀스 큐, Z 안전 한계, AUT 속도 상한, `Space` 키 비상정지, **모션 잠금**(`_check_motion_allowed` — 모든 모션 진입점에서 호출하고, 탭이 `_motion_blocked_reason()` 을 오버라이드해 상황을 추가한다. 예: SAM3 실시간 검출 중. 버튼 비활성화는 보조일 뿐 하드 가드가 본체이고, 비상정지 계열은 절대 잠그지 않는다).
 
   믹스인은 **동작뿐 아니라 레이아웃도 소유한다** — `_build_move_group()`(`로봇 이동 제어` 그룹박스 통째로), `_build_seq_group()`(`시퀀스 큐` 그룹박스 통째로), 그리고 하위 빌더 `_build_home_row` / `_build_place_row` / `_build_vacuum_row` / `_build_safety_rows`. 빈 픽킹·CAD 매칭 탭의 `_init_ui` 는 앞의 두 빌더를 부르는 두 줄이 전부고, 구성이 다른 표면 추적 탭(`실행 제어` 그룹)은 하위 빌더만 골라 쓴다.
 

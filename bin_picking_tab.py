@@ -515,6 +515,12 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._auto_running = False
         self._auto_done = 0
 
+        # SAM3 실시간 검출(데모용) 상태. 실행 중에는 로봇 이동이 잠긴다.
+        self._live_running = False
+        self._live_timer = None
+        self._live_frames = 0
+        self._live_t0 = 0.0
+
         # Bin Box (작업 볼륨) — 충돌 방지용. **로봇 base 좌표계**에 정의한다.
         #   빈의 벽은 중력(base Z)에 평행하고 그리퍼 자세도 base 이므로 base 가 자연스럽다.
         #   (카메라 AABB 는 카메라가 기울면 실제 상자와 어긋남 → docs/bin_picking.md 참고)
@@ -677,6 +683,17 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.btn_detect_sam3.clicked.connect(self._detect_sam3)
         self.btn_detect_sam3.setStyleSheet("background-color: #6A1B9A; color: white; font-weight: bold;")
         sam3_row.addWidget(self.btn_detect_sam3)
+
+        # 실시간(연속) 검출 — **데모 영상 촬영용**. 빈 픽킹 동작에는 쓰이지 않는다.
+        self.btn_live_sam3 = QPushButton("▶ SAM3 실시간 검출")
+        self.btn_live_sam3.clicked.connect(self._toggle_live_sam3)
+        self.btn_live_sam3.setStyleSheet("background-color: #AD1457; color: white; font-weight: bold;")
+        self.btn_live_sam3.setToolTip(
+            "캡처 → SAM3 검출을 반복해 2D 뷰에 영상처럼 보여준다 (데모 촬영용).\n"
+            "실행 중에는 **로봇 이동이 잠긴다** — 화면만 갱신하고 3D 포즈·테이블은 건드리지 않는다.\n"
+            "멈추면 마지막 정식 캡처 화면으로 돌아간다. 비상정지는 잠금과 무관하게 항상 동작."
+        )
+        sam3_row.addWidget(self.btn_live_sam3)
 
         sam3_row.addStretch()  # 남는 공간은 오른쪽으로 (입력창 늘어나지 않게)
 
@@ -1116,6 +1133,18 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
 
         self._apply_detections(detections, "검출", infer_ms=infer_ms)
 
+    def _sam3_detect(self, image_bgr):
+        """SAM3 추론 1회 → (detections, infer_ms). 단발 검출과 실시간 루프가 공유한다.
+
+        검출기는 **한 번만 만들어 재사용**한다 (모델 로드가 수십 초라 매 프레임 새로
+        만들면 실시간이 불가능하다). 예외는 그대로 올려 호출 측이 처리한다.
+        """
+        from object_detector import Sam3Detector
+
+        if not hasattr(self, "_sam3"):
+            self._sam3 = Sam3Detector(SAM3_MODEL_DIR or None)
+        return self._sam3.detect(image_bgr, self.conf_spin.value(), prompt=self.sam3_prompt_input.text().strip())
+
     def _detect_sam3(self):
         """SAM 3 텍스트 프롬프트 검출. 추론은 object_detector.Sam3Detector 가 담당.
 
@@ -1130,21 +1159,14 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             QMessageBox.warning(self, "오류", "검출할 객체를 설명하는 텍스트를 입력하세요 (예: cosmetic case)")
             return
 
-        from object_detector import Sam3Detector, DetectorUnavailable, DetectorError
-
-        if not hasattr(self, "_sam3"):
-            self._sam3 = Sam3Detector(SAM3_MODEL_DIR or None)
-
         # 최초 1회 모델 로드는 수십 초 걸리므로 로드 안내 먼저 표시
-        if not self._sam3.loaded:
-            self.main.statusBar().showMessage("SAM3 모델 로드 중... (최초 1회, 수십 초 소요 가능)")
-        else:
-            self.main.statusBar().showMessage(f"SAM3 검출 중... ('{prompt}')")
+        loaded = getattr(self, "_sam3", None) is not None and self._sam3.loaded
+        self.main.statusBar().showMessage(f"SAM3 검출 중... ('{prompt}')" if loaded else "SAM3 모델 로드 중... (최초 1회, 수십 초 소요 가능)")
         QApplication.processEvents()
 
         conf = self.conf_spin.value()
         try:
-            detections, infer_ms = self._sam3.detect(self.current_image, conf, prompt=prompt)
+            detections, infer_ms = self._sam3_detect(self.current_image)
         except (DetectorUnavailable, DetectorError) as e:
             QMessageBox.critical(self, "오류", str(e))
             return
@@ -1327,6 +1349,149 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
                 if confs:
                     warn += f", 힌지 판별 격차 {min(confs):.2f}~{max(confs):.2f}"
             self.main.statusBar().showMessage(f"여는 방향 추정 완료({method_name}): {n_ok}개{warn}")
+
+    # ============================================================
+    # SAM3 실시간 검출 (데모 영상 촬영용)
+    # ============================================================
+    #
+    # 빈 픽킹 동작에는 필요 없는 기능이다. "인식이 되는 장면"을 영상으로 찍기 위해
+    # 캡처 → SAM3 → 2D 표시를 반복한다. 설계상 지켜야 할 두 가지:
+    #
+    # 1) **로봇을 못 움직이게 한다.** 실시간 루프는 프레임마다 화면을 갈아엎으므로,
+    #    그 사이에 픽/이동이 돌면 "화면에 보이는 것"과 "로봇이 가는 좌표"가 어긋난다.
+    #    _motion_blocked_reason 오버라이드(하드 가드) + 모션 버튼 비활성화(시각적 안내).
+    #    비상정지는 잠기지 않는다.
+    # 2) **정식 캡처 상태를 건드리지 않는다.** current_image/current_xyz·detections·
+    #    pick_objects·3D 뷰는 그대로 두고 2D 오버레이만 갱신한다. 멈추면 마지막 정식
+    #    캡처 화면으로 되돌린다 — 데모를 찍고 나서 평소 작업을 그대로 이어갈 수 있게.
+    #
+    # 추론은 UI 스레드에서 돈다. SAM3 는 CUDA 컨텍스트가 스레드에 묶여 있어 워커로
+    # 옮기는 게 위험하기 때문(docs/cad_matching.md 9.5 참고). 대신 QTimer 로 **한 틱에
+    # 한 프레임만** 처리하고 이벤트 루프로 돌아가므로, 프레임 사이에 정지·비상정지가 먹는다.
+
+    def _toggle_live_sam3(self):
+        if self._live_running:
+            self._live_stop("사용자 중지")
+        else:
+            self._live_start()
+
+    def _live_start(self):
+        cam = self.main.camera
+        if not cam or not cam.connected:
+            QMessageBox.warning(self, "오류", "카메라가 연결되지 않았습니다")
+            return
+        if not cam.is_capture_ready:
+            QMessageBox.warning(self, "오류", "카메라가 캡처 준비되지 않았습니다 (Zivid 는 YML 로드 필요)")
+            return
+        if not self.sam3_prompt_input.text().strip():
+            QMessageBox.warning(self, "오류", "검출할 객체를 설명하는 텍스트를 입력하세요")
+            return
+        if self._cycle_is_running() or self._auto_running:
+            QMessageBox.warning(self, "실행 중", "픽 사이클/연속 픽이 실행 중입니다. 먼저 정지하세요.")
+            return
+
+        self._live_running = True
+        self._live_frames = 0
+        self._live_t0 = time.time()
+        self._set_motion_controls_enabled(False)  # 로봇 이동 잠금 (비상정지는 유지)
+        self.btn_live_sam3.setText("⏹ 실시간 중지")
+        self.btn_live_sam3.setStyleSheet("background-color: #C62828; color: white; font-weight: bold;")
+        self.btn_capture.setEnabled(False)
+        self.btn_detect_sam3.setEnabled(False)
+        if self._live_timer is None:
+            self._live_timer = QTimer(self)
+            self._live_timer.timeout.connect(self._live_tick)
+        self._live_timer.start(0)  # 최대 속도 — 한 틱에 한 프레임, 사이사이 이벤트 처리
+        self.main.statusBar().showMessage("▶ SAM3 실시간 검출 시작 — 로봇 이동 잠김 (다시 누르면 중지)")
+        logger.info("SAM3 실시간 검출 시작 (데모용, 로봇 이동 잠금)")
+
+    def _live_stop(self, reason: str = "중지"):
+        if not self._live_running:
+            return
+        self._live_running = False
+        if self._live_timer is not None:
+            self._live_timer.stop()
+        self._set_motion_controls_enabled(True)  # 잠글 때 기억해 둔 상태로 복원
+        self.btn_live_sam3.setText("▶ SAM3 실시간 검출")
+        self.btn_live_sam3.setStyleSheet("background-color: #AD1457; color: white; font-weight: bold;")
+        self.btn_capture.setEnabled(True)
+        self.btn_detect_sam3.setEnabled(True)
+
+        # 마지막 **정식 캡처** 화면으로 복귀 — 실시간 프레임이 남아 헷갈리지 않게
+        if self.current_image is not None:
+            self.view_2d.set_image(self.current_image)
+        self._redraw_detection_overlays()
+
+        fps = self._live_frames / max(time.time() - self._live_t0, 1e-6)
+        self.main.statusBar().showMessage(f"⏹ SAM3 실시간 검출 {reason} — {self._live_frames}프레임, 평균 {fps:.1f} fps. 로봇 이동 잠금 해제")
+        logger.info(f"SAM3 실시간 검출 종료({reason}): {self._live_frames}프레임, {fps:.1f} fps")
+
+    def _live_tick(self):
+        """한 프레임: 캡처 → SAM3 → 2D 오버레이. 실패하면 깔끔히 멈춘다."""
+        if not self._live_running:
+            return
+        cam = self.main.camera
+        if not cam or not cam.connected:
+            self._live_stop("카메라 연결 끊김")
+            return
+        try:
+            frame = cam.capture()
+            image = cam.frame_to_2d_image(frame) if frame is not None else None
+            if image is None:
+                self._live_stop("캡처 실패")
+                return
+            # 실시간은 2D 만 쓴다 — 포인트클라우드/법선은 뽑지 않아 프레임 시간을 아낀다
+            detections, infer_ms = self._sam3_detect(image)
+        except (DetectorUnavailable, DetectorError) as e:
+            self._live_stop("검출 오류")
+            QMessageBox.critical(self, "오류", str(e))
+            return
+        except Exception as e:
+            logger.exception("실시간 검출 실패")
+            self._live_stop(f"오류: {e}")
+            return
+
+        self._live_frames += 1
+        self.view_2d.set_image(image)
+        colors = self._OBJ_COLORS
+        boxes, masks = [], []
+        for i, det in enumerate(detections):
+            color = colors[i % len(colors)]
+            boxes.append((*det["bbox"], color, f"{det['class_name']} {det['confidence']:.2f}", i))
+            if det.get("mask") is not None:
+                masks.append((det["mask"], color, i))
+        self.view_2d.set_boxes(boxes)
+        self.view_2d.set_masks(masks)
+        self.view_2d.set_obbs([])
+        self.view_2d.set_arrows([])
+
+        fps = self._live_frames / max(time.time() - self._live_t0, 1e-6)
+        self.main.statusBar().showMessage(f"▶ 실시간 검출: {len(detections)}개, 추론 {infer_ms:.0f}ms, {fps:.1f} fps  (로봇 이동 잠김)")
+
+    def _redraw_detection_overlays(self):
+        """정식 캡처의 검출 결과를 2D 오버레이에 다시 그린다 (실시간 종료 후 복귀용)."""
+        cmap = self._object_color_map()
+        boxes, masks = [], []
+        for i, det in enumerate(self.detections):
+            color = cmap.get(i)
+            if color is None:
+                continue
+            boxes.append((*det["bbox"], color, f"{det['class_name']} {det['confidence']:.2f}", i))
+            if det.get("mask") is not None:
+                masks.append((det["mask"], color, i))
+        self.view_2d.set_boxes(boxes)
+        self.view_2d.set_masks(masks)
+
+    def _motion_blocked_reason(self) -> Optional[str]:
+        """실시간 검출 중에는 로봇을 움직이지 않는다 (RobotControlMixin 훅)."""
+        if self._live_running:
+            return (
+                "SAM3 실시간 검출이 실행 중입니다.\n\n"
+                "화면이 프레임마다 바뀌므로 지금 이동하면 보이는 장면과 로봇이 가는 좌표가\n"
+                "어긋납니다. '⏹ 실시간 중지' 를 먼저 누르세요.\n\n"
+                "(비상정지는 잠금과 무관하게 항상 동작합니다)"
+            )
+        return None
 
     def _apply_detections(self, detections: List[Dict], source: str = "검출", infer_ms: Optional[float] = None):
         """검출 결과(공통 포맷) → ROI 필터 → 3D 포즈 → 2D/3D/테이블 갱신.
@@ -1615,6 +1780,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
     def _auto_start(self):
         """연속 픽 시작. 로봇이 자율로 반복 동작하므로 사전 검증 + 확인을 거친다."""
         if self._auto_running:
+            return
+        if not self._check_motion_allowed():  # 캡처/검출부터 시작하므로 _run_cycle 가드보다 먼저
             return
         if self.main.robot is None:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
@@ -2236,6 +2403,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
 
     def _execute_move(self):
         """선택된 객체의 위치로 로봇 이동 (큐에 모션 추가)"""
+        if not self._check_motion_allowed():
+            return
         if self.target_pose is None:
             QMessageBox.warning(self, "오류", "먼저 객체를 선택하세요")
             return

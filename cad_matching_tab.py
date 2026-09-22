@@ -2198,6 +2198,8 @@ class CADMatchingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # ---------------------------------------------------------
 
     def _execute_move(self):
+        if not self._check_motion_allowed():
+            return
         if self.target_pose is None:
             QMessageBox.warning(self, "오류", "객체를 먼저 선택하세요")
             return

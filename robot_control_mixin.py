@@ -55,6 +55,63 @@ class RobotControlMixin:
     SEQ_OBJECT_NOUN = "객체"
 
     # ============================================================
+    # 모션 잠금 — 로봇을 움직이면 안 되는 상태를 한 곳에서 막는다
+    # ============================================================
+    #
+    # 버튼 비활성화만으로는 부족하다: 단축키·시퀀스·타이머 콜백 등 버튼을 거치지 않는
+    # 경로가 있기 때문. 그래서 **모든 모션 진입점에서 _check_motion_allowed() 를
+    # 호출**하고(하드 가드), 버튼 비활성화는 "왜 안 눌리는지" 를 눈으로 알리는 보조 수단.
+
+    # 잠글 대상 = 로봇을 실제로 움직이거나 티칭을 바꾸는 버튼.
+    # 비상정지/해제와 큐 비우기는 **절대 넣지 않는다** (잠긴 상태에서도 멈출 수 있어야 함).
+    MOTION_BUTTONS = (
+        "btn_move",
+        "btn_move_home",
+        "btn_set_home",
+        "btn_move_place",
+        "btn_set_place",
+        "btn_pick_cycle",
+        "btn_start_seq",
+        "btn_add_obj_to_seq",
+        "btn_add_home_to_seq",
+        "btn_add_pick_to_seq",
+        "btn_auto_start",
+        "btn_start",  # 표면 추적의 경로 추적 시작
+    )
+
+    def _motion_blocked_reason(self) -> Optional[str]:
+        """모션을 막아야 하면 사유 문자열, 아니면 None. 탭이 오버라이드해 상황을 추가한다."""
+        return None
+
+    def _check_motion_allowed(self) -> bool:
+        """모션 진입점 맨 앞에서 호출. 막혀 있으면 사유를 띄우고 False."""
+        reason = self._motion_blocked_reason()
+        if reason:
+            QMessageBox.warning(self, "로봇 이동 잠김", reason)
+            return False
+        return True
+
+    def _set_motion_controls_enabled(self, enabled: bool):
+        """모션 버튼 일괄 잠금/해제.
+
+        해제할 때 무조건 setEnabled(True) 하면 **원래 비활성이어야 할 버튼까지 켜진다**
+        (로봇 미연결, 대상 미선택 등). 그래서 잠글 때 상태를 기억했다가 그대로 되돌린다.
+        """
+        if not enabled:
+            self._motion_btn_state = {}
+            for name in self.MOTION_BUTTONS:
+                btn = getattr(self, name, None)
+                if btn is not None:
+                    self._motion_btn_state[name] = btn.isEnabled()
+                    btn.setEnabled(False)
+            return
+        for name, was in getattr(self, "_motion_btn_state", {}).items():
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.setEnabled(was)
+        self._motion_btn_state = {}
+
+    # ============================================================
     # AUT 모드 안전 기능
     # ============================================================
 
@@ -617,6 +674,8 @@ class RobotControlMixin:
         return bool(getattr(self, "_cycle_active", False))
 
     def _run_cycle(self, steps: List[Tuple], done_msg: str = "사이클 완료", on_done=None, on_abort=None):
+        if not self._check_motion_allowed():
+            return
         if self._cycle_is_running():
             QMessageBox.warning(self, "실행 중", "이미 사이클이 실행 중입니다")
             return
@@ -1029,6 +1088,8 @@ class RobotControlMixin:
         Z 안전 검증은 티칭된 Cartesian z 로 동일하게 수행한다 (관절 목표여도 도착점의
         높이는 티칭 때의 z 그대로이므로).
         """
+        if not self._check_motion_allowed():
+            return
         if self.main.robot is None:
             QMessageBox.warning(self, "오류", "로봇이 연결되지 않았습니다")
             return
