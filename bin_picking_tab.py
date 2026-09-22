@@ -520,6 +520,12 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._live_timer = None
         self._live_frames = 0
         self._live_t0 = 0.0
+        # 실시간 영상 녹화 상태 (mp4). writer 가 None 이면 녹화 안 함.
+        self._rec_writer = None
+        self._rec_path = None
+        self._rec_t0 = 0.0
+        self._rec_written = 0  # 지금까지 기록한 **출력 프레임** 수 (실시간 보정에 사용)
+        self._rec_size = None
 
         # Bin Box (작업 볼륨) — 충돌 방지용. **로봇 base 좌표계**에 정의한다.
         #   빈의 벽은 중력(base Z)에 평행하고 그리퍼 자세도 base 이므로 base 가 자연스럽다.
@@ -694,6 +700,18 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             "멈추면 마지막 정식 캡처 화면으로 돌아간다. 비상정지는 잠금과 무관하게 항상 동작."
         )
         sam3_row.addWidget(self.btn_live_sam3)
+
+        # 실시간 영상 저장 — 실시간 검출을 켠 뒤에만 보인다 (그 전에는 녹화할 대상이 없음)
+        self.btn_save_live = QPushButton("⏺ 실시간 영상 저장")
+        self.btn_save_live.clicked.connect(self._start_live_recording)
+        self.btn_save_live.setStyleSheet("background-color: #455A64; color: white; font-weight: bold;")
+        self.btn_save_live.setToolTip(
+            "누른 시점부터 화면(오버레이 포함)을 mp4 로 녹화한다. 파일 이름을 먼저 묻고,\n"
+            "'⏹ 실시간 중지' 를 누르면 그때까지의 영상을 저장하고 끝낸다.\n"
+            "data/debug_captures/ 에 저장 ('원본 저장'·'렌더링 저장' 과 같은 폴더)."
+        )
+        self.btn_save_live.setVisible(False)
+        sam3_row.addWidget(self.btn_save_live)
 
         sam3_row.addStretch()  # 남는 공간은 오른쪽으로 (입력창 늘어나지 않게)
 
@@ -1369,6 +1387,72 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
     # 옮기는 게 위험하기 때문(docs/cad_matching.md 9.5 참고). 대신 QTimer 로 **한 틱에
     # 한 프레임만** 처리하고 이벤트 루프로 돌아가므로, 프레임 사이에 정지·비상정지가 먹는다.
 
+    # 녹화 출력 프레임레이트. SAM3 추론 속도(보통 수 fps)는 프레임마다 들쭉날쭉하고
+    # VideoWriter 는 생성 시점에 fps 가 고정되므로, **고정 fps 로 쓰되 경과 시간만큼
+    # 프레임을 복제**해 재생 속도를 실시간과 맞춘다 (_rec_write 참고).
+    REC_FPS = 15
+    REC_MAX_DUP = 60  # 한 프레임이 메꿀 수 있는 최대 출력 프레임 (멈칫할 때 폭주 방지)
+
+    def _start_live_recording(self):
+        """'실시간 영상 저장' — 파일 이름을 먼저 묻고, 그 시점부터 녹화를 시작한다."""
+        if self._rec_writer is not None:
+            QMessageBox.information(self, "녹화 중", f"이미 녹화 중입니다.\n\n{self._rec_path}")
+            return
+        canvas = self.view_2d._make_overlay_image()
+        if canvas is None:
+            QMessageBox.warning(self, "오류", "녹화할 화면이 없습니다 (실시간 검출을 먼저 시작하세요)")
+            return
+        h, w = canvas.shape[:2]
+        path = self.main.ask_debug_filename("실시간 영상", "live", "mp4", f"해상도 {w}×{h}, {self.REC_FPS}fps")
+        if path is None:
+            return
+
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), self.REC_FPS, (w, h))
+        if not writer.isOpened():
+            QMessageBox.critical(self, "오류", f"영상 파일을 열지 못했습니다:\n{path}")
+            return
+        self._rec_writer = writer
+        self._rec_path = path
+        self._rec_size = (w, h)
+        self._rec_t0 = time.time()
+        self._rec_written = 0
+        self.btn_save_live.setText("⏺ 녹화 중...")
+        self.btn_save_live.setEnabled(False)
+        self.main.statusBar().showMessage(f"⏺ 녹화 시작: {path.name} — '⏹ 실시간 중지' 를 누르면 저장됩니다")
+        logger.info(f"실시간 영상 녹화 시작: {path} ({w}×{h}, {self.REC_FPS}fps)")
+
+    def _rec_write(self, canvas):
+        """현재 화면 한 장을 녹화에 반영. 경과 시간만큼 복제해 **재생 속도를 실시간과 맞춘다**.
+
+        검출이 느려 1초에 3장만 들어와도, 출력 15fps 기준으로 부족한 만큼 같은 그림을
+        채워 넣어 30초 촬영이 30초 영상이 되게 한다 (안 그러면 5배 빨리 감긴 영상이 된다).
+        """
+        if self._rec_writer is None:
+            return
+        if (canvas.shape[1], canvas.shape[0]) != self._rec_size:
+            return  # 해상도가 바뀌면 컨테이너와 안 맞으므로 건너뛴다 (정상 상황에선 없음)
+        target = int((time.time() - self._rec_t0) * self.REC_FPS) + 1
+        n = min(max(1, target - self._rec_written), self.REC_MAX_DUP)
+        for _ in range(n):
+            self._rec_writer.write(canvas)
+        self._rec_written += n
+
+    def _stop_live_recording(self) -> Optional[str]:
+        """녹화 종료 + 파일 마무리. 저장된 경로 문자열(없으면 None)."""
+        if self._rec_writer is None:
+            return None
+        self._rec_writer.release()
+        path, frames = self._rec_path, self._rec_written
+        secs = frames / float(self.REC_FPS)
+        self._rec_writer = None
+        self._rec_path = None
+        self._rec_size = None
+        self._rec_written = 0
+        self.btn_save_live.setText("⏺ 실시간 영상 저장")
+        self.btn_save_live.setEnabled(True)
+        logger.info(f"실시간 영상 저장: {path} ({frames}프레임, {secs:.1f}초)")
+        return f"{path}\n\n{frames}프레임 · 약 {secs:.1f}초 · {self.REC_FPS}fps"
+
     def _toggle_live_sam3(self):
         if self._live_running:
             self._live_stop("사용자 중지")
@@ -1398,6 +1482,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.btn_live_sam3.setStyleSheet("background-color: #C62828; color: white; font-weight: bold;")
         self.btn_capture.setEnabled(False)
         self.btn_detect_sam3.setEnabled(False)
+        self.btn_save_live.setVisible(True)  # 실시간 중에만 녹화할 수 있다
         if self._live_timer is None:
             self._live_timer = QTimer(self)
             self._live_timer.timeout.connect(self._live_tick)
@@ -1411,7 +1496,9 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._live_running = False
         if self._live_timer is not None:
             self._live_timer.stop()
+        saved = self._stop_live_recording()  # 녹화 중이었으면 여기서 파일이 완성된다
         self._set_motion_controls_enabled(True)  # 잠글 때 기억해 둔 상태로 복원
+        self.btn_save_live.setVisible(False)
         self.btn_live_sam3.setText("▶ SAM3 실시간 검출")
         self.btn_live_sam3.setStyleSheet("background-color: #AD1457; color: white; font-weight: bold;")
         self.btn_capture.setEnabled(True)
@@ -1425,6 +1512,8 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         fps = self._live_frames / max(time.time() - self._live_t0, 1e-6)
         self.main.statusBar().showMessage(f"⏹ SAM3 실시간 검출 {reason} — {self._live_frames}프레임, 평균 {fps:.1f} fps. 로봇 이동 잠금 해제")
         logger.info(f"SAM3 실시간 검출 종료({reason}): {self._live_frames}프레임, {fps:.1f} fps")
+        if saved:
+            QMessageBox.information(self, "영상 저장 완료", saved)
 
     def _live_tick(self):
         """한 프레임: 캡처 → SAM3 → 2D 오버레이. 실패하면 깔끔히 멈춘다."""
@@ -1469,9 +1558,18 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.view_2d.set_obbs([])
         self.view_2d.set_arrows([])
 
+        # 녹화 중이면 **오버레이까지 그려진 화면**을 그대로 기록 ('렌더링 저장' 과 같은 그림)
+        if self._rec_writer is not None:
+            canvas = self.view_2d._make_overlay_image()
+            if canvas is not None:
+                self._rec_write(canvas)
+
         fps = self._live_frames / max(time.time() - self._live_t0, 1e-6)
         roi_part = f" (ROI 밖 {n_raw - len(detections)}개 제외)" if n_raw != len(detections) else ""
-        self.main.statusBar().showMessage(f"▶ 실시간 검출: {len(detections)}개{roi_part}, 추론 {infer_ms:.0f}ms, {fps:.1f} fps  (로봇 이동 잠김)")
+        rec_part = f"  ⏺ 녹화 {self._rec_written / float(self.REC_FPS):.0f}초" if self._rec_writer is not None else ""
+        self.main.statusBar().showMessage(
+            f"▶ 실시간 검출: {len(detections)}개{roi_part}, 추론 {infer_ms:.0f}ms, {fps:.1f} fps  (로봇 이동 잠김){rec_part}"
+        )
 
     def _redraw_detection_overlays(self):
         """정식 캡처의 검출 결과를 2D 오버레이에 다시 그린다 (실시간 종료 후 복귀용)."""

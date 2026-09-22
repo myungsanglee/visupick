@@ -1166,32 +1166,31 @@ class VisuPickApp(QMainWindow):
                 return view
         return None
 
-    def _save_image_to_debug(self, img, kind: str, prefix: str):
-        """[개발용] 이미지를 data/debug_captures/ 에 PNG 로 저장 (파일 이름 사용자 지정).
+    def ask_debug_filename(self, kind: str, prefix: str, ext: str, detail: str = ""):
+        """data/debug_captures/ 에 저장할 파일 경로를 사용자에게 묻는다. 취소하면 None.
 
-        '원본 저장'과 '렌더링 저장'이 공유하는 저장 절차:
-        이름 입력 → 확장자 보정 → 경로 구분자 차단 → 덮어쓰기 확인 → 기록.
+        '원본 저장'·'렌더링 저장'·'실시간 영상 저장'이 **같은 절차**를 쓰도록 한 곳에 모았다:
+        이름 입력 → 경로 구분자 차단(하위 폴더 생성 방지) → 확장자 보정 → 덮어쓰기 확인.
         """
-        h, w = img.shape[:2]
         out_dir = Path(__file__).resolve().parent / "data" / "debug_captures"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        default_name = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         tab_name = self.tabs.tabText(self.tabs.currentIndex())
+        parts = [f"탭: {tab_name}"] + ([detail] if detail else []) + [f"{ext.upper()} 저장"]
         name, ok = QInputDialog.getText(
             self,
             f"{kind} 저장",
-            f"파일 이름 (탭: {tab_name}, 해상도 {w}×{h}, PNG 저장):",
-            text=default_name,
+            f"파일 이름 ({', '.join(parts)}):",
+            text=f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         )
         if not ok:
-            return
+            return None
         name = Path(name.strip()).name  # 경로 구분자 제거 (하위 폴더 생성 방지)
         if not name:
             QMessageBox.warning(self, "오류", "파일 이름이 비어 있습니다")
-            return
-        if not name.lower().endswith(".png"):
-            name += ".png"
+            return None
+        if not name.lower().endswith(f".{ext.lower()}"):
+            name += f".{ext.lower()}"
 
         path = out_dir / name
         if path.exists():
@@ -1203,7 +1202,15 @@ class VisuPickApp(QMainWindow):
                 QMessageBox.No,
             )
             if ret != QMessageBox.Yes:
-                return
+                return None
+        return path
+
+    def _save_image_to_debug(self, img, kind: str, prefix: str):
+        """[개발용] 이미지를 data/debug_captures/ 에 PNG 로 저장 (파일 이름 사용자 지정)."""
+        h, w = img.shape[:2]
+        path = self.ask_debug_filename(kind, prefix, "png", f"해상도 {w}×{h}")
+        if path is None:
+            return
 
         if not cv2.imwrite(str(path), img):
             QMessageBox.critical(self, "오류", f"저장 실패:\n{path}")

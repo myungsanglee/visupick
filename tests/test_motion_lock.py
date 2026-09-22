@@ -19,8 +19,11 @@ def tab(qapp):
 
     import main as M
 
+    # 모든 모달 대화상자를 막는다. 특히 information 은 '영상 저장 완료' 안내로 뜨는데,
+    # 패치하지 않으면 테스트가 창을 띄운 채 영원히 멈춘다.
     QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
     QMessageBox.critical = staticmethod(lambda *a, **k: QMessageBox.Ok)
+    QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
 
     w = M.VisuPickApp()
@@ -256,3 +259,96 @@ class TestRoiFilterShared:
         monkeypatch.setattr(tab, "roi_3d", {"x_min": 0, "x_max": 1, "y_min": 0, "y_max": 1, "z_min": 0, "z_max": 1})
         dets = [{"bbox": [10.0, 10.0, 50.0, 50.0], "confidence": 0.9, "class_id": 0, "class_name": "in", "mask": None}]
         assert len(tab._filter_by_roi(dets)) == 1  # 깊이로 걸리지 않음
+
+
+class TestLiveRecording:
+    """실시간 영상 저장 (mp4) — 데모 촬영용.
+
+    '실시간 영상 저장' 버튼은 실시간 검출 중에만 보이고, 누르면 그 시점부터 녹화한다.
+    '실시간 중지' 를 누르면 파일이 완성된다.
+    """
+
+    def test_button_hidden_until_live(self, tab):
+        assert not tab.btn_save_live.isVisibleTo(tab)
+        tab._toggle_live_sam3()
+        try:
+            assert tab.btn_save_live.isVisibleTo(tab)
+        finally:
+            tab._toggle_live_sam3()
+        assert not tab.btn_save_live.isVisibleTo(tab)
+
+    def test_records_playable_mp4(self, tab, tmp_path, monkeypatch):
+        import time
+
+        import cv2
+
+        out = tmp_path / "demo.mp4"
+        monkeypatch.setattr(tab.main, "ask_debug_filename", lambda *a, **k: out)
+
+        tab._toggle_live_sam3()
+        try:
+            tab._live_tick()  # 녹화 전 프레임
+            tab._start_live_recording()
+            assert tab._rec_writer is not None
+            t0 = time.time()
+            while time.time() - t0 < 0.5:
+                tab._live_tick()
+                time.sleep(0.02)
+        finally:
+            tab._toggle_live_sam3()  # 중지 → 저장
+
+        assert tab._rec_writer is None, "중지 후에도 writer 가 남아 있음"
+        assert out.exists() and out.stat().st_size > 0
+
+        cap = cv2.VideoCapture(str(out))
+        try:
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        assert ok and frame is not None, "mp4 디코드 실패"
+        assert n > 0 and abs(fps - tab.REC_FPS) < 1
+
+    def test_playback_duration_matches_wall_clock(self, tab, tmp_path, monkeypatch):
+        """검출이 느려도 재생 속도가 실시간과 맞아야 한다 (부족한 만큼 프레임 복제)."""
+        import time
+
+        out = tmp_path / "speed.mp4"
+        monkeypatch.setattr(tab.main, "ask_debug_filename", lambda *a, **k: out)
+        tab._toggle_live_sam3()
+        try:
+            tab._start_live_recording()
+            t0 = time.time()
+            for _ in range(3):  # 프레임은 3장뿐이지만 실제로는 0.6초가 흐른다
+                tab._live_tick()
+                time.sleep(0.2)
+            elapsed = time.time() - t0
+        finally:
+            tab._toggle_live_sam3()
+        # 출력 프레임 수 / REC_FPS ≈ 실제 경과 시간
+        assert tab._live_frames == 3
+        # (중지 시점에 _rec_written 이 0 으로 리셋되므로 파일에서 길이를 읽는다)
+        import cv2
+
+        cap = cv2.VideoCapture(str(out))
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        assert abs(n / tab.REC_FPS - elapsed) < 0.35, f"재생 {n / tab.REC_FPS:.2f}초 vs 실제 {elapsed:.2f}초"
+
+    def test_stop_without_recording_is_harmless(self, tab):
+        tab._toggle_live_sam3()
+        tab._toggle_live_sam3()  # 녹화 안 켜고 중지
+        assert tab._rec_writer is None
+
+    def test_double_start_does_not_replace_file(self, tab, tmp_path, monkeypatch):
+        out = tmp_path / "once.mp4"
+        monkeypatch.setattr(tab.main, "ask_debug_filename", lambda *a, **k: out)
+        tab._toggle_live_sam3()
+        try:
+            tab._start_live_recording()
+            first = tab._rec_path
+            tab._start_live_recording()  # 이미 녹화 중 — 무시돼야 한다
+            assert tab._rec_path is first
+        finally:
+            tab._toggle_live_sam3()
