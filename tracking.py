@@ -363,38 +363,40 @@ class ByteTrackTracker(ObjectTracker):
         high = [d for d in detections if float(d.get("confidence", 1.0)) >= self.high_thresh]
         low = [d for d in detections if self.low_thresh <= float(d.get("confidence", 1.0)) < self.high_thresh]
 
-        # 1단계: 모든 트랙 × 고신뢰 검출.
-        # 주의: m1/un_t 는 **이 시점의 self.tracks 인덱스**다. 아래에서 새 트랙을 append
-        # 하기 전에 rest 를 떠 두어야 인덱스가 어긋나지 않는다.
+        # (검출, 트랙) 짝은 **매칭하는 그 자리에서** 모은다.
+        # 인덱스(m1 의 ti)를 들고 있다가 나중에 self.tracks[ti] 로 되찾으면 안 된다 —
+        # 아래에서 새 트랙을 append 하고 오래된 트랙을 prune 하면서 목록이 바뀌어,
+        # 엉뚱한 트랙을 가리키거나 IndexError 가 난다 (실제로 났던 버그).
+        matched: List[Tuple[Dict, Track]] = []
+
+        # 1단계: 모든 트랙 × 고신뢰 검출
         m1, un_t, un_hi = _assign(self._cost(self.tracks, high), 1.0 - self.match_thresh)
         for ti, di in m1:
-            self.tracks[ti].update(high[di])
+            track = self.tracks[ti]
+            track.update(high[di])
+            matched.append((high[di], track))
 
         # 2단계: 아직 못 이은 트랙 × 저신뢰 검출 (여기서는 새 트랙을 만들지 않는다)
         rest = [self.tracks[i] for i in un_t]
-        m2: List[Tuple[int, int]] = []
         if self.second_stage and low:
             m2, _, _ = _assign(self._cost(rest, low), 1.0 - self.second_match_thresh)
             for ti, di in m2:
                 rest[ti].update(low[di])
+                matched.append((low[di], rest[ti]))
 
         # 남은 고신뢰 검출 → 새 트랙. min_hits=1 이면 이 프레임에 바로 확정되므로
-        # 결과에도 포함돼야 한다 → 짝을 같이 모아 둔다.
-        born: List[Tuple[Dict, Track]] = []
+        # 결과에도 포함돼야 한다.
         for di in un_hi:
-            tr = Track(high[di], self.min_hits)
-            self.tracks.append(tr)
-            born.append((high[di], tr))
+            track = Track(high[di], self.min_hits)
+            self.tracks.append(track)
+            matched.append((high[di], track))
 
-        # 오래 못 본 트랙 정리
+        # 오래 못 본 트랙 정리. matched 는 **트랙 객체 참조**라 이 정리에 영향받지 않는다.
         self.tracks = [t for t in self.tracks if t.time_since_update <= self.max_age]
 
         # 결과: **이번 프레임에 실제로 매칭된** confirmed 트랙만 내보낸다.
         # 예측만으로 만든 유령 상자를 내보내면 화면에 없는 물체가 잡힌 것처럼 보인다.
         # 순서는 입력 검출 순서를 따른다 (색 팔레트·테이블 순서가 흔들리지 않게).
-        matched: List[Tuple[Dict, Track]] = [(high[di], self.tracks[ti]) for ti, di in m1]
-        matched += [(low[di], rest[ti]) for ti, di in m2]
-        matched += born
         order = {id(d): i for i, d in enumerate(detections)}
         matched.sort(key=lambda pair: order.get(id(pair[0]), 1 << 30))
 

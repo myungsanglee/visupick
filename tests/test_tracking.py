@@ -213,3 +213,36 @@ class TestSortIsSingleStage:
         assert SortTracker().second_stage is False
         assert ByteTrackTracker().second_stage is True
         assert BotSortTracker().second_stage is True
+
+
+@pytest.mark.parametrize("make", [SortTracker, ByteTrackTracker, BotSortTracker])
+class TestPruneDuringMatch:
+    """만료 트랙 정리가 같은 프레임의 매칭 결과를 망가뜨리지 않는지 (회귀 테스트).
+
+    실제로 났던 버그: 매칭 결과를 self.tracks 의 **인덱스**로 들고 있다가, 만료 트랙을
+    걷어내 목록이 짧아진 뒤에 그 인덱스로 되찾았다. 앞쪽 트랙이 사라지면 뒤쪽 인덱스가
+    한 칸씩 밀려 엉뚱한 트랙을 가리키고(= ID 뒤바뀜), 맨 뒤였다면 IndexError 로 터진다.
+    두 증상 모두 "앞 트랙이 만료되는 그 프레임에 뒤 트랙이 매칭된다"는 한 조건에서 나온다.
+    """
+
+    def test_expiring_first_track_does_not_break_later_ones(self, make):
+        max_age = 3
+        t = make(min_hits=2, max_age=max_age)
+
+        # 먼저 3개를 확정시킨다 → self.tracks = [A, B, C]
+        frames = [[det(10, 20), det(300, 20), det(600, 20)] for _ in range(3)]
+        res = run(t, frames)
+        a_id, b_id, c_id = (list(r)[0] for r in ({k: v for k, v in res[-1].items() if abs(v[0] - x) < 1} for x in (10, 300, 600)))
+
+        # A 만 사라지고 B·C 는 계속 잡힌다 → A 가 만료되는 프레임에 B·C 가 매칭된다
+        tail = [[det(300, 20), det(600, 20)] for _ in range(max_age + 3)]
+        res = run(t, tail)
+
+        # 만료 프레임을 실제로 지났는지 확인 (조건을 못 만들면 테스트가 무의미)
+        assert all(abs(tr.time_since_update) <= max_age for tr in t.tracks)
+        assert len(t.tracks) == 2, f"A 가 정리되지 않음: {len(t.tracks)}"
+
+        last = res[-1]
+        assert set(last) == {b_id, c_id}, f"ID 가 뒤바뀌거나 사라짐: {sorted(last)} != {sorted((b_id, c_id))}"
+        assert a_id not in last
+        assert abs(last[b_id][0] - 300) < 50 and abs(last[c_id][0] - 600) < 50, "ID 가 서로 뒤바뀜"
