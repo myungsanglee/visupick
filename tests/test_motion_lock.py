@@ -176,7 +176,8 @@ class TestLivePreviewIsSideEffectFree:
         assert live.pick_objects == before[2]
 
     def test_draws_overlays(self, live):
-        live._live_tick()
+        for _ in range(3):  # 트래커 확정 대기
+            live._live_tick()
         assert len(live.view_2d._overlay_boxes) == 1
         assert len(live.view_2d._overlay_masks) == 1
 
@@ -209,10 +210,11 @@ class TestLiveRespectsRoi:
         monkeypatch.setattr(t, "roi_3d", None)
         t._toggle_live_sam3()
         try:
-            t._live_tick()
+            for _ in range(3):  # 트래커가 ID 를 확정할 만큼 (min_hits)
+                t._live_tick()
             labels = [b[5] for b in t.view_2d._overlay_boxes]  # (x1,y1,x2,y2,color,label,idx)
             assert len(labels) == 1, f"ROI 밖 검출이 남음: {labels}"
-            assert labels[0].startswith("in")
+            assert " in " in f" {labels[0]} ", f"ROI 안 객체가 아님: {labels[0]}"  # 라벨은 "ID 1 in 0.90" 형태
         finally:
             t._toggle_live_sam3()
 
@@ -222,7 +224,8 @@ class TestLiveRespectsRoi:
         monkeypatch.setattr(t, "roi_2d", None)
         t._toggle_live_sam3()
         try:
-            t._live_tick()
+            for _ in range(3):
+                t._live_tick()
             assert len(t.view_2d._overlay_boxes) == 2
         finally:
             t._toggle_live_sam3()
@@ -234,7 +237,8 @@ class TestLiveRespectsRoi:
         monkeypatch.setattr(t, "roi_3d", None)
         t._toggle_live_sam3()
         try:
-            t._live_tick()
+            for _ in range(3):
+                t._live_tick()
             assert len(t.view_2d._overlay_boxes) == 0
         finally:
             t._toggle_live_sam3()
@@ -289,6 +293,8 @@ class TestLiveRecording:
         try:
             tab._live_tick()  # 녹화 전 프레임
             tab._start_live_recording()
+            assert tab._rec_path == out, "녹화가 예약되지 않음"
+            tab._live_tick()  # 첫 기록 프레임에서 writer 가 생성된다
             assert tab._rec_writer is not None
             t0 = time.time()
             while time.time() - t0 < 0.5:
@@ -339,7 +345,27 @@ class TestLiveRecording:
     def test_stop_without_recording_is_harmless(self, tab):
         tab._toggle_live_sam3()
         tab._toggle_live_sam3()  # 녹화 안 켜고 중지
-        assert tab._rec_writer is None
+        assert tab._rec_writer is None and tab._rec_path is None
+
+    def test_reserve_before_first_frame(self, tab, tmp_path, monkeypatch):
+        """최초 SAM3 모델 로드로 첫 프레임이 늦어도 녹화 예약은 받아야 한다.
+
+        예전에는 '녹화할 화면이 없습니다' 로 거절해, 로드 중에 누른 사용자가 영문을
+        모르게 됐다. 지금은 예약해 두고 첫 프레임에서 파일을 만든다.
+        """
+        out = tmp_path / "late.mp4"
+        monkeypatch.setattr(tab.main, "ask_debug_filename", lambda *a, **k: out)
+        tab.view_2d.set_image(None)  # 아직 화면 없음
+        tab._toggle_live_sam3()
+        try:
+            tab._start_live_recording()
+            assert tab._rec_path == out, "화면이 없다고 거절함"
+            assert tab._rec_writer is None, "프레임도 없는데 파일을 먼저 만듦"
+            tab._live_tick()
+            assert tab._rec_writer is not None
+        finally:
+            tab._toggle_live_sam3()
+        assert out.exists()
 
     def test_double_start_does_not_replace_file(self, tab, tmp_path, monkeypatch):
         out = tmp_path / "once.mp4"
@@ -349,6 +375,6 @@ class TestLiveRecording:
             tab._start_live_recording()
             first = tab._rec_path
             tab._start_live_recording()  # 이미 녹화 중 — 무시돼야 한다
-            assert tab._rec_path is first
+            assert tab._rec_path == first
         finally:
             tab._toggle_live_sam3()

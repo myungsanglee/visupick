@@ -62,7 +62,12 @@ OPENING_DEBUG = os.environ.get("VISUPICK_OPENING_DEBUG", "0") == "1"
 
 from calibration import tcp_to_homogeneous
 from kuka_robot import normalize_robot_mode, is_auto_mode
+
+# 검출 실패 예외는 **모듈 레벨**에서 import 한다 — 함수 안에서만 import 하면
+# except 절이 평가되는 시점(실제 예외 발생 시)에 NameError 가 난다.
+from object_detector import DetectorUnavailable, DetectorError
 from robot_control_mixin import RobotControlMixin
+from tracking import Track, create_tracker
 from vision_tab_mixin import VisionTabMixin
 from image_view import DraggableImageLabel
 from pointcloud_view import PointCloudView3D
@@ -526,6 +531,9 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._rec_t0 = 0.0
         self._rec_written = 0  # 지금까지 기록한 **출력 프레임** 수 (실시간 보정에 사용)
         self._rec_size = None
+        # 실시간 검출 결과를 프레임 사이로 이어 붙이는 트래커 (tracking.py — 검출기 비종속).
+        # 실시간 시작마다 새로 만든다: 이전 촬영의 트랙이 남아 ID 가 이어지면 안 되므로.
+        self._tracker = None
 
         # Bin Box (작업 볼륨) — 충돌 방지용. **로봇 base 좌표계**에 정의한다.
         #   빈의 벽은 중력(base Z)에 평행하고 그리퍼 자세도 base 이므로 base 가 자연스럽다.
@@ -1138,7 +1146,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self.main.statusBar().showMessage("객체 탐지 중...")
         QApplication.processEvents()
 
-        from object_detector import RFDetrDetector, DetectorUnavailable, DetectorError
+        from object_detector import RFDetrDetector
 
         # 검출기 캐싱 (엔진 로드는 비싸므로 1회만)
         if not hasattr(self, "_rfdetr"):
@@ -1394,32 +1402,29 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
     REC_MAX_DUP = 60  # 한 프레임이 메꿀 수 있는 최대 출력 프레임 (멈칫할 때 폭주 방지)
 
     def _start_live_recording(self):
-        """'실시간 영상 저장' — 파일 이름을 먼저 묻고, 그 시점부터 녹화를 시작한다."""
-        if self._rec_writer is not None:
+        """'실시간 영상 저장' — 파일 이름을 먼저 묻고, 그 시점부터 녹화를 예약한다.
+
+        실제 VideoWriter 는 **첫 프레임이 올 때** 만든다. 해상도를 알아야 컨테이너를 열 수
+        있는데, 최초 1회 SAM3 모델 로드가 수십 초 걸려 그 사이에 이 버튼을 누르면 아직
+        화면이 없기 때문 — 그때 "녹화할 화면이 없습니다" 로 거절하면 사용자는 영문을 모른다.
+        """
+        if self._rec_path is not None:
             QMessageBox.information(self, "녹화 중", f"이미 녹화 중입니다.\n\n{self._rec_path}")
             return
         canvas = self.view_2d._make_overlay_image()
-        if canvas is None:
-            QMessageBox.warning(self, "오류", "녹화할 화면이 없습니다 (실시간 검출을 먼저 시작하세요)")
-            return
-        h, w = canvas.shape[:2]
-        path = self.main.ask_debug_filename("실시간 영상", "live", "mp4", f"해상도 {w}×{h}, {self.REC_FPS}fps")
+        detail = f"해상도 {canvas.shape[1]}×{canvas.shape[0]}, " if canvas is not None else ""
+        path = self.main.ask_debug_filename("실시간 영상", "live", "mp4", f"{detail}{self.REC_FPS}fps")
         if path is None:
             return
-
-        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), self.REC_FPS, (w, h))
-        if not writer.isOpened():
-            QMessageBox.critical(self, "오류", f"영상 파일을 열지 못했습니다:\n{path}")
-            return
-        self._rec_writer = writer
         self._rec_path = path
-        self._rec_size = (w, h)
-        self._rec_t0 = time.time()
+        self._rec_writer = None  # 첫 프레임에서 생성
+        self._rec_size = None
         self._rec_written = 0
+        self._rec_t0 = 0.0
         self.btn_save_live.setText("⏺ 녹화 중...")
         self.btn_save_live.setEnabled(False)
-        self.main.statusBar().showMessage(f"⏺ 녹화 시작: {path.name} — '⏹ 실시간 중지' 를 누르면 저장됩니다")
-        logger.info(f"실시간 영상 녹화 시작: {path} ({w}×{h}, {self.REC_FPS}fps)")
+        self.main.statusBar().showMessage(f"⏺ 녹화 예약: {path.name} — '⏹ 실시간 중지' 를 누르면 저장됩니다")
+        logger.info(f"실시간 영상 녹화 시작: {path} ({self.REC_FPS}fps, 첫 프레임에서 파일 생성)")
 
     def _rec_write(self, canvas):
         """현재 화면 한 장을 녹화에 반영. 경과 시간만큼 복제해 **재생 속도를 실시간과 맞춘다**.
@@ -1427,9 +1432,21 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         검출이 느려 1초에 3장만 들어와도, 출력 15fps 기준으로 부족한 만큼 같은 그림을
         채워 넣어 30초 촬영이 30초 영상이 되게 한다 (안 그러면 5배 빨리 감긴 영상이 된다).
         """
-        if self._rec_writer is None:
+        if self._rec_path is None:
             return
-        if (canvas.shape[1], canvas.shape[0]) != self._rec_size:
+        h, w = canvas.shape[:2]
+        if self._rec_writer is None:  # 첫 프레임 — 이제 해상도를 알 수 있다
+            writer = cv2.VideoWriter(str(self._rec_path), cv2.VideoWriter_fourcc(*"mp4v"), self.REC_FPS, (w, h))
+            if not writer.isOpened():
+                QMessageBox.critical(self, "오류", f"영상 파일을 열지 못했습니다:\n{self._rec_path}")
+                self._rec_path = None
+                self.btn_save_live.setText("⏺ 실시간 영상 저장")
+                self.btn_save_live.setEnabled(True)
+                return
+            self._rec_writer = writer
+            self._rec_size = (w, h)
+            self._rec_t0 = time.time()
+        if (w, h) != self._rec_size:
             return  # 해상도가 바뀌면 컨테이너와 안 맞으므로 건너뛴다 (정상 상황에선 없음)
         target = int((time.time() - self._rec_t0) * self.REC_FPS) + 1
         n = min(max(1, target - self._rec_written), self.REC_MAX_DUP)
@@ -1438,18 +1455,23 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._rec_written += n
 
     def _stop_live_recording(self) -> Optional[str]:
-        """녹화 종료 + 파일 마무리. 저장된 경로 문자열(없으면 None)."""
-        if self._rec_writer is None:
+        """녹화 종료 + 파일 마무리. 저장 결과 문자열(녹화 안 했으면 None)."""
+        if self._rec_path is None:
             return None
-        self._rec_writer.release()
         path, frames = self._rec_path, self._rec_written
-        secs = frames / float(self.REC_FPS)
+        had_writer = self._rec_writer is not None
+        if had_writer:
+            self._rec_writer.release()
         self._rec_writer = None
         self._rec_path = None
         self._rec_size = None
         self._rec_written = 0
         self.btn_save_live.setText("⏺ 실시간 영상 저장")
         self.btn_save_live.setEnabled(True)
+        if not had_writer:  # 프레임이 한 장도 안 온 채 중지 — 파일이 만들어지지 않았다
+            logger.info(f"실시간 영상: 기록된 프레임이 없어 저장하지 않음 ({path})")
+            return f"기록된 프레임이 없어 저장하지 않았습니다.\n\n{path}"
+        secs = frames / float(self.REC_FPS)
         logger.info(f"실시간 영상 저장: {path} ({frames}프레임, {secs:.1f}초)")
         return f"{path}\n\n{frames}프레임 · 약 {secs:.1f}초 · {self.REC_FPS}fps"
 
@@ -1477,6 +1499,11 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         self._live_running = True
         self._live_frames = 0
         self._live_t0 = time.time()
+        Track.reset_ids()  # 촬영마다 ID 를 1 부터 — 데모 영상에 큰 번호가 뜨지 않게
+        # 고정 카메라라 CMC 는 끈 채로. min_hits=2 — 실시간은 보통 수 fps 라 기본값 3 이면
+        # 물체가 화면에 나온 뒤 ID 가 붙기까지 1초쯤 걸려 데모 영상에서 답답하다. 2 면
+        # 한 프레임짜리 깜빡임 오검출은 걸러내면서 거의 바로 표시된다.
+        self._tracker = create_tracker("botsort", min_hits=2)
         self._set_motion_controls_enabled(False)  # 로봇 이동 잠금 (비상정지는 유지)
         self.btn_live_sam3.setText("⏹ 실시간 중지")
         self.btn_live_sam3.setStyleSheet("background-color: #C62828; color: white; font-weight: bold;")
@@ -1497,6 +1524,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         if self._live_timer is not None:
             self._live_timer.stop()
         saved = self._stop_live_recording()  # 녹화 중이었으면 여기서 파일이 완성된다
+        self._tracker = None
         self._set_motion_controls_enabled(True)  # 잠글 때 기억해 둔 상태로 복원
         self.btn_save_live.setVisible(False)
         self.btn_live_sam3.setText("▶ SAM3 실시간 검출")
@@ -1535,6 +1563,10 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
             # 깊이 밴드(2차 게이트)는 자동 생략되고 2D 사각형 게이트만 적용된다.
             n_raw = len(detections)
             detections = self._filter_by_roi(detections)
+            # ROI 로 거른 **뒤에** 추적한다 — 작업 영역 밖 물체에 번호를 주면 ID 가 낭비되고,
+            # 영역을 들락거릴 때마다 트랙이 생겼다 사라진다.
+            if self._tracker is not None:
+                detections = self._tracker.update(detections, frame=image)
         except (DetectorUnavailable, DetectorError) as e:
             self._live_stop("검출 오류")
             QMessageBox.critical(self, "오류", str(e))
@@ -1549,24 +1581,29 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         colors = self._OBJ_COLORS
         boxes, masks = [], []
         for i, det in enumerate(detections):
-            color = colors[i % len(colors)]
-            boxes.append((*det["bbox"], color, f"{det['class_name']} {det['confidence']:.2f}", i))
+            tid = det.get("track_id")
+            # **색과 번호를 track_id 로 고른다** — 등장 순서로 고르면 검출 순서가 바뀔 때마다
+            # 같은 물체의 색·번호가 깜빡인다. ID 기준이면 한 물체가 촬영 내내 동일하다.
+            # 2D 뷰가 라벨 앞에 "#번호" 를 붙이므로 여기서 "ID n" 을 또 쓰지 않는다.
+            key = tid if tid is not None else i
+            color = colors[key % len(colors)]
+            boxes.append((*det["bbox"], color, f"{det['class_name']} {det['confidence']:.2f}", key))
             if det.get("mask") is not None:
-                masks.append((det["mask"], color, i))
+                masks.append((det["mask"], color, key))
         self.view_2d.set_boxes(boxes)
         self.view_2d.set_masks(masks)
         self.view_2d.set_obbs([])
         self.view_2d.set_arrows([])
 
         # 녹화 중이면 **오버레이까지 그려진 화면**을 그대로 기록 ('렌더링 저장' 과 같은 그림)
-        if self._rec_writer is not None:
+        if self._rec_path is not None:
             canvas = self.view_2d._make_overlay_image()
             if canvas is not None:
                 self._rec_write(canvas)
 
         fps = self._live_frames / max(time.time() - self._live_t0, 1e-6)
         roi_part = f" (ROI 밖 {n_raw - len(detections)}개 제외)" if n_raw != len(detections) else ""
-        rec_part = f"  ⏺ 녹화 {self._rec_written / float(self.REC_FPS):.0f}초" if self._rec_writer is not None else ""
+        rec_part = f"  ⏺ 녹화 {self._rec_written / float(self.REC_FPS):.0f}초" if self._rec_path is not None else ""
         self.main.statusBar().showMessage(
             f"▶ 실시간 검출: {len(detections)}개{roi_part}, 추론 {infer_ms:.0f}ms, {fps:.1f} fps  (로봇 이동 잠김){rec_part}"
         )

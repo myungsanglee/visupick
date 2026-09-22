@@ -40,3 +40,12 @@ pyrealsense2>=2.54
 # 주의 3: SAM3 pyproject 가 런타임 의존성 일부를 누락함 → 아래를 별도 설치해야 import 됨:
 #   pip install einops pycocotools psutil hydra-core omegaconf timm huggingface_hub ftfy iopath
 pytest  # 순수 모듈(calibration/opening_analysis/cad_registration/line_tracking) 테스트용
+
+# --- 객체 추적 (tracking.py) ---
+# 추가 설치 필요 없음 — scipy(헝가리안 할당) + numpy + opencv 만 쓴다.
+# ⚠️ roboflow/trackers 는 **설치하지 말 것**. 실제로 설치해 확인한 결과:
+#   1) trackers 가 numpy>=2.0.2 를 요구하는데 SAM 3 는 numpy<2 라 정면 충돌.
+#   2) opencv-python 을 끌어와 opencv-contrib 와 섞이면서 cv2.ppf_match_3d(CAD 매칭 PPF)와
+#      cv2.ximgproc.thinning(표면 추적 선 검출)이 **동작하지 않게 된다**
+#      (hasattr 로는 True 라 안 걸리고, 실제 호출해야 드러난다).
+# 그래서 필요한 알고리즘(ByteTrack / BoT-SORT w/o ReID)만 tracking.py 에 직접 구현했다.
