@@ -11,7 +11,9 @@ SAM3·RF-DETR 뿐 아니라 앞으로 추가될 어떤 검출기든 그대로 �
                    "class_name":str, "mask":(H,W) bool 또는 없음}, ...]
     tracked    = tracker.update(detections, frame=None)   # 각 항목에 "track_id" 추가
 
-구현체:
+구현체 (셋 다 칼만 + IoU/GIoU + 헝가리안 할당을 공유하고, 연관 전략만 다르다):
+  - SortTracker      : 원조 SORT. **1단계 연관만** — 임계 이상 검출 전부를 한 번에 맞춘다.
+                       가장 단순해서 비교 기준(baseline)으로 쓴다.
   - ByteTrackTracker : 2단계 연관(고신뢰 → 저신뢰). 검출이 잠깐 흔들려도 트랙을 잇는다.
   - BotSortTracker   : ByteTrack + BoT-SORT 개선 (칼만 상태 x,y,w,h + GIoU + CMC 옵션).
                        **ReID(외형 임베딩)는 제외** — 딥러닝 모델이 필요하고, 우리처럼
@@ -301,6 +303,7 @@ class ByteTrackTracker(ObjectTracker):
         max_age: int = 30,
         min_hits: int = 3,
         class_aware: bool = True,
+        second_stage: bool = True,
     ):
         """
         high_thresh       : 이 이상이면 '고신뢰' — 1단계 연관 + 새 트랙 생성에 사용
@@ -316,6 +319,8 @@ class ByteTrackTracker(ObjectTracker):
         min_hits          : 몇 번 연속 잡혀야 ID 를 부여할지 (깜빡이는 오검출 배제)
         class_aware       : True 면 **다른 class 끼리는 매칭 금지** (쉼표 다중 프롬프트로
                             여러 종류를 검출할 때 종류가 뒤바뀌지 않게)
+        second_stage      : 저신뢰 검출로 한 번 더 잇는 2단계 연관 사용 여부.
+                            False 면 SORT 와 같은 1단계 연관이 된다 (SortTracker 가 이걸 끈다).
         """
         self.high_thresh = high_thresh
         self.low_thresh = low_thresh
@@ -324,6 +329,7 @@ class ByteTrackTracker(ObjectTracker):
         self.max_age = max_age
         self.min_hits = min_hits
         self.class_aware = class_aware
+        self.second_stage = second_stage
         self.tracks: List[Track] = []
 
     # -- 하위 클래스가 바꿔 끼우는 지점 --
@@ -366,9 +372,11 @@ class ByteTrackTracker(ObjectTracker):
 
         # 2단계: 아직 못 이은 트랙 × 저신뢰 검출 (여기서는 새 트랙을 만들지 않는다)
         rest = [self.tracks[i] for i in un_t]
-        m2, un_t2, _ = _assign(self._cost(rest, low), 1.0 - self.second_match_thresh)
-        for ti, di in m2:
-            rest[ti].update(low[di])
+        m2: List[Tuple[int, int]] = []
+        if self.second_stage and low:
+            m2, _, _ = _assign(self._cost(rest, low), 1.0 - self.second_match_thresh)
+            for ti, di in m2:
+                rest[ti].update(low[di])
 
         # 남은 고신뢰 검출 → 새 트랙. min_hits=1 이면 이 프레임에 바로 확정되므로
         # 결과에도 포함돼야 한다 → 짝을 같이 모아 둔다.
@@ -401,6 +409,29 @@ class ByteTrackTracker(ObjectTracker):
 
     def __repr__(self) -> str:
         return f"{self.name}(tracks={len(self.tracks)})"
+
+
+class SortTracker(ByteTrackTracker):
+    """SORT (Simple Online and Realtime Tracking) — 가장 단순한 형태.
+
+    칼만으로 예측하고 **IoU + 헝가리안으로 한 번만** 맞춘다. ByteTrack 의 저신뢰 2단계
+    연관이 없으므로, 검출이 한 프레임 흐려지면 그 트랙은 그냥 끊긴다(그 대신 저신뢰
+    오검출에 끌려갈 일도 없다). 세 구현 중 가장 보수적이라 **비교 기준**으로 쓴다.
+
+    원 논문은 검출을 신뢰도로 나누지 않으므로 high_thresh 를 낮게(0.1) 두어 사실상
+    모든 검출을 1단계에 넣는다.
+
+    ※ 칼만 상태는 이 모듈 공용인 (cx, cy, w, h) 를 쓴다 — 원 SORT 의 (u, v, s, r)
+      (중심+넓이+종횡비) 와는 다르다. 종횡비를 상수처럼 다루면 물체가 회전하거나 일부만
+      보일 때 폭·높이가 함께 왜곡되기 때문에, BoT-SORT 쪽 표현으로 통일했다.
+    """
+
+    name = "SORT"
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("high_thresh", 0.1)  # 신뢰도로 나누지 않음 = 전부 1단계
+        kwargs["second_stage"] = False
+        super().__init__(*args, **kwargs)
 
 
 class BotSortTracker(ByteTrackTracker):
@@ -469,7 +500,7 @@ class BotSortTracker(ByteTrackTracker):
             logger.warning(f"CMC 실패(무시하고 계속): {e}")
 
 
-TRACKERS = {"bytetrack": ByteTrackTracker, "botsort": BotSortTracker}
+TRACKERS = {"sort": SortTracker, "bytetrack": ByteTrackTracker, "botsort": BotSortTracker}
 
 
 def create_tracker(name: str = "botsort", **kwargs) -> ObjectTracker:

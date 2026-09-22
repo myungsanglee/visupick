@@ -8,7 +8,7 @@
 import numpy as np
 import pytest
 
-from tracking import BotSortTracker, ByteTrackTracker, Track, create_tracker, giou_matrix, iou_matrix
+from tracking import BotSortTracker, ByteTrackTracker, SortTracker, Track, create_tracker, giou_matrix, iou_matrix
 
 
 def det(x, y, w=40, h=30, conf=0.9, cls=0, name="case"):
@@ -49,7 +49,7 @@ class TestGeometry:
         assert giou_matrix(np.array([[0, 0, 1, 1]]), np.zeros((0, 4))).shape == (1, 0)
 
 
-@pytest.mark.parametrize("make", [ByteTrackTracker, BotSortTracker])
+@pytest.mark.parametrize("make", [SortTracker, ByteTrackTracker, BotSortTracker])
 class TestIdentityAcrossFrames:
     def test_single_object_keeps_id(self, make):
         t = make(min_hits=2)
@@ -179,7 +179,7 @@ class TestContract:
 
 
 class TestFactory:
-    @pytest.mark.parametrize("name", ["botsort", "BoT-SORT", "bytetrack", "byte_track"])
+    @pytest.mark.parametrize("name", ["sort", "SORT", "botsort", "BoT-SORT", "bytetrack", "byte_track"])
     def test_create(self, name):
         assert create_tracker(name) is not None
 
@@ -191,3 +191,25 @@ class TestFactory:
         t = create_tracker()
         assert isinstance(t, BotSortTracker)
         assert t.use_cmc is False, "고정 카메라에서는 CMC 가 기본 꺼짐이어야 한다"
+
+
+class TestSortIsSingleStage:
+    """SORT 는 1단계 연관만 한다 — ByteTrack 과의 차이가 실제로 드러나야 한다."""
+
+    def test_low_conf_does_not_extend_track(self):
+        """저신뢰 검출로는 트랙을 잇지 않는다 (ByteTrack 은 잇는다)."""
+        t = SortTracker(min_hits=2, high_thresh=0.5)
+        t.update([det(10, 10, conf=0.9)])
+        t.update([det(14, 10, conf=0.9)])
+        assert t.update([det(18, 10, conf=0.3)]) == []
+
+    def test_bytetrack_does_extend_track(self):
+        t = ByteTrackTracker(min_hits=2, high_thresh=0.5, low_thresh=0.1)
+        t.update([det(10, 10, conf=0.9)])
+        t.update([det(14, 10, conf=0.9)])
+        assert t.update([det(18, 10, conf=0.3)]), "ByteTrack 은 저신뢰로도 이어야 한다"
+
+    def test_second_stage_flag(self):
+        assert SortTracker().second_stage is False
+        assert ByteTrackTracker().second_stage is True
+        assert BotSortTracker().second_stage is True
