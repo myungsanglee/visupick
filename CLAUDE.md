@@ -58,7 +58,7 @@ python main.py                 # 유일한 진입점 — GUI 실행
 - **캘리브레이션 방식은 카메라 종류를 따라간다**: Zivid → `pointcloud`, RealSense → `pnp`, `compare`는 자동 선택. 한 경로만 하드코딩하지 말 것.
 - **좌표/단위:** 위치는 mm, 각도는 KUKA `A B C` 오일러 도(deg). 동차 변환은 4×4 numpy. 변환은 반드시 `calibration.py` 헬퍼로만 한다.
 - **사용자 세션 데이터**는 `data/session_*/pose_NNN/`에 쌓인다 (gitignore 대상). `calibration_result.json` / `intrinsics.json` / `bin_box.json` / `grasp_config.json` / `teach_poses.json`(Home·놓기 티칭 위치)도 gitignore 대상 — 생성 산출물은 절대 커밋하지 않는다.
-- 알고리즘 심층 문서(한국어)는 [docs/](docs/)에 있다: `hand_eye_calibration.md`, `bin_picking.md`, `cad_matching.md`, `kuka_communication.md`. **알고리즘을 수정하기 전에 해당 문서를 먼저 읽는다.**
+- 알고리즘 심층 문서(한국어)는 [docs/](docs/)에 있다: `hand_eye_calibration.md`, `bin_picking.md`, `cad_matching.md`, `kuka_communication.md`. **알고리즘을 수정하기 전에 해당 문서를 먼저 읽는다.** 과거에 겪은 문제·원인·해결은 [docs/troubleshooting.md](docs/troubleshooting.md) 에 모여 있다 — 이상한 줄(예: KRL `WAIT SEC 0`)을 지우기 전에 먼저 확인하고, **버그·장애를 해결하면 같은 작업 안에서 사례를 추가한다**(증상→원인→진단→해결→검증→교훈, 맨 위 표에도 한 줄).
 - **문서 작성 규칙** (docs/ 학습 문서):
   - **이 분야를 처음 접하는 개발자** 기준으로 쓴다: 모든 도메인 용어(법선, 정합, PTP, descriptor…)는 첫 등장에서 정의하고, 코드가 "무엇을 하는지"만이 아니라 **왜 그렇게 작성했는지**를 설명하고, 핵심 수식은 결과만 제시하지 말고 유도하고, 개념마다 구체적인 `file:line` 코드 참조를 연결한다. 로봇/비전 배경이 전혀 없는 독자가 문서 + 코드만으로 흐름을 따라갈 수 있어야 한다.
   - **문서가 설명하는 코드를 수정하면, 같은 작업 안에서 그 문서도 갱신한다** — UI 흐름, 계약(KRL 변수, I/O 매핑), 알고리즘 파라미터, 함수명 등. **낡은 문서는 버그로 취급한다.**

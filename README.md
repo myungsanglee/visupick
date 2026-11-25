@@ -199,6 +199,7 @@ visupick/
 │   ├── cad_matching.md          # CAD 6D pose 매칭(PPF 전체장면 등) 학습 문서
 │   ├── surface_tracking.md      # 표면 추적(검은 선 → 법선 정렬 이동) 학습 문서
 │   ├── kuka_communication.md    # KUKA 통신 + KRL(진공 포함) 설계 학습 문서
+│   ├── troubleshooting.md       # 개발 중 겪은 문제·원인·해결 기록
 │   └── research_transparent_case_binpicking.md  # 투명 케이스 비전 조사 보고서
 ├── data/                        # (gitignore) 사용자 캡처/세션 데이터
 ├── requirements.txt
@@ -246,6 +247,7 @@ visupick/
 - **[docs/cad_matching.md](docs/cad_matching.md)** — CAD 기반 6D pose / 매칭 알고리즘 4종(FPFH·PPF·전체장면 PPF) / DBSCAN·평면 제거 / Grasp 3D 설정 / 멀티 인스턴스·속도 튜닝
 - **[docs/surface_tracking.md](docs/surface_tracking.md)** — 검은 선 검출(threshold·thinning) / skeleton path tracing / 3D 거리 샘플링 / 법선 자세 + offset / KRL 큐 동적 채움
 - **[docs/kuka_communication.md](docs/kuka_communication.md)** — C3Bridge 프로토콜 / 메시지 포맷 / KRL 20슬롯 모션 큐 / 진공 인터럽트 계약 / Python ↔ KRL 흐름 / 비상정지 + RESUME / RobotControlMixin
+- **[docs/troubleshooting.md](docs/troubleshooting.md)** — 개발 중 겪은 문제·원인·해결 기록 (하드웨어/네트워크, 로봇 모션·안전, 비전 알고리즘, 의존성·리팩터링)
 - **[docs/research_transparent_case_binpicking.md](docs/research_transparent_case_binpicking.md)** — 투명 화장품 케이스 빈피킹 비전 기술 조사 보고서
 
 ---
