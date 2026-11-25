@@ -1154,10 +1154,17 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         try:
             detections, infer_ms = self._rfdetr.detect(self.current_image, self.conf_spin.value())
         except (DetectorUnavailable, DetectorError) as e:
-            QMessageBox.critical(self, "오류", str(e))
+            self._show_detector_error(e)
             return
 
         self._apply_detections(detections, "검출", infer_ms=infer_ms)
+
+    def _show_detector_error(self, e: Exception):
+        """검출기 예외 알림. GPU 메모리 부족은 제목을 따로 달아 원인을 바로 알 수 있게 한다
+        (안내문 — 누가 GPU 를 쓰는지·해결 방법 — 은 object_detector 가 만들어 둔다)."""
+        title = getattr(e, "title", "오류")
+        self.main.statusBar().showMessage(f"검출 실패: {title}")
+        QMessageBox.critical(self, title, str(e))
 
     def _sam3_detect(self, image_bgr):
         """SAM3 추론 1회 → (detections, infer_ms). 단발 검출과 실시간 루프가 공유한다.
@@ -1194,7 +1201,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
         try:
             detections, infer_ms = self._sam3_detect(self.current_image)
         except (DetectorUnavailable, DetectorError) as e:
-            QMessageBox.critical(self, "오류", str(e))
+            self._show_detector_error(e)
             return
 
         if not detections:
@@ -1569,7 +1576,7 @@ class BinPickingTab(VisionTabMixin, RobotControlMixin, QWidget):
                 detections = self._tracker.update(detections, frame=image)
         except (DetectorUnavailable, DetectorError) as e:
             self._live_stop("검출 오류")
-            QMessageBox.critical(self, "오류", str(e))
+            self._show_detector_error(e)
             return
         except Exception as e:
             logger.exception("실시간 검출 실패")

@@ -99,6 +99,18 @@ RF-DETR 은 학습된 클래스만 검출한다. 학습 없이 임의 객체를 
 
 > SAM 3 는 무겁다(수억 파라미터, GPU 권장, 이미지당 초 단위). 실시간 사이클보다는 다품종·비정형 객체를 학습 없이 잡아야 할 때 유용.
 
+#### GPU 메모리 부족 알림
+
+**OOM(Out Of Memory, 메모리 부족)** 은 모델을 GPU에 올리거나 추론할 때 필요한 메모리를 확보하지 못해 생기는 오류다. 이 PC의 GPU는 **다른 사용자와 같이 쓴다.** 예를 들어 다른 계정이 vLLM 같은 LLM 서버를 띄우면, vLLM은 기본 설정에서 GPU 메모리의 약 90%를 미리 잡아 둔다. 그러면 VisuPick 코드에 문제가 없어도 SAM3를 올릴 자리가 남지 않는다. 예전에는 이때 PyTorch의 `CUDA out of memory` traceback만 떠서 원인을 알기 어려웠다.
+
+그래서 검출기 모듈이 OOM을 따로 구분한다([object_detector.py](../object_detector.py)).
+
+- `is_gpu_oom(exc)` — 예외가 OOM인지 판별한다. **torch를 import 하지 않고** 예외 타입 이름(`OutOfMemoryError`)과 메시지 문구(`out of memory`, `CUDA_ERROR_OUT_OF_MEMORY`)만 본다. RF-DETR(TensorRT) 경로는 torch 없이도 돌기 때문에, 판별 로직이 torch에 의존하면 안 된다.
+- `raise_if_gpu_oom(exc, 모델명, "로드"/"추론")` — 두 검출기의 **모델 로드**와 **추론** `except` 블록 네 곳에서 호출한다. OOM이면 먼저 이 프로세스가 캐싱해 둔 GPU 메모리를 반납한다(`torch.cuda.empty_cache`). 이어서 `nvidia-smi`로 GPU별 여유 메모리와 **GPU를 쓰는 프로세스(PID·소유 계정·사용량)** 를 조회한 뒤 `DetectorOutOfMemory`로 바꿔 올린다. OOM이 아니면 아무 일도 하지 않아 원래 오류 처리가 그대로 진행된다.
+- `DetectorOutOfMemory`는 `DetectorError`의 하위 클래스다. 그래서 탭의 기존 `except (DetectorUnavailable, DetectorError)` 핸들러가 코드 변경 없이 그대로 잡는다. 탭의 `_show_detector_error()`는 예외에 `title` 속성이 있으면 그 값(`GPU 메모리 부족`)을 다이얼로그 제목으로 쓴다. 단발 SAM3 검출, RF-DETR 검출, 실시간 검출(정지 후 알림), 연속 픽 모두 같은 알림이 뜬다.
+- 안내문은 순수 함수 `format_gpu_oom_message()`가 만든다. 메모리를 많이 쓰는 프로세스부터 나열하고, 이 앱 자신의 PID에는 `← 이 프로그램`을 붙인다. 그래서 "누가 메모리를 쓰고 있는지"가 바로 보인다.
+- **앱을 다시 시작할 필요는 없다.** 로드에 실패하면 `_processor`/`_impl`이 `None`으로 남는다. 따라서 메모리가 빈 뒤 버튼을 다시 누르면 다음 `detect()`가 모델을 새로 로드한다.
+
 ### 3.2.1 SAM3 실시간 검출 (데모 영상 촬영용)
 
 2행의 **"▶ SAM3 실시간 검출"** 버튼은 `캡처 → SAM3 → 2D 표시`를 반복해 인식 장면을 **영상처럼** 보여준다. 빈 픽킹 동작에는 쓰이지 않는 **데모 촬영 전용** 기능이다. 다시 누르면 멈춘다.

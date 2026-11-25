@@ -46,3 +46,54 @@ class TestDedupeOverlaps:
         a = det(0, 0, 100, 100, 0.9, "rectangle")
         b = det(60, 0, 160, 100, 0.8, "rectangle")  # IoU ≈ 0.25
         assert len(Sam3Detector.dedupe_overlaps([a, b])) == 2
+
+
+# ── GPU 메모리 부족 안내 ─────────────────────────────────────────────
+# 배경: 같은 PC 의 다른 사용자 작업(vLLM)이 GPU 를 선점해 SAM3 로드가 CUDA OOM 으로
+# 죽었는데, 원시 traceback 만 떠서 원인을 알 수 없었다.
+import pytest
+
+from object_detector import DetectorError, DetectorOutOfMemory, format_gpu_oom_message, is_gpu_oom, raise_if_gpu_oom
+
+
+class OutOfMemoryError(RuntimeError):
+    """torch.OutOfMemoryError 흉내 (이름으로 판별하므로 torch 불필요)."""
+
+
+class TestGpuOom:
+    def test_detects_torch_oom_by_type_name(self):
+        assert is_gpu_oom(OutOfMemoryError("whatever"))
+
+    def test_detects_by_message(self):
+        assert is_gpu_oom(RuntimeError("CUDA out of memory. Tried to allocate 42.00 MiB"))
+        assert is_gpu_oom(RuntimeError("cuMemAlloc failed: CUDA_ERROR_OUT_OF_MEMORY"))
+
+    def test_other_errors_pass_through(self):
+        assert not is_gpu_oom(ValueError("shape mismatch"))
+        raise_if_gpu_oom(ValueError("shape mismatch"), "SAM3", "추론")  # 아무 일 없어야 함
+
+    def test_oom_is_detector_error(self):
+        """기존 `except DetectorError` 핸들러가 그대로 잡아야 한다."""
+        with pytest.raises(DetectorError) as ei:
+            raise_if_gpu_oom(OutOfMemoryError("x"), "SAM3", "로드")
+        assert isinstance(ei.value, DetectorOutOfMemory)
+        assert ei.value.title == "GPU 메모리 부족"
+
+    def test_message_names_other_processes(self):
+        gpus = [{"index": 0, "name": "RTX A6000", "total_mib": 48530, "free_mib": 33}]
+        procs = [
+            {"pid": 100, "used_mib": 3256, "name": "python", "user": "robotegra"},
+            {"pid": 200, "used_mib": 44912, "name": "VLLM::EngineCore", "user": "lab"},
+        ]
+        msg = format_gpu_oom_message("SAM3", "로드", gpus, procs, own_pid=100)
+        assert "SAM3 모델을 로드하지 못했습니다" in msg
+        assert "여유 0.0 GiB" in msg
+        # 많이 쓰는 순 → 다른 사용자 프로세스가 먼저, 이 앱은 표시
+        assert msg.index("PID 200 [lab] VLLM::EngineCore — 43.9 GiB") < msg.index("PID 100")
+        assert "PID 100 [robotegra] python — 3.2 GiB  ← 이 프로그램" in msg
+        assert "다른 프로세스가 끝나기를" in msg
+
+    def test_message_without_nvidia_smi(self):
+        msg = format_gpu_oom_message("RF-DETR", "추론", [], [], own_pid=1)
+        assert "확인하지 못했습니다" in msg
+        assert "다른 프로세스가 끝나기를" not in msg

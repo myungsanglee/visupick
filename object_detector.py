@@ -45,6 +45,111 @@ class DetectorError(RuntimeError):
     """추론 실행 중 오류."""
 
 
+class DetectorOutOfMemory(DetectorError):
+    """GPU 메모리 부족으로 모델 로드/추론 실패.
+
+    DetectorError 의 하위 클래스라 기존 `except DetectorError` 도 그대로 잡는다.
+    메시지에는 **누가 GPU 를 차지하고 있는지**(nvidia-smi 조회)를 담는다 —
+    같은 PC 의 다른 사용자 작업(예: vLLM 서버)이 메모리를 선점하면 코드는 멀쩡해도
+    SAM3 가 안 올라가는데, 원시 CUDA traceback 만으로는 사용자가 원인을 알 수 없었다.
+    """
+
+    title = "GPU 메모리 부족"
+
+
+def is_gpu_oom(exc: BaseException) -> bool:
+    """예외가 GPU 메모리 부족인지 판별 (torch / TensorRT / pycuda 공통).
+
+    torch 를 import 하지 않고 이름·문구로 판별한다 — RF-DETR(TensorRT) 경로는
+    torch 없이 돌 수 있고, 이 함수는 순수 테스트 대상이기도 하다.
+    """
+    if type(exc).__name__ == "OutOfMemoryError":  # torch.OutOfMemoryError / torch.cuda.OutOfMemoryError
+        return True
+    msg = str(exc).lower()
+    return any(k in msg for k in ("out of memory", "cuda_error_out_of_memory", "cudaerrormemoryallocation"))
+
+
+def _query_gpu_usage() -> Tuple[List[Dict], List[Dict]]:
+    """nvidia-smi 로 (GPU 목록, GPU 사용 프로세스 목록) 조회. 실패하면 ([], []).
+
+    GPU: {index, name, total_mib, free_mib}, 프로세스: {pid, used_mib, name, user}.
+    프로세스 소유자는 /proc/<pid> 소유 uid 로 구한다 (다른 사용자 작업인지 알려주려고).
+    """
+    import subprocess
+
+    def run(args):
+        out = subprocess.run(["nvidia-smi", *args, "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3)
+        return [[c.strip() for c in line.split(",")] for line in out.stdout.strip().splitlines() if line.strip()]
+
+    gpus, procs = [], []
+    try:
+        for idx, name, total, free in run(["--query-gpu=index,name,memory.total,memory.free"]):
+            gpus.append({"index": int(idx), "name": name, "total_mib": float(total), "free_mib": float(free)})
+        for pid, used, pname in run(["--query-compute-apps=pid,used_memory,process_name"]):
+            user = "?"
+            try:
+                import pwd
+
+                user = pwd.getpwuid(os.stat(f"/proc/{pid}").st_uid).pw_name
+            except Exception:
+                pass
+            procs.append({"pid": int(pid), "used_mib": float(used), "name": pname, "user": user})
+    except Exception as e:  # nvidia-smi 없음/타임아웃/파싱 실패 — 안내문만 짧아진다
+        logger.debug("nvidia-smi 조회 실패: %s", e)
+    return gpus, procs
+
+
+def format_gpu_oom_message(model_name: str, stage: str, gpus: List[Dict], procs: List[Dict], own_pid: int) -> str:
+    """GPU 메모리 부족 안내문 (순수 함수 — 테스트 대상).
+
+    stage: "로드" / "추론". 메모리를 많이 쓰는 순으로 프로세스를 나열하고 이 앱은 표시해 준다.
+    """
+    gib = lambda mib: mib / 1024.0  # noqa: E731
+    lines = [f"GPU 메모리가 부족해서 {model_name} 모델을 {stage}하지 못했습니다.", ""]
+    for g in gpus:
+        lines.append(f"GPU {g['index']} ({g['name']}): 전체 {gib(g['total_mib']):.1f} GiB 중 여유 {gib(g['free_mib']):.1f} GiB")
+    if procs:
+        lines += ["", "GPU 메모리를 쓰는 프로세스:"]
+        for p in sorted(procs, key=lambda p: -p["used_mib"]):
+            mine = "  ← 이 프로그램" if p["pid"] == own_pid else ""
+            lines.append(f"  • PID {p['pid']} [{p['user']}] {p['name']} — {gib(p['used_mib']):.1f} GiB{mine}")
+    elif not gpus:
+        lines.append("(nvidia-smi 로 GPU 사용 현황을 확인하지 못했습니다)")
+    others = [p for p in procs if p["pid"] != own_pid]
+    lines += ["", "해결 방법:"]
+    if others:
+        lines.append("  • 위의 다른 프로세스가 끝나기를 기다리거나, 해당 사용자에게 종료/메모리 축소를 요청하세요.")
+    lines += [
+        "  • GPU 메모리가 비면 버튼을 다시 누르세요 (앱 재시작은 필요 없습니다).",
+        "  • 터미널에서 `nvidia-smi` 로 현재 사용량을 확인할 수 있습니다.",
+    ]
+    return "\n".join(lines)
+
+
+def _release_gpu_cache() -> None:
+    """OOM 후 이 프로세스가 캐싱해 둔 GPU 메모리를 반납 (best-effort)."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def raise_if_gpu_oom(exc: BaseException, model_name: str, stage: str) -> None:
+    """exc 가 GPU 메모리 부족이면 안내문을 담은 DetectorOutOfMemory 로 바꿔 올린다. 아니면 아무것도 안 함."""
+    if not is_gpu_oom(exc):
+        return
+    _release_gpu_cache()
+    gpus, procs = _query_gpu_usage()
+    logger.warning("%s %s 중 GPU 메모리 부족: %s", model_name, stage, exc)
+    raise DetectorOutOfMemory(format_gpu_oom_message(model_name, stage, gpus, procs, os.getpid())) from exc
+
+
 class ObjectDetector(ABC):
     """검출기 추상 인터페이스. 새 검출기는 이걸 상속해 detect() 를 구현한다."""
 
@@ -99,12 +204,16 @@ class RFDetrDetector(ObjectDetector):
             )
         if not os.path.exists(self.model_path):
             raise DetectorUnavailable(f"모델 파일 없음:\n{self.model_path}")
-        self._impl = Detector(
-            model_path=self.model_path,
-            model_name="rf-detr",
-            class_names=self.class_names,
-            conf_thresh=0.5,
-        )
+        try:
+            self._impl = Detector(
+                model_path=self.model_path,
+                model_name="rf-detr",
+                class_names=self.class_names,
+                conf_thresh=0.5,
+            )
+        except Exception as e:
+            raise_if_gpu_oom(e, self.name, "로드")
+            raise
 
     def detect(self, image_bgr: np.ndarray, conf_thresh: float, **kwargs) -> Tuple[List[Dict], float]:
         self._ensure_loaded()
@@ -114,6 +223,7 @@ class RFDetrDetector(ObjectDetector):
             _, result = self._impl.predict(image_bgr)
             infer_ms = (time.perf_counter() - t0) * 1000.0
         except Exception as e:
+            raise_if_gpu_oom(e, self.name, "추론")
             raise DetectorError(f"RF-DETR 추론 실패:\n{e}")
 
         detections: List[Dict] = []
@@ -212,7 +322,12 @@ class Sam3Detector(ObjectDetector):
                 "Meta 공식 repo(facebookresearch/sam3)를 설치하세요.\n"
                 "repo 가 pip 경로에 없으면 환경변수 SAM3_MODEL_DIR 로 repo 루트를 지정."
             )
-        self._processor = Sam3Processor(build_sam3_image_model())
+        try:
+            self._processor = Sam3Processor(build_sam3_image_model())
+        except Exception as e:
+            # 실패해도 _processor 는 None 으로 남으므로, 메모리가 비면 다음 detect() 가 다시 로드한다
+            raise_if_gpu_oom(e, self.name, "로드")
+            raise
 
     def detect(self, image_bgr: np.ndarray, conf_thresh: float, prompt: str = "", **kwargs) -> Tuple[List[Dict], float]:
         if not prompt:
@@ -244,6 +359,7 @@ class Sam3Detector(ObjectDetector):
                     per_prompt.append((p, self._to_numpy(output["masks"]), self._to_numpy(output["boxes"]), self._to_numpy(output["scores"])))
             infer_ms = (time.perf_counter() - t0) * 1000.0
         except Exception as e:
+            raise_if_gpu_oom(e, self.name, "추론")
             raise DetectorError(f"SAM3 추론 실패:\n{e}")
 
         detections: List[Dict] = []
